@@ -7,10 +7,13 @@ NAMESPACE=sys-argo-workflows
 .PHONY: get-upstream
 
 get-upstream:
-	mkdir -p cluster namespaced/server namespaced/controller
+	rm -rf cluster cluster/crds namespaced/server namespaced/controller
+	mkdir -p cluster cluster/crds namespaced/server namespaced/controller
 	curl -Ls https://github.com/argoproj/argo-workflows/releases/download/${VERSION}/namespace-install.yaml > /tmp/argo.yaml
 
-	yq e 'select(.kind == "CustomResourceDefinition")' /tmp/argo.yaml > cluster/crds.yaml
+	@for name in $$(yq e 'select(.kind == "CustomResourceDefinition") | .metadata.name' /tmp/argo.yaml | grep -v null | grep -v '^---'); do \
+		yq e "select(.kind == \"CustomResourceDefinition\" and .metadata.name == \"$$name\")" /tmp/argo.yaml > cluster/crds/$$(echo "$$name" | tr '[:upper:]' '[:lower:]').yaml; \
+	done
 
 	yq e 'select(.kind != "CustomResourceDefinition" and .kind != "ClusterRole" and .kind != "ClusterRoleBinding")' /tmp/argo.yaml > /tmp/_namespaced-all.yaml
 
