@@ -24,7 +24,6 @@ rules:
       - ""
     resources:
       - pods
-      - pods/exec
       - pods/log
     verbs:
       - get

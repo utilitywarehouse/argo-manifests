@@ -1,0 +1,141 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: remote-cluster-job-executor
+  namespace: sys-argo-workflows
+spec:
+  templates:
+    - name: execute-job
+      inputs:
+        parameters:
+          - name: cluster-name
+          - name: cluster-server
+          - name: ca-cert-url
+          - name: target-namespace
+
+          # Job template as inline yaml
+          - name: job-template
+            # User provides the entire job as YAML string
+            # Example:
+            # |
+            #   apiVersion: batch/v1
+            #   kind: Job
+            #   spec:
+            #     template:
+            #       spec:
+            #         restartPolicy: Never
+            #         containers:
+            #         - name: query
+            #           image: postgres:15
+            #           command: ["sh", "-c"]
+            #           args: ["echo \"Would query: SELECT NOW() with host=$DB_HOST\""]
+            #           env:
+            #           - name: DB_HOST
+            #             valueFrom:
+            #               secretKeyRef:
+            #                 name: db-secret
+            #                 key: host
+
+          # Optional
+          - name: timeout
+            value: "5m"
+          - name: teardown
+            value: "true"
+      outputs:
+        artifacts:
+          - name: result
+            path: /tmp/result.txt
+            archive:
+              none: {}
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/result.txt
+      volumes:
+        - name: cluster-tokens
+          secret:
+            secretName: cluster-tokens
+      script:
+        image: bitnami/kubectl:latest
+        volumeMounts:
+          - name: cluster-tokens
+            mountPath: /secrets
+        command: [sh]
+        source: |
+          set -e
+
+          CLUSTER={{inputs.parameters.cluster-name}}
+          CLUSTER_SERVER={{inputs.parameters.cluster-server}}
+          K8S_USER="workflow-remote-executor"
+          NAMESPACE={{inputs.parameters.target-namespace}}
+          TIMEOUT={{inputs.parameters.timeout}}
+          TEARDOWN={{inputs.parameters.teardown}}
+          WORKFLOW_NAME="{{workflow.name}}"
+          WORKFLOW_UID="{{workflow.uid}}"
+          POD_NAME="{{pod.name}}"
+          TEMPLATE_NAME=$(echo $POD_NAME | sed "s/^${WORKFLOW_NAME}-//")
+          JOB_NAME="{{steps.name}}-$TEMPLATE_NAME"
+
+          echo "========================================="
+          echo "CROSS-CLUSTER JOB EXECUTOR"
+          echo "========================================="
+          echo "Cluster: $CLUSTER"
+          echo "Namespace: $NAMESPACE"
+          echo ""
+
+          mkdir -p /tmp/certs/$CLUSTER
+          curl -sS {{inputs.parameters.ca-cert-url}} -o /tmp/certs/$CLUSTER/ca.pem
+
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl config set-credentials $K8S_USER --token="$(cat /secrets/${CLUSTER}-token)"
+          # unable to use locally
+          # kubectl config set-cluster $CLUSTER --server=$CLUSTER_SERVER --certificate-authority=/tmp/certs/$CLUSTER/ca.pem
+          kubectl config set-cluster $CLUSTER --server=$CLUSTER_SERVER --insecure-skip-tls-verify=true
+          kubectl config set-context $CLUSTER --cluster=$CLUSTER --user=$K8S_USER --namespace=$NAMESPACE
+          kubectl config use-context $CLUSTER
+
+          # Check namespace exists
+          echo "Checking namespace '$NAMESPACE'..."
+          if ! kubectl get namespace $NAMESPACE >/dev/null 2>&1; then
+            echo "ERROR: Namespace '$NAMESPACE' does not exist in cluster '$CLUSTER'"
+            echo ""
+            echo "Available namespaces:"
+            kubectl get namespaces --no-headers -o custom-columns=":metadata.name"
+            exit 1
+          fi
+          echo "✓ Namespace exists"
+          echo ""
+
+          # Build job manifest
+          echo "========================================="
+          echo "CREATING JOB"
+          echo "========================================="
+          cat > /tmp/job.yaml <<'JOBEOF'
+          {{inputs.parameters.job-template}}
+          JOBEOF
+
+          # Transform and create in one pipeline
+          kubectl create -f /tmp/job.yaml --dry-run=client -o yaml | \
+            sed "/^  generateName:/d" | \
+            sed "/^  name: \"\"/d" | \
+            sed "/^  namespace:.*/d" | \
+            sed "/^metadata:/a\  name: ${JOB_NAME}\n  namespace: ${NAMESPACE}\n  labels:\n    workflow-name: ${WORKFLOW_NAME}\n    workflow-uid: ${WORKFLOW_UID}" \
+            > /tmp/job-final.yaml
+
+          cat /tmp/job-final.yaml
+          kubectl create -f /tmp/job-final.yaml -n $NAMESPACE
+
+          echo "Cluster: $CLUSTER"
+          echo "Namespace: $NAMESPACE"
+          echo "Job: $JOB_NAME"
+          echo ""
+
+          echo "Waiting for completion..."
+          kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=$TIMEOUT
+
+          kubectl logs job/$JOB_NAME -n $NAMESPACE | tee /tmp/logs.txt
+          sed -n 's/^ARGO_RESULT_OUTPUT=//p' /tmp/logs.txt > /tmp/result.txt
+
+          [ "$TEARDOWN" = "true" ] && kubectl delete job/$JOB_NAME -n $NAMESPACE > /dev/null 2>&1
+
+          rm -rf /tmp/kubeconfig /tmp/certs

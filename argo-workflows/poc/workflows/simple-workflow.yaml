@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: poc-
+  namespace: sys-argo-workflows
+spec:
+  serviceAccountName: workflow-runner
+  arguments:
+    parameters:
+      - name: message
+        value: hello argo
+  entrypoint: argosay
+
+  templates:
+    - name: argosay
+      inputs:
+        parameters:
+          - name: message
+            value: "{{workflow.parameters.message}}"
+      container:
+        name: main
+        image: argoproj/argosay:v2
+        command:
+          - /argosay
+        args:
+          - echo
+          - "{{inputs.parameters.message}}"
+  ttlStrategy:
+    secondsAfterCompletion: 300
+    secondsAfterSuccess: 300
+    secondsAfterFailure: 600
+  podGC:
+    strategy: OnWorkflowCompletion

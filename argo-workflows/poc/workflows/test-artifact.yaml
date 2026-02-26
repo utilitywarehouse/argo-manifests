@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: test-artifact-
+  namespace: sys-argo-workflows
+spec:
+  serviceAccountName: workflow-runner
+  entrypoint: main
+  archiveLogs: true
+  templates:
+    - name: main
+      container:
+        image: alpine:latest
+        command: [sh, -c]
+        args:
+          - |
+            echo "Testing artifact storage"
+            echo "Line 1 of logs"
+            echo "Line 2 of logs"
+            echo "Line 3 of logs"
+            date
+            echo "This should be archived to MinIO"
+
+      outputs:
+        artifacts:
+          - name: test-output
+            path: /tmp/test.txt
+            archive:
+              none: {}
+            s3:
+              key: "{{workflow.name}}/test-output.txt"
