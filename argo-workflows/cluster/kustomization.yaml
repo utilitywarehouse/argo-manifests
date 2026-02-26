@@ -2,4 +2,11 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - crds
+  - upstream/crds/clusterworkflowtemplates.argoproj.io.yaml
+  - upstream/crds/cronworkflows.argoproj.io.yaml
+  - upstream/crds/workflowartifactgctasks.argoproj.io.yaml
+  - upstream/crds/workfloweventbindings.argoproj.io.yaml
+  - upstream/crds/workflows.argoproj.io.yaml
+  - upstream/crds/workflowtaskresults.argoproj.io.yaml
+  - upstream/crds/workflowtasksets.argoproj.io.yaml
+  - upstream/crds/workflowtemplates.argoproj.io.yaml
