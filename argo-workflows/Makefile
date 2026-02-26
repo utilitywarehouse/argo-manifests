@@ -3,10 +3,6 @@
 # https://github.com/argoproj/argo-workflows/releases
 VERSION=v4.0.1
 NAMESPACE=sys-argo-workflows
-GITHUB_TOKEN ?=
-CURL_AUTH = $(if $(GITHUB_TOKEN),-H "Authorization: token $(GITHUB_TOKEN)")
-PLUGINS = \
-  slack:argoproj-labs/argo-workflows-slack-executor-plugin:main:slack-executor-plugin-configmap.yaml
 
 .PHONY: get-upstream
 
@@ -34,26 +30,5 @@ get-upstream:
 		yq e "select(.kind == \"$$kind\")" /tmp/_namespaced-nonserver.yaml > namespaced/controller/upstream/$$(echo "$$kind" | tr '[:upper:]' '[:lower:]').yaml; \
 		if [ ! -s namespaced/controller/upstream/$$(echo "$$kind" | tr '[:upper:]' '[:lower:]').yaml ]; then \
 			rm namespaced/controller/upstream/$$(echo "$$kind" | tr '[:upper:]' '[:lower:]').yaml; \
-		fi; \
-	done
-
-
-
-.PHONY: get-upstream-plugins
-
-get-upstream-plugins:
-	rm -rf namespaced/plugins/upstream
-	mkdir -p namespaced/plugins/upstream
-	@for entry in $(PLUGINS); do \
-		name=$$(echo "$$entry" | cut -d':' -f1); \
-		repo=$$(echo "$$entry" | cut -d':' -f2-3); \
-		branch=$$(echo "$$entry" | cut -d':' -f4); \
-		file=$$(echo "$$entry" | cut -d':' -f5); \
-		echo "Fetching plugin: $$name ($$file from $$repo@$$branch)"; \
-		curl -Ls $(CURL_AUTH) "https://raw.githubusercontent.com/$$repo/$$branch/$$file" \
-			> namespaced/plugins/upstream/$$name-$$file; \
-		if [ ! -s namespaced/plugins/upstream/$$name-$$file ]; then \
-			echo "WARNING: $$name plugin download empty or failed"; \
-			rm -f namespaced/plugins/upstream/$$name-$$file; \
 		fi; \
 	done
