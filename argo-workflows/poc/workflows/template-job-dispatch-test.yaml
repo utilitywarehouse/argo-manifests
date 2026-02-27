@@ -1,0 +1,54 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: job-dispatch-
+  namespace: sys-argo-workflows
+spec:
+  serviceAccountName: workflow-runner
+  entrypoint: main
+
+  templates:
+    - name: main
+      steps:
+        - - name: query-minikube
+            templateRef:
+              name: local-cluster-job-executor
+              template: execute-job
+            arguments:
+              parameters:
+                - name: target-namespace
+                  value: test-namespace
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      template:
+                        spec:
+                          restartPolicy: Never
+                          containers:
+                            - name: task
+                              image: bitnami/kubectl:latest
+                              command: ["sh", "-c"]
+                              args:
+                                - |
+                                  NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+                                  POD=$(hostname)
+                                  
+                                  # Try to get cluster info (might fail if no RBAC)
+                                  CLUSTER=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "unknown")
+                                  NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}' 2>/dev/null || echo "unknown")
+                                  
+                                  # Always output valid JSON
+                                  RESULT=$(printf '{"cluster":"%s","node_ip":"%s","namespace":"%s","pod":"%s"}' "$CLUSTER" "$NODE_IP" "$NAMESPACE" "$POD")
+                                  
+                                  # Set ARGO_RESULT_OUTPUT (standard marker)
+                                  echo "ARGO_RESULT_OUTPUT=$(echo "$RESULT" | base64 -w0)"
+
+  ttlStrategy:
+    secondsAfterCompletion: 86400 # 1 day
+    secondsAfterSuccess: 86400
+    secondsAfterFailure: 86400
+
+  podGC:
+    strategy: OnWorkflowCompletion

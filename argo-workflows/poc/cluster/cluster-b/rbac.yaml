@@ -1,0 +1,72 @@
+# ServiceAccount that tokens are created for
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workflow-remote-executor
+  namespace: default
+  labels:
+    app: argo-workflows
+    component: remote-executor
+---
+# ClusterRole for remote job execution
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workflow-remote-executor
+  labels:
+    app: argo-workflows
+    component: remote-executor
+rules:
+  # Create and manage Jobs in any namespace
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+
+  # Get pod logs
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+
+  # Get pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Check namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+
+  # Read cluster information for verification
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+# ClusterRoleBinding: Token holder can execute jobs cluster-wide
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workflow-remote-executor-binding
+  labels:
+    app: argo-workflows
+    component: remote-executor
+subjects:
+  - kind: ServiceAccount
+    name: workflow-remote-executor
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: workflow-remote-executor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: workflow-remote-executor-token
+  namespace: default
+  annotations:
+    kubernetes.io/service-account.name: workflow-remote-executor
+  labels:
+    app: argo-workflows
+    component: remote-executor
+type: kubernetes.io/service-account-token

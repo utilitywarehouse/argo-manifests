@@ -1,0 +1,284 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: cross-cluster-dynamic-
+  namespace: sys-argo-workflows
+spec:
+  serviceAccountName: workflow-runner
+  entrypoint: main
+
+  templates:
+    - name: main
+      steps:
+        # Step 1: Run in minikube (local)
+        - - name: query-minikube
+            template: spawn-job-local
+            arguments:
+              parameters:
+                - name: target-namespace
+                  value: test-namespace
+                - name: image
+                  value: alpine:latest
+                - name: command
+                  value: '["sh", "-c"]'
+                - name: args
+                  value: '["echo \"RESULT-FROM-MINIKUBE\""]'
+
+        # Step 2: Run in minikube-b
+        - - name: process-minikube-b
+            template: spawn-job-remote
+            arguments:
+              parameters:
+                - name: cluster-name
+                  value: minikube-b
+                - name: cluster-server
+                  value: https://host.docker.internal:56256
+                - name: cert-server
+                  value: http://192.168.68.59:8888
+                - name: target-namespace
+                  value: b-namespace
+                - name: image
+                  value: alpine:latest
+                - name: command
+                  value: '["sh", "-c"]'
+                - name: args
+                  value: '["echo \"PROCESSED: {{steps.query-minikube.outputs.parameters.result}}\""]'
+
+        # Step 3: Run in minikube-c
+        - - name: validate-minikube-c
+            template: spawn-job-remote
+            arguments:
+              parameters:
+                - name: cluster-name
+                  value: minikube-c
+                - name: cluster-server
+                  value: https://host.docker.internal:56327
+                - name: cert-server
+                  value: http://192.168.68.59:8888
+                - name: target-namespace
+                  value: c-namespace
+                - name: image
+                  value: alpine:latest
+                - name: command
+                  value: '["sh", "-c"]'
+                - name: args
+                  value: '["echo \"VALIDATED: {{steps.process-minikube-b.outputs.parameters.result}}\""]'
+
+        # Step 4: Show final result
+        - - name: show-final
+            template: display-result
+            arguments:
+              parameters:
+                - name: result
+                  value: "{{steps.validate-minikube-c.outputs.parameters.result}}"
+
+    # Template: Local cluster job
+    - name: spawn-job-local
+      inputs:
+        parameters:
+          - name: target-namespace
+          - name: image
+          - name: command
+          - name: args
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/result.txt
+      script:
+        image: bitnami/kubectl:latest
+        command: [sh]
+        source: |
+          set -e
+
+          NAMESPACE={{inputs.parameters.target-namespace}}
+          JOB_NAME="{{pod.name}}"
+
+          echo "========================================="
+          echo "MINIKUBE (LOCAL CLUSTER)"
+          echo "========================================="
+          echo "Cluster: minikube"
+          echo "Namespace: $NAMESPACE"
+          echo "Job: $JOB_NAME"
+          echo ""
+
+          kubectl create -f - <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: $JOB_NAME
+            namespace: $NAMESPACE
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: task
+                  image: {{inputs.parameters.image}}
+                  command: {{inputs.parameters.command}}
+                  args: {{inputs.parameters.args}}
+          EOF
+
+          echo "Job created. Waiting for completion..."
+          kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=5m
+
+          echo ""
+          echo "Job output:"
+          echo "========================================="
+          kubectl logs job/$JOB_NAME -n $NAMESPACE | tee /tmp/output.txt
+          echo "========================================="
+
+          tail -n 1 /tmp/output.txt > /tmp/result.txt
+          kubectl delete job/$JOB_NAME -n $NAMESPACE
+
+    # Template: Remote cluster job (dynamically fetch certs)
+    - name: spawn-job-remote
+      inputs:
+        parameters:
+          - name: cluster-name
+          - name: cluster-server
+          - name: cert-server
+          - name: target-namespace
+          - name: image
+          - name: command
+          - name: args
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/result.txt
+      script:
+        image: bitnami/kubectl:latest
+        command: [sh]
+        source: |
+          set -e
+
+          CLUSTER={{inputs.parameters.cluster-name}}
+          SERVER={{inputs.parameters.cluster-server}}
+          CERT_SERVER={{inputs.parameters.cert-server}}
+          NAMESPACE={{inputs.parameters.target-namespace}}
+          JOB_NAME="{{pod.name}}"
+
+          echo "========================================="
+          echo "BUILDING KUBECONFIG FOR REMOTE CLUSTER"
+          echo "========================================="
+          echo "Cluster: $CLUSTER"
+          echo "Namespace: $NAMESPACE"
+          echo "Server: $SERVER"
+          echo "Cert Server: $CERT_SERVER"
+          echo ""
+
+          # Fetch certificates dynamically
+          echo "Fetching certificates from $CERT_SERVER..."
+          mkdir -p /tmp/certs
+
+          curl -sS --max-time 10 "$CERT_SERVER/$CLUSTER/ca.crt" -o /tmp/certs/ca.crt
+          curl -sS --max-time 10 "$CERT_SERVER/$CLUSTER/client.crt" -o /tmp/certs/client.crt
+          curl -sS --max-time 10 "$CERT_SERVER/$CLUSTER/client.key" -o /tmp/certs/client.key
+
+          # Verify files
+          for f in ca.crt client.crt client.key; do
+            if [ ! -f /tmp/certs/$f ]; then
+              echo "ERROR: Failed to fetch $f"
+              exit 1
+            fi
+            echo "✓ Fetched $f ($(wc -c < /tmp/certs/$f) bytes)"
+          done
+
+          echo ""
+
+          # Build kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+
+          kubectl config set-cluster $CLUSTER \
+            --server="$SERVER" \
+            --insecure-skip-tls-verify=true
+
+          kubectl config set-credentials $CLUSTER-user \
+            --client-certificate=/tmp/certs/client.crt \
+            --client-key=/tmp/certs/client.key \
+            --embed-certs=false
+
+          kubectl config set-context $CLUSTER \
+            --cluster=$CLUSTER \
+            --user=$CLUSTER-user \
+            --namespace=$NAMESPACE
+
+          kubectl config use-context $CLUSTER
+
+          echo "✓ Kubeconfig built"
+          echo ""
+
+          # Test connection
+          echo "Testing connection to $CLUSTER..."
+          kubectl cluster-info
+          echo ""
+
+          # Create job in remote cluster
+          echo "========================================="
+          echo "CREATING JOB IN REMOTE CLUSTER"
+          echo "========================================="
+          echo "Cluster: $CLUSTER"
+          echo "Namespace: $NAMESPACE"
+          echo "Job: $JOB_NAME"
+          echo ""
+
+          kubectl create -f - <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: $JOB_NAME
+            namespace: $NAMESPACE
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: task
+                  image: {{inputs.parameters.image}}
+                  command: {{inputs.parameters.command}}
+                  args: {{inputs.parameters.args}}
+          EOF
+
+          echo "Job created. Waiting for completion..."
+          kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=5m
+
+          echo ""
+          echo "Job output from $CLUSTER/$NAMESPACE:"
+          echo "========================================="
+          kubectl logs job/$JOB_NAME -n $NAMESPACE | tee /tmp/output.txt
+          echo "========================================="
+          echo ""
+
+          tail -n 1 /tmp/output.txt > /tmp/result.txt
+          echo "Result captured: $(cat /tmp/result.txt)"
+
+          kubectl delete job/$JOB_NAME -n $NAMESPACE
+
+          # Cleanup
+          rm -rf /tmp/kubeconfig /tmp/certs
+
+          echo "✓ Cleanup complete"
+
+    # Template: Display result
+    - name: display-result
+      inputs:
+        parameters:
+          - name: result
+      container:
+        image: alpine:latest
+        command: [sh, -c]
+        args:
+          - |
+            echo "========================================="
+            echo "FINAL RESULT"
+            echo "========================================="
+            echo "{{inputs.parameters.result}}"
+
+  ttlStrategy:
+    secondsAfterCompletion: 86400 # 1 day
+    secondsAfterSuccess: 86400
+    secondsAfterFailure: 86400
+
+  podGC:
+    strategy: OnWorkflowCompletion

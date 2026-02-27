@@ -1,0 +1,96 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: show-location-
+  namespace: sys-argo-workflows
+spec:
+  serviceAccountName: workflow-runner
+  entrypoint: main
+
+  templates:
+    - name: main
+      steps:
+        - - name: show-cluster-info
+            template: cluster-info
+        - - name: show-namespace-info
+            template: namespace-info
+        - - name: show-pod-details
+            template: pod-details
+
+    - name: cluster-info
+      script:
+        image: bitnami/kubectl:latest
+        command: [sh]
+        source: |
+          echo "========================================="
+          echo "CLUSTER INFORMATION"
+          echo "========================================="
+          echo ""
+
+          echo "Kubernetes API Server:"
+          kubectl cluster-info | head -1 || echo "Unable to get cluster info"
+
+          echo ""
+          echo "Cluster Version:"
+          kubectl version --short 2>/dev/null || kubectl version | grep Server || echo "Unable to get version"
+
+          echo ""
+          echo "Cluster Nodes:"
+          kubectl get nodes -o wide || echo "Unable to list nodes"
+
+          echo ""
+          echo "Current Context:"
+          kubectl config current-context 2>/dev/null || echo "Using in-cluster config"
+
+    - name: namespace-info
+      script:
+        image: alpine:latest
+        command: [sh]
+        source: |
+          echo "========================================="
+          echo "NAMESPACE INFORMATION"
+          echo "========================================="
+          echo ""
+
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+
+          echo "Running in Namespace: $NAMESPACE"
+          echo ""
+          echo "ServiceAccount Path:"
+          echo "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+    - name: pod-details
+      script:
+        image: bitnami/kubectl:latest
+        command: [sh]
+        source: |
+          echo "========================================="
+          echo "POD INFORMATION"
+          echo "========================================="
+          echo ""
+
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+          POD_NAME=$(hostname)
+
+          echo "Pod Name: $POD_NAME"
+          echo "Namespace: $NAMESPACE"
+          echo ""
+
+          echo "Pod Details:"
+          kubectl get pod $POD_NAME -n $NAMESPACE -o wide || echo "Unable to get pod details"
+
+          echo ""
+          echo "Running on Node:"
+          NODE=$(kubectl get pod $POD_NAME -n $NAMESPACE -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "unknown")
+          echo "$NODE"
+
+          echo ""
+          echo "Pod IP:"
+          POD_IP=$(kubectl get pod $POD_NAME -n $NAMESPACE -o jsonpath='{.status.podIP}' 2>/dev/null || echo "unknown")
+          echo "$POD_IP"
+
+  ttlStrategy:
+    secondsAfterCompletion: 300
+
+  podGC:
+    strategy: OnWorkflowCompletion
