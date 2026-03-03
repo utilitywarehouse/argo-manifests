@@ -1,1 +1,4 @@
-* @utilitywarehouse/quality-engineering
+# system
+*               @utilitywarehouse/quality-engineering
+/*/cluster      @utilitywarehouse/system
+/*/namespaced   @utilitywarehouse/system
