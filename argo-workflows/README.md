@@ -2,10 +2,13 @@
 
 ### Layout
 
-- **cluster**: base for cluster resources.
-- **namespaced**: base for namespaced resources.
+- **system/cluster**: Cluster-scoped manifests. Owned by system and qe teams.
+- **system/namespaced**: Namespaced manifests. Owned by system and qe teams.
+- **workflows/**: Entrypoint `WorkflowTemplate` definitions to be referenced by `Workflow`s submitted via Argo UI, this is in line with our [workflow restriction policy](https://argo-workflows.readthedocs.io/en/latest/workflow-restrictions/).
+- **workflows/templates/shared**: Shared execution units and reusable logic that all teams should use (i.e. common steps, notifications, utilities). Owned by qe.
+- **workflows/templates/<team>**: Execution units and reusable logic specific to the products, services, and systems owned by that team. Owned by the respective team.
 
-### Makefile
+### System
 
 - `make get-upstream`: gets the upstream manifests in a single file and splits it
   in to cluster and namespaced resources. when updating please manually check for
