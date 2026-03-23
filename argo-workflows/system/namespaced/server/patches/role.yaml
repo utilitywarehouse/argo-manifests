@@ -17,16 +17,28 @@ rules:
       - secrets
     verbs:
       - get
+
+  # to manage workflow pods
   - apiGroups:
       - ""
     resources:
       - pods
-      - pods/log
     verbs:
       - get
       - list
       - watch
       - delete
+
+  # to surface pod logs
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+      - list
+      - watch
+
   - apiGroups:
       - ""
     resources:
