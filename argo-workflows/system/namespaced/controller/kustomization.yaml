@@ -4,7 +4,7 @@ kind: Kustomization
 resources:
   - upstream/configmap.yaml
   - upstream/deployment.yaml
-  - upstream/priorityclass.yaml
+  # - upstream/priorityclass.yaml
   - upstream/role.yaml
   - upstream/rolebinding.yaml
   - upstream/serviceaccount.yaml
