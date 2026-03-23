@@ -2,7 +2,7 @@
 
 # https://github.com/argoproj/argo-workflows/releases
 VERSION=v4.0.1
-NAMESPACE=sys-argo-workflows
+NAMESPACE=qe-argo-workflows
 
 .PHONY: get-upstream
 

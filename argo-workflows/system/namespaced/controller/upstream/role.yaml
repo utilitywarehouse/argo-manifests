@@ -88,8 +88,6 @@ rules:
       - secrets
     verbs:
       - get
-    resourceNames:
-      - ops-kubeconfig
   - apiGroups:
       - argoproj.io
     resources:
