@@ -116,10 +116,6 @@ spec:
           kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=$TIMEOUT
 
           kubectl logs job/$JOB_NAME -n $NAMESPACE | tee /tmp/logs.txt
-          echo "========================================="
-          echo "JOB LOGS:"
-          cat /tmp/logs.txt
-          echo "========================================="
 
           # Use ARGO_RESULT_OUTPUT if set, otherwise fall back to full logs
           RESULT=$(sed -n 's/^ARGO_RESULT_OUTPUT=//p' /tmp/logs.txt)
