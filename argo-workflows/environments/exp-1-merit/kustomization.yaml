@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: qe-argo-workflows
+
+resources:
+  - ../../system/namespaced/controller
+  - ../../system/namespaced/server
+  - ../../workflows/templates/shared
+  - ingress.yaml
+
+patches:
+  - path: patches/argo-server-sa.yaml
+    target:
+      kind: ServiceAccount
+      name: argo-server
+  - path: patches/argo-server-deployment.yaml
+    target:
+      kind: Deployment
+      name: argo-server
+  - path: patches/workflow-controller-configmap.yaml
+    target:
+      kind: ConfigMap
+      name: workflow-controller-configmap
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: okta-sso-secret
+    envs:
+      - secrets/okta-sso-secret.env
+  - name: job-executor-tokens
+    envs:
+      - secrets/job-executor-tokens.env
+  - name: cluster-ca-certs
+    files:
+      - secrets/exp-1-aws-ca.crt

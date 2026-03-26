@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argo-server
+spec:
+  template:
+    metadata:
+      annotations:
+        uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+    spec:
+      serviceAccountName: argo-server
+      containers:
+        - name: argo-server
+          args:
+            - server
+            - --namespaced
+            - --auth-mode=server
+            # - --auth-mode=sso
+            - --secure=false
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 2746
+              scheme: HTTP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 2746
+              scheme: HTTP
