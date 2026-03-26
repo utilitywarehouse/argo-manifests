@@ -1,0 +1,39 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: test-artifact-upload-
+  namespace: qe-argo-workflows
+spec:
+  entrypoint: main
+  templates:
+    - name: main
+      steps:
+        - - name: generate
+            template: generate-artifact
+        - - name: consume
+            template: consume-artifact
+            arguments:
+              artifacts:
+                - name: message
+                  from: "{{steps.generate.outputs.artifacts.message}}"
+
+    - name: generate-artifact
+      container:
+        image: alpine:latest
+        command: [sh, -c]
+        args: ["echo 'hello from argo artifacts' > /tmp/message.txt"]
+      outputs:
+        artifacts:
+          - name: message
+            path: /tmp/message.txt
+            archive:
+              none: {}
+    - name: consume-artifact
+      inputs:
+        artifacts:
+          - name: message
+            path: /tmp/message.txt
+      container:
+        image: alpine:latest
+        command: [sh, -c]
+        args: ["cat /tmp/message.txt"]
