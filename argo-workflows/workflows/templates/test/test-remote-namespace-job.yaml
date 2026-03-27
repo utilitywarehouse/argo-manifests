@@ -13,8 +13,8 @@ spec:
         value: "https://elb.master.k8s.exp-1.aws.uw.systems"
       - name: target-namespace
         value: "sys-k6"
-      - name: debug
-        value: "false"
+      - name: log-level
+        value: "info"
       - name: job-template
         value: |
           apiVersion: batch/v1
@@ -44,6 +44,7 @@ spec:
           - name: cluster-name
           - name: cluster-server
           - name: target-namespace
+          - name: log-level
           - name: job-template
       steps:
         - - name: execute
@@ -58,5 +59,7 @@ spec:
                   value: "{{inputs.parameters.cluster-server}}"
                 - name: target-namespace
                   value: "{{inputs.parameters.target-namespace}}"
+                - name: log-level
+                  value: "{{inputs.parameters.log-level}}"
                 - name: job-template
                   value: "{{inputs.parameters.job-template}}"
