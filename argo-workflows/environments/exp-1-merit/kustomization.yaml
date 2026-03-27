@@ -18,6 +18,10 @@ patches:
     target:
       kind: Deployment
       name: argo-server
+  - path: patches/argo-role.yaml
+    target:
+      kind: Role
+      name: argo-role
 
 generatorOptions:
   disableNameSuffixHash: true

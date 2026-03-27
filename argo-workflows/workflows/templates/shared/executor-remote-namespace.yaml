@@ -43,7 +43,8 @@ spec:
           configMap:
             name: cluster-ca-certs
       container:
-        image: registry.uw.systems/dev-enablement/exec-kube:latest
+        image: registry.uw.systems/dev-enablement/exec-kube:feat-bq-exporter
+        command: [/exec-kube]
         env:
           - name: CLUSTER_NAME
             value: "{{inputs.parameters.cluster-name}}"
