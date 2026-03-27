@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: test-remote-namespace-job-executor
+  name: test-remote-namespace-job
   namespace: qe-argo-workflows
 spec:
   entrypoint: main
@@ -13,6 +13,8 @@ spec:
         value: "https://elb.master.k8s.exp-1.aws.uw.systems"
       - name: target-namespace
         value: "sys-k6"
+      - name: debug
+        value: "false"
       - name: job-template
         value: |
           apiVersion: batch/v1
@@ -46,7 +48,7 @@ spec:
       steps:
         - - name: execute
             templateRef:
-              name: remote-namespace-job-executor
+              name: executor-remote-namespace
               template: execute-job
             arguments:
               parameters:

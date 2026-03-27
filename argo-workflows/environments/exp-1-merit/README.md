@@ -8,7 +8,7 @@ UI: https://argo-workflows.exp-1.merit.uw.systems
 
 ## Remote Namespace Job Executor
 
-The `remote-namespace-job-executor` WorkflowTemplate allows workflows running in `qe-argo-workflows` to dispatch Kubernetes Jobs to namespaces on remote clusters.
+The `executor-remote-namespace` WorkflowTemplate allows workflows running in `qe-argo-workflows` to dispatch Kubernetes Jobs to namespaces on remote clusters.
 
 ### How it works
 
@@ -130,7 +130,7 @@ spec:
       steps:
         - - name: run-remote-job
             templateRef:
-              name: remote-namespace-job-executor
+              name: executor-remote-namespace
               template: execute-job
             arguments:
               parameters:

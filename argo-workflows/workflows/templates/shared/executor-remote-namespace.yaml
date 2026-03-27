@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: remote-namespace-job-executor
+  name: executor-remote-namespace
 spec:
   templates:
     - name: execute-job
@@ -15,10 +15,16 @@ spec:
             value: "5m"
           - name: teardown
             value: "true"
+          - name: debug
+            value: "false"
       outputs:
         artifacts:
           - name: result
             path: /tmp/result.txt
+            archive:
+              none: {}
+          - name: logs
+            path: /tmp/logs.txt
             archive:
               none: {}
         parameters:
@@ -49,6 +55,7 @@ spec:
           NAMESPACE={{inputs.parameters.target-namespace}}
           TIMEOUT={{inputs.parameters.timeout}}
           TEARDOWN={{inputs.parameters.teardown}}
+          DEBUG={{inputs.parameters.debug}}
           WORKFLOW_NAME="{{workflow.name}}"
           WORKFLOW_UID="{{workflow.uid}}"
           POD_NAME="{{pod.name}}"
@@ -57,42 +64,36 @@ spec:
           TOKEN_KEY="${CLUSTER}-${NAMESPACE}"
 
           touch /tmp/result.txt
+          touch /tmp/logs.txt
 
-          echo "========================================="
-          echo "REMOTE NAMESPACE JOB EXECUTOR"
-          echo "========================================="
+          log() { [ "$DEBUG" = "true" ] && echo "$@"; }
+
           echo "Cluster:   $CLUSTER"
           echo "Namespace: $NAMESPACE"
-          echo ""
+          echo "Job:       $JOB_NAME"
 
           export KUBECONFIG=/tmp/kubeconfig
           kubectl config set-credentials $K8S_USER \
-            --token="$(cat /secrets/tokens/$TOKEN_KEY)"
+            --token="$(cat /secrets/tokens/$TOKEN_KEY)" >/dev/null 2>&1
           kubectl config set-cluster $CLUSTER \
             --server=$CLUSTER_SERVER \
-            --certificate-authority=/certs/${CLUSTER}-ca.crt
+            --certificate-authority=/certs/${CLUSTER}-ca.crt >/dev/null 2>&1
           kubectl config set-context $CLUSTER \
             --cluster=$CLUSTER \
             --user=$K8S_USER \
-            --namespace=$NAMESPACE
-          kubectl config use-context $CLUSTER
+            --namespace=$NAMESPACE >/dev/null 2>&1
+          kubectl config use-context $CLUSTER >/dev/null 2>&1
 
           # Check namespace exists
-          echo "Checking namespace '$NAMESPACE'..."
           if ! kubectl get namespace $NAMESPACE >/dev/null 2>&1; then
             echo "ERROR: Namespace '$NAMESPACE' does not exist in cluster '$CLUSTER'"
-            echo ""
             echo "Available namespaces:"
             kubectl get namespaces --no-headers -o custom-columns=":metadata.name"
             exit 1
           fi
           echo "✓ Namespace exists"
-          echo ""
 
           # Build job manifest
-          echo "========================================="
-          echo "CREATING JOB"
-          echo "========================================="
           cat > /tmp/job.yaml <<'JOBEOF'
           {{inputs.parameters.job-template}}
           JOBEOF
@@ -104,18 +105,20 @@ spec:
             sed "/^metadata:/a\  name: ${JOB_NAME}\n  namespace: ${NAMESPACE}\n  labels:\n    workflow-name: ${WORKFLOW_NAME}\n    workflow-uid: ${WORKFLOW_UID}" \
             > /tmp/job-final.yaml
 
-          cat /tmp/job-final.yaml
-          kubectl create -f /tmp/job-final.yaml -n $NAMESPACE
+          log "Job manifest:"
+          log "$(cat /tmp/job-final.yaml)"
 
-          echo "Cluster:   $CLUSTER"
-          echo "Namespace: $NAMESPACE"
-          echo "Job:       $JOB_NAME"
-          echo ""
+          kubectl create -f /tmp/job-final.yaml -n $NAMESPACE >/dev/null 2>&1
+          echo "✓ Job created"
 
-          echo "Waiting for completion..."
-          kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=$TIMEOUT
+          echo "Waiting for completion (timeout: $TIMEOUT)..."
+          kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=$TIMEOUT >/dev/null 2>&1
+          echo "✓ Job completed"
 
-          kubectl logs job/$JOB_NAME -n $NAMESPACE | tee /tmp/logs.txt
+          kubectl logs job/$JOB_NAME -n $NAMESPACE > /tmp/logs.txt
+
+          log "Job logs:"
+          log "$(cat /tmp/logs.txt)"
 
           # Use ARGO_RESULT_OUTPUT if set, otherwise fall back to full logs
           RESULT=$(sed -n 's/^ARGO_RESULT_OUTPUT=//p' /tmp/logs.txt)
@@ -124,9 +127,9 @@ spec:
           else
             cp /tmp/logs.txt /tmp/result.txt
           fi
-          echo "RESULT:"
-          cat /tmp/result.txt
 
-          [ "$TEARDOWN" = "true" ] && kubectl delete job/$JOB_NAME -n $NAMESPACE > /dev/null 2>&1
+          echo "Result: $(cat /tmp/result.txt)"
+
+          [ "$TEARDOWN" = "true" ] && kubectl delete job/$JOB_NAME -n $NAMESPACE >/dev/null 2>&1 && echo "✓ Job cleaned up"
 
           rm -rf /tmp/kubeconfig

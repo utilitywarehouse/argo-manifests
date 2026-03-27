@@ -3,4 +3,4 @@ kind: Kustomization
 
 resources:
   - test-artifact-repository.yaml
-  - test-remote-namespace-job-executor.yaml
+  - test-remote-namespace-job.yaml
