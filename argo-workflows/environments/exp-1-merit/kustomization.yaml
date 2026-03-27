@@ -13,18 +13,10 @@ resources:
   - limitrange.yaml
 
 patches:
-  - path: patches/argo-server-sa.yaml
-    target:
-      kind: ServiceAccount
-      name: argo-server
   - path: patches/argo-server-deployment.yaml
     target:
       kind: Deployment
       name: argo-server
-  - path: patches/workflow-controller-configmap.yaml
-    target:
-      kind: ConfigMap
-      name: workflow-controller-configmap
 
 generatorOptions:
   disableNameSuffixHash: true

@@ -1,3 +1,4 @@
+# https://argo-workflows.readthedocs.io/en/latest/workflow-controller-configmap/
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,3 +18,9 @@ data:
       podMetadata:
         annotations:
           uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+      ttlStrategy:
+        secondsAfterCompletion: 3600
+        secondsAfterSuccess: 3600
+        secondsAfterFailure: 86400
+      podGC:
+        strategy: OnWorkflowCompletion
