@@ -27,6 +27,11 @@ data:
       volumes:
         - name: tmp
           emptyDir: {}
+      templateDefaults:
+        container:
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
 
   workflowRestrictions: |
     templateReferencing: Strict
@@ -55,9 +60,6 @@ data:
       readOnlyRootFilesystem: true
       runAsNonRoot: true
       runAsUser: 1000
-    volumeMounts:
-      - name: tmp
-        mountPath: /tmp
 
   # executor controls how the init and wait container should be customized
   executor: |
