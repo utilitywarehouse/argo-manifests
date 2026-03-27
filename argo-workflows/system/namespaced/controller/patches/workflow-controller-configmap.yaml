@@ -24,6 +24,8 @@ data:
         secondsAfterFailure: 86400
       podGC:
         strategy: OnWorkflowCompletion
+      securityContext:
+        fsGroup: 1000
       volumes:
         - name: tmp
           emptyDir: {}
