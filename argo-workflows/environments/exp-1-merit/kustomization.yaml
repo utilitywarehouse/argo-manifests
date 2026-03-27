@@ -8,6 +8,9 @@ resources:
   - ../../system/namespaced/server
   - ../../workflows/templates/shared
   - ingress.yaml
+  - auth.yaml
+  - argocd-app.yaml
+  - limitrange.yaml
 
 patches:
   - path: patches/argo-server-sa.yaml
@@ -32,6 +35,10 @@ configMapGenerator:
       - secrets/exp-1-aws-ca.crt
 
 secretGenerator:
+  - name: argocd-voodoobox-strongbox-keyring
+    type: Opaque
+    files:
+      - .strongbox_identity=secrets/argocd-voodoobox-strongbox-identity
   - name: okta-sso-secret
     envs:
       - secrets/okta-sso-secret.env
