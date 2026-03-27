@@ -18,7 +18,14 @@ patches:
     target:
       kind: Deployment
       name: argo-server
-  - path: patches/argo-role.yaml
+  - patch: |-
+      - op: add
+        path: /rules/-
+        value:
+          apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get"]
+          resourceNames: ["dockerhub-key"]
     target:
       kind: Role
       name: argo-role
