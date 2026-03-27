@@ -24,22 +24,20 @@ data:
         secondsAfterFailure: 86400
       podGC:
         strategy: OnWorkflowCompletion
+      volumes:
+        - name: tmp
+          emptyDir: {}
 
   workflowRestrictions: |
     templateReferencing: Strict
 
   parallelism: "10"
 
-  # Globally limits the rate at which pods are created.
-  # This is intended to mitigate flooding of the Kubernetes API server by workflows with a large amount of
-  # parallel nodes.
   resourceRateLimit: |
     limit: 10
     burst: 25
 
   # Defaults for main containers. These can be overridden by the template.
-  # <= v3.3 only `resources` are supported.
-  # >= v3.4 all fields are supported, including security context.
   mainContainer: |
     imagePullPolicy: IfNotPresent
     resources:
@@ -57,9 +55,11 @@ data:
       readOnlyRootFilesystem: true
       runAsNonRoot: true
       runAsUser: 1000
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
 
   # executor controls how the init and wait container should be customized
-  # (available since Argo v2.3)
   executor: |
     imagePullPolicy: IfNotPresent
     resources:
@@ -69,15 +69,3 @@ data:
       limits:
         cpu: 0.5
         memory: 512Mi
-    # args & env allows command line arguments and environment variables to be appended to the
-    # executor container and is mainly used for development/debugging purposes.
-    args:
-    - --loglevel
-    - debug
-    - --gloglevel
-    - "6"
-    env:
-    # ARGO_TRACE enables some tracing information for debugging purposes. Currently it enables
-    # logging of S3 request/response payloads (including auth headers)
-    - name: ARGO_TRACE
-      value: "1"
