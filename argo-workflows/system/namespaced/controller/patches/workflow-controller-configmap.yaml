@@ -24,8 +24,6 @@ data:
         secondsAfterFailure: 86400
       podGC:
         strategy: OnWorkflowCompletion
-      securityContext:
-        fsGroup: 1000
       volumes:
         - name: tmp
           emptyDir: {}
@@ -54,14 +52,6 @@ data:
       limits:
         cpu: 0.5
         memory: 512Mi
-    securityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop:
-        - ALL
-      readOnlyRootFilesystem: true
-      runAsNonRoot: true
-      runAsUser: 1000
 
   # executor controls how the init and wait container should be customized
   executor: |
