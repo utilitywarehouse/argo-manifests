@@ -14,7 +14,7 @@ patches:
     target:
       kind: Role
       name: argo-role
-  - path: patches/argo-server.yaml
+  - path: patches/workflow-controller-configmap.yaml
     target:
       kind: ConfigMap
       name: workflow-controller-configmap
