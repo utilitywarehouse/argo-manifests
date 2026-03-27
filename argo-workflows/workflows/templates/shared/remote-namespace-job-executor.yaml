@@ -30,15 +30,15 @@ spec:
           secret:
             secretName: job-executor-tokens
         - name: cluster-ca-certs
-          secret:
-            secretName: cluster-ca-certs
+          configMap:
+            name: cluster-ca-certs
       script:
         image: bitnami/kubectl:latest
         volumeMounts:
           - name: job-executor-tokens
             mountPath: /secrets/tokens
           - name: cluster-ca-certs
-            mountPath: /secrets/certs
+            mountPath: /certs
         command: [sh]
         source: |
           set -e
@@ -70,7 +70,7 @@ spec:
             --token="$(cat /secrets/tokens/$TOKEN_KEY)"
           kubectl config set-cluster $CLUSTER \
             --server=$CLUSTER_SERVER \
-            --certificate-authority=/secrets/certs/${CLUSTER}-ca.crt
+            --certificate-authority=/certs/${CLUSTER}-ca.crt
           kubectl config set-context $CLUSTER \
             --cluster=$CLUSTER \
             --user=$K8S_USER \

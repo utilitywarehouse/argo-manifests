@@ -108,7 +108,7 @@ secrets/exp-1-aws-ca.crt
 **3. Register the CA cert** in `kustomization.yaml` under `cluster-ca-certs`:
 
 ```yaml
-secretGenerator:
+configMapGenerator:
   - name: cluster-ca-certs
     files:
       - secrets/exp-1-aws-ca.crt

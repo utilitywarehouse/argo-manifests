@@ -26,6 +26,11 @@ patches:
 generatorOptions:
   disableNameSuffixHash: true
 
+configMapGenerator:
+  - name: cluster-ca-certs
+    files:
+      - secrets/dev-aws-ca.crt
+
 secretGenerator:
   - name: okta-sso-secret
     envs:
@@ -33,6 +38,3 @@ secretGenerator:
   - name: job-executor-tokens
     envs:
       - secrets/job-executor-tokens.env
-  - name: cluster-ca-certs
-    files:
-      - secrets/dev-aws-ca.crt
