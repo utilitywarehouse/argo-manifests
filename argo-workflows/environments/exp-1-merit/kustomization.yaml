@@ -7,6 +7,7 @@ resources:
   - ../../system/namespaced/controller
   - ../../system/namespaced/server
   - ../../workflows/templates
+  - workflow-step-executor-sa.yaml
   - ingress.yaml
   - auth.yaml
   - argocd-app.yaml
