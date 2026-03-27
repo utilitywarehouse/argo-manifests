@@ -6,7 +6,7 @@ namespace: qe-argo-workflows
 resources:
   - ../../system/namespaced/controller
   - ../../system/namespaced/server
-  - ../../workflows/templates/shared
+  - ../../workflows/templates
   - ingress.yaml
   - auth.yaml
   - argocd-app.yaml
