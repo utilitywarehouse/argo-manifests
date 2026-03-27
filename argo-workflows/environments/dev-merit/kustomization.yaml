@@ -33,6 +33,14 @@ configMapGenerator:
       - secrets/dev-aws-ca.crt
 
 secretGenerator:
+  - name: argocd-voodoobox-strongbox-keyring
+    type: Opaque
+    files:
+      - .strongbox_identity=secrets/argocd-voodoobox-strongbox-identity
+  - name: dockerhub-key
+    type: kubernetes.io/dockerconfigjson
+    files:
+      - .dockerconfigjson=secrets/dockerhub-key
   - name: okta-sso-secret
     envs:
       - secrets/okta-sso-secret.env

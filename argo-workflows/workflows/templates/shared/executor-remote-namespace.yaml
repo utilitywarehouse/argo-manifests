@@ -2,6 +2,10 @@ apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
   name: executor-remote-namespace
+  annotations:
+    workflows.argoproj.io/description: "Internal executor - use in other WorkflowTemplates via templateRef only"
+  labels:
+    workflows.argoproj.io/creator: "system"
 spec:
   templates:
     - name: execute-job
@@ -15,8 +19,8 @@ spec:
             value: "5m"
           - name: teardown
             value: "true"
-          - name: debug
-            value: "false"
+          - name: log-level
+            value: "info"
       outputs:
         artifacts:
           - name: result
@@ -38,98 +42,39 @@ spec:
         - name: cluster-ca-certs
           configMap:
             name: cluster-ca-certs
-      script:
-        image: bitnami/kubectl:latest
+      container:
+        image: registry.uw.systems/dev-enablement/exec-kube:latest
+        env:
+          - name: CLUSTER_NAME
+            value: "{{inputs.parameters.cluster-name}}"
+          - name: CLUSTER_SERVER
+            value: "{{inputs.parameters.cluster-server}}"
+          - name: NAMESPACE
+            value: "{{inputs.parameters.target-namespace}}"
+          - name: JOB_TEMPLATE
+            value: "{{inputs.parameters.job-template}}"
+          - name: WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+          - name: WORKFLOW_STEP_NAME
+            value: "{{steps.name}}"
+          - name: TIMEOUT
+            value: "{{inputs.parameters.timeout}}"
+          - name: TEARDOWN
+            value: "{{inputs.parameters.teardown}}"
+          - name: LOG_LEVEL
+            value: "{{inputs.parameters.log-level}}"
+          - name: TOKENS_PATH
+            value: /secrets/tokens
+          - name: CERTS_PATH
+            value: /certs
+          - name: RESULT_PATH
+            value: /tmp/result.txt
+          - name: LOGS_PATH
+            value: /tmp/logs.txt
         volumeMounts:
           - name: job-executor-tokens
             mountPath: /secrets/tokens
           - name: cluster-ca-certs
             mountPath: /certs
-        command: [sh]
-        source: |
-          set -e
-
-          CLUSTER={{inputs.parameters.cluster-name}}
-          CLUSTER_SERVER={{inputs.parameters.cluster-server}}
-          K8S_USER="argo-workflow-job-executor"
-          NAMESPACE={{inputs.parameters.target-namespace}}
-          TIMEOUT={{inputs.parameters.timeout}}
-          TEARDOWN={{inputs.parameters.teardown}}
-          DEBUG={{inputs.parameters.debug}}
-          WORKFLOW_NAME="{{workflow.name}}"
-          WORKFLOW_UID="{{workflow.uid}}"
-          POD_NAME="{{pod.name}}"
-          TEMPLATE_NAME=$(echo $POD_NAME | sed "s/^${WORKFLOW_NAME}-//")
-          JOB_NAME="{{steps.name}}-$TEMPLATE_NAME"
-          TOKEN_KEY="${CLUSTER}-${NAMESPACE}"
-
-          touch /tmp/result.txt
-          touch /tmp/logs.txt
-
-          log() { [ "$DEBUG" = "true" ] && echo "$@"; }
-
-          echo "Cluster:   $CLUSTER"
-          echo "Namespace: $NAMESPACE"
-          echo "Job:       $JOB_NAME"
-
-          export KUBECONFIG=/tmp/kubeconfig
-          kubectl config set-credentials $K8S_USER \
-            --token="$(cat /secrets/tokens/$TOKEN_KEY)" >/dev/null 2>&1
-          kubectl config set-cluster $CLUSTER \
-            --server=$CLUSTER_SERVER \
-            --certificate-authority=/certs/${CLUSTER}-ca.crt >/dev/null 2>&1
-          kubectl config set-context $CLUSTER \
-            --cluster=$CLUSTER \
-            --user=$K8S_USER \
-            --namespace=$NAMESPACE >/dev/null 2>&1
-          kubectl config use-context $CLUSTER >/dev/null 2>&1
-
-          # Check namespace exists
-          if ! kubectl get namespace $NAMESPACE >/dev/null 2>&1; then
-            echo "ERROR: Namespace '$NAMESPACE' does not exist in cluster '$CLUSTER'"
-            echo "Available namespaces:"
-            kubectl get namespaces --no-headers -o custom-columns=":metadata.name"
-            exit 1
-          fi
-          echo "✓ Namespace exists"
-
-          # Build job manifest
-          cat > /tmp/job.yaml <<'JOBEOF'
-          {{inputs.parameters.job-template}}
-          JOBEOF
-
-          kubectl create -f /tmp/job.yaml --dry-run=client -o yaml | \
-            sed "/^  generateName:/d" | \
-            sed "/^  name:/d" | \
-            sed "/^  namespace:.*/d" | \
-            sed "/^metadata:/a\  name: ${JOB_NAME}\n  namespace: ${NAMESPACE}\n  labels:\n    workflow-name: ${WORKFLOW_NAME}\n    workflow-uid: ${WORKFLOW_UID}" \
-            > /tmp/job-final.yaml
-
-          log "Job manifest:"
-          log "$(cat /tmp/job-final.yaml)"
-
-          kubectl create -f /tmp/job-final.yaml -n $NAMESPACE >/dev/null 2>&1
-          echo "✓ Job created"
-
-          echo "Waiting for completion (timeout: $TIMEOUT)..."
-          kubectl wait --for=condition=complete job/$JOB_NAME -n $NAMESPACE --timeout=$TIMEOUT >/dev/null 2>&1
-          echo "✓ Job completed"
-
-          kubectl logs job/$JOB_NAME -n $NAMESPACE > /tmp/logs.txt
-
-          log "Job logs:"
-          log "$(cat /tmp/logs.txt)"
-
-          # Use ARGO_RESULT_OUTPUT if set, otherwise fall back to full logs
-          RESULT=$(sed -n 's/^ARGO_RESULT_OUTPUT=//p' /tmp/logs.txt)
-          if [ -n "$RESULT" ]; then
-            echo "$RESULT" > /tmp/result.txt
-          else
-            cp /tmp/logs.txt /tmp/result.txt
-          fi
-
-          echo "Result: $(cat /tmp/result.txt)"
-
-          [ "$TEARDOWN" = "true" ] && kubectl delete job/$JOB_NAME -n $NAMESPACE >/dev/null 2>&1 && echo "✓ Job cleaned up"
-
-          rm -rf /tmp/kubeconfig
