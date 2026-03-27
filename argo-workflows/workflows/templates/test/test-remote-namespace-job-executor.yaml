@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: test-remote-namespace-job-executor
+  namespace: qe-argo-workflows
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: cluster-name
+        value: "exp-1-aws"
+      - name: cluster-server
+        value: "https://elb.master.k8s.exp-1.aws.uw.systems"
+      - name: target-namespace
+        value: "sys-k6"
+      - name: job-template
+        value: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: print-secret
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: print-secret
+                    image: alpine:latest
+                    command: [sh, -c]
+                    args:
+                      - echo "ARGO_RESULT_OUTPUT=$API_SERVER"
+                    env:
+                      - name: API_SERVER
+                        valueFrom:
+                          secretKeyRef:
+                            name: grafana-sm-agent
+                            key: api-server
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - name: cluster-name
+          - name: cluster-server
+          - name: target-namespace
+          - name: job-template
+      steps:
+        - - name: execute
+            templateRef:
+              name: remote-namespace-job-executor
+              template: execute-job
+            arguments:
+              parameters:
+                - name: cluster-name
+                  value: "{{inputs.parameters.cluster-name}}"
+                - name: cluster-server
+                  value: "{{inputs.parameters.cluster-server}}"
+                - name: target-namespace
+                  value: "{{inputs.parameters.target-namespace}}"
+                - name: job-template
+                  value: "{{inputs.parameters.job-template}}"

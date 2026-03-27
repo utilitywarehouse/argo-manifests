@@ -24,3 +24,6 @@ data:
         secondsAfterFailure: 86400
       podGC:
         strategy: OnWorkflowCompletion
+
+  workflowRestrictions: |
+    templateReferencing: Strict
