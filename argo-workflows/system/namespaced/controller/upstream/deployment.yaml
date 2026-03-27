@@ -45,7 +45,7 @@ spec:
             runAsNonRoot: true
       nodeSelector:
         kubernetes.io/os: linux
-      priorityClassName: workflow-controller
+      # priorityClassName: workflow-controller
       securityContext:
         runAsNonRoot: true
       serviceAccountName: argo

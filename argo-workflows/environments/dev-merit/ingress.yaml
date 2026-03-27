@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argo-workflows
+  annotations:
+    external-dns.alpha.kubernetes.io/target: private-ingress-v2.dev.merit.uw.systems
+spec:
+  rules:
+    - host: argo-workflows.dev.merit.uw.systems
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: argo-workflows
+  labels:
+    kubernetes.io/ingress.class: traefik-private-v2
+spec:
+  entryPoints:
+    - web-secure
+  routes:
+    - kind: Rule
+      match: Host(`argo-workflows.dev.merit.uw.systems`)
+      services:
+        - name: argo-server
+          kind: Service
+          port: web

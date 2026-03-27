@@ -1,0 +1,55 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: qe-argo-workflows
+
+resources:
+  - ../../system/namespaced/controller
+  - ../../system/namespaced/server
+  - ../../workflows/templates
+  - workflow-step-executor-sa.yaml
+  - ingress.yaml
+  - auth.yaml
+  - argocd-app.yaml
+  - limitrange.yaml
+
+patches:
+  - path: patches/argo-server-deployment.yaml
+    target:
+      kind: Deployment
+      name: argo-server
+  - patch: |-
+      - op: add
+        path: /rules/-
+        value:
+          apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get"]
+          resourceNames: ["dockerhub-key"]
+    target:
+      kind: Role
+      name: argo-role
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: cluster-ca-certs
+    files:
+      - secrets/exp-1-aws-ca.crt
+
+secretGenerator:
+  - name: argocd-voodoobox-strongbox-keyring
+    type: Opaque
+    files:
+      - .strongbox_identity=secrets/argocd-voodoobox-strongbox-identity
+  - name: dockerhub-key
+    type: kubernetes.io/dockerconfigjson
+    files:
+      - .dockerconfigjson=secrets/dockerhub-key
+  - name: okta-sso-secret
+    envs:
+      - secrets/okta-sso-secret.env
+  - name: job-executor-tokens
+    envs:
+      - secrets/job-executor-tokens.env
