@@ -32,8 +32,8 @@ data:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-        imagePullSecrets:
-          - name: dockerhub-key
+      imagePullSecrets:
+        - name: dockerhub-key
 
   workflowRestrictions: |
     templateReferencing: Strict
