@@ -1,0 +1,80 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: executor-remote-namespace
+  annotations:
+    workflows.argoproj.io/description: "Internal executor - use in other WorkflowTemplates via templateRef only"
+  labels:
+    workflows.argoproj.io/creator: "system"
+spec:
+  templates:
+    - name: execute-job
+      inputs:
+        parameters:
+          - name: cluster-name
+          - name: cluster-server
+          - name: target-namespace
+          - name: job-template
+          - name: timeout
+            value: "5m"
+          - name: teardown
+            value: "true"
+          - name: log-level
+            value: "info"
+      outputs:
+        artifacts:
+          - name: result
+            path: /tmp/result.txt
+            archive:
+              none: {}
+          - name: logs
+            path: /tmp/logs.txt
+            archive:
+              none: {}
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/result.txt
+      volumes:
+        - name: job-executor-tokens
+          secret:
+            secretName: job-executor-tokens
+        - name: cluster-ca-certs
+          configMap:
+            name: cluster-ca-certs
+      container:
+        image: registry.uw.systems/dev-enablement/exec-kube:feat-bq-exporter
+        env:
+          - name: CLUSTER_NAME
+            value: "{{inputs.parameters.cluster-name}}"
+          - name: CLUSTER_SERVER
+            value: "{{inputs.parameters.cluster-server}}"
+          - name: NAMESPACE
+            value: "{{inputs.parameters.target-namespace}}"
+          - name: JOB_TEMPLATE
+            value: "{{inputs.parameters.job-template}}"
+          - name: WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+          - name: WORKFLOW_STEP_NAME
+            value: "{{steps.name}}"
+          - name: TIMEOUT
+            value: "{{inputs.parameters.timeout}}"
+          - name: TEARDOWN
+            value: "{{inputs.parameters.teardown}}"
+          - name: LOG_LEVEL
+            value: "{{inputs.parameters.log-level}}"
+          - name: TOKENS_PATH
+            value: /secrets/tokens
+          - name: CERTS_PATH
+            value: /certs
+          - name: RESULT_PATH
+            value: /tmp/result.txt
+          - name: LOGS_PATH
+            value: /tmp/logs.txt
+        volumeMounts:
+          - name: job-executor-tokens
+            mountPath: /secrets/tokens
+          - name: cluster-ca-certs
+            mountPath: /certs

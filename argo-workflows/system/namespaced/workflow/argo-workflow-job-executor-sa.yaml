@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-workflow-job-executor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow-job-executor
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-job-executor
+subjects:
+  - kind: ServiceAccount
+    name: argo-workflow-job-executor
+roleRef:
+  kind: Role
+  name: argo-workflow-job-executor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argo-workflow-job-executor-token
+  annotations:
+    kubernetes.io/service-account.name: argo-workflow-job-executor
+type: kubernetes.io/service-account-token

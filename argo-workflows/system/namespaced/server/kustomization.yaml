@@ -17,3 +17,7 @@ patches:
     target:
       kind: Deployment
       name: argo-server
+  - path: patches/argo-server-sa.yaml
+    target:
+      kind: ServiceAccount
+      name: argo-server

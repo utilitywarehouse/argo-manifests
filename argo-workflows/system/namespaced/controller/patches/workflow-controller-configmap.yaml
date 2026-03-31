@@ -1,0 +1,67 @@
+# https://argo-workflows.readthedocs.io/en/latest/workflow-controller-configmap/
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workflow-controller-configmap
+data:
+  artifactRepository: |
+    archiveLogs: true
+    s3:
+      bucket: uw-dev-dev-enablement-argo-workflows
+      endpoint: s3.amazonaws.com
+      region: eu-west-1
+      useSDKCreds: true
+
+  workflowDefaults: |
+    spec:
+      serviceAccountName: workflow-step-executor
+      podMetadata:
+        annotations:
+          uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+      ttlStrategy:
+        secondsAfterCompletion: 3600
+        secondsAfterSuccess: 3600
+        secondsAfterFailure: 86400
+      podGC:
+        strategy: OnWorkflowCompletion
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      templateDefaults:
+        container:
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      imagePullSecrets:
+        - name: dockerhub-key
+
+  workflowRestrictions: |
+    templateReferencing: Strict
+
+  parallelism: "10"
+
+  resourceRateLimit: |
+    limit: 10
+    burst: 25
+
+  # Defaults for main containers. These can be overridden by the template.
+  mainContainer: |
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 0.1
+        memory: 64Mi
+      limits:
+        cpu: 0.5
+        memory: 512Mi
+
+  # executor controls how the init and wait container should be customized
+  executor: |
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 0.1
+        memory: 64Mi
+      limits:
+        cpu: 0.5
+        memory: 512Mi
