@@ -10,7 +10,7 @@ spec:
   project: qe
   source:
     repoURL: git@github.com:utilitywarehouse/argo-manifests.git
-    targetRevision: chore/move-out-of-kubernetes-manifests
+    targetRevision: main
     path: argo-workflows/environments/exp-1-merit
   destination:
     name: in-cluster
