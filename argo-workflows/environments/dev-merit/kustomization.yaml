@@ -31,6 +31,7 @@ configMapGenerator:
   - name: cluster-ca-certs
     files:
       - secrets/dev-aws-ca.crt
+      - secrets/dev-merit-ca.crt
 
 secretGenerator:
   - name: argocd-voodoobox-strongbox-keyring
