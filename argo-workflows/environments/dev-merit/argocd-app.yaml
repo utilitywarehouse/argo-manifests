@@ -10,7 +10,7 @@ spec:
   project: qe
   source:
     repoURL: git@github.com:utilitywarehouse/argo-manifests.git
-    targetRevision: main
+    targetRevision: chore/deploy-dev
     path: argo-workflows/environments/dev-merit
   destination:
     name: in-cluster
