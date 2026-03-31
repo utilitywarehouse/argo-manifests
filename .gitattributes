@@ -1,2 +1,0 @@
-secrets/* filter=strongbox diff=strongbox
-**/secrets/* filter=strongbox diff=strongbox
