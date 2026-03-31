@@ -9,20 +9,26 @@ resources:
   - ../../workflows/templates
   - workflow-step-executor-sa.yaml
   - ingress.yaml
+  - auth.yaml
+  - argocd-app.yaml
+  - limitrange.yaml
 
 patches:
-  - path: patches/argo-server-sa.yaml
-    target:
-      kind: ServiceAccount
-      name: argo-server
   - path: patches/argo-server-deployment.yaml
     target:
       kind: Deployment
       name: argo-server
-  - path: patches/workflow-controller-configmap.yaml
+  - patch: |-
+      - op: add
+        path: /rules/-
+        value:
+          apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get"]
+          resourceNames: ["dockerhub-key"]
     target:
-      kind: ConfigMap
-      name: workflow-controller-configmap
+      kind: Role
+      name: argo-role
 
 generatorOptions:
   disableNameSuffixHash: true
@@ -31,6 +37,7 @@ configMapGenerator:
   - name: cluster-ca-certs
     files:
       - secrets/dev-aws-ca.crt
+      - secrets/dev-merit-ca.crt
 
 secretGenerator:
   - name: argocd-voodoobox-strongbox-keyring

@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: qe-argo-workflows
+  labels:
+    name: qe-argo-workflows
+  annotations:
+    argocd.argoproj.io/manifest-generate-paths: .
+spec:
+  project: qe
+  source:
+    repoURL: git@github.com:utilitywarehouse/argo-manifests.git
+    targetRevision: main
+    path: argo-workflows/environments/dev-merit
+  destination:
+    name: in-cluster
+    namespace: qe-argo-workflows
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
+      - PruneLast=true
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Workflow
