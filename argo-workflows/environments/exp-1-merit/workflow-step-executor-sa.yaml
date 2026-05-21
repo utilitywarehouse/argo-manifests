@@ -3,7 +3,7 @@ kind: ServiceAccount
 metadata:
   name: workflow-step-executor
   annotations:
-    vault.uw.systems/aws-role: "arn:aws:iam::950135041896:role/dev-enablement-argo-workflows-bucket-rw"
+    vault.uw.systems/aws-role: "arn:aws:iam::950135041896:role/qe-argo-workflows-bucket-rw"
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

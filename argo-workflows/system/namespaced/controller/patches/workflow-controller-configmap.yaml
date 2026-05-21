@@ -7,7 +7,7 @@ data:
   artifactRepository: |
     archiveLogs: true
     s3:
-      bucket: uw-dev-dev-enablement-argo-workflows
+      bucket: uw-dev-qe-argo-workflows
       endpoint: s3.amazonaws.com
       region: eu-west-1
       useSDKCreds: true
