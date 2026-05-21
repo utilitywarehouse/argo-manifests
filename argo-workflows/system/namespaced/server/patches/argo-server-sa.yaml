@@ -3,4 +3,4 @@ kind: ServiceAccount
 metadata:
   name: argo-server
   annotations:
-    vault.uw.systems/aws-role: "arn:aws:iam::950135041896:role/dev-enablement-argo-workflows-bucket-rw"
+    vault.uw.systems/aws-role: "arn:aws:iam::950135041896:role/qe-argo-workflows-bucket-rw"
