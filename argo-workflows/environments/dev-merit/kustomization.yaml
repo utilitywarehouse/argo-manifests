@@ -18,6 +18,10 @@ patches:
     target:
       kind: Deployment
       name: argo-server
+  - path: patches/workflow-controller-configmap.yaml
+    target:
+      kind: ConfigMap
+      name: workflow-controller-configmap
   - patch: |-
       - op: add
         path: /rules/-
@@ -26,6 +30,14 @@ patches:
           resources: ["secrets"]
           verbs: ["get"]
           resourceNames: ["dockerhub-key"]
+      # workflow-controller reads the postgres credentials for persistence
+      - op: add
+        path: /rules/-
+        value:
+          apiGroups: [""]
+          resources: ["secrets"]
+          verbs: ["get"]
+          resourceNames: ["argo-postgres-config"]
     target:
       kind: Role
       name: argo-role
@@ -54,3 +66,6 @@ secretGenerator:
   - name: job-executor-tokens
     envs:
       - secrets/job-executor-tokens.env
+  - name: argo-postgres-config
+    envs:
+      - secrets/argo-postgres-config.env
