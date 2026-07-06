@@ -3,3 +3,4 @@ kind: Kustomization
 
 resources:
   - executor-remote-namespace.yaml
+  - data-orchestrator-runner.yaml

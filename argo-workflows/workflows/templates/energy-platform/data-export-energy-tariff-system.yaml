@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-energy-tariff-system
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Export energy_tariff_system via the generic data-orchestrator-runner. Supplies only the
+      tariff adapter (image/args/source-DSN secret) + scope; the orchestrator, trigger,
+      config, Job rendering and remote-namespace dispatch come from data-orchestrator-runner.
+  labels:
+    workflows.argoproj.io/creator: energy
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowTemplateRef:
+      name: data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: energy_tariff_system }
+        # tables available to readonly user - https://github.com/utilitywarehouse/terraform/blob/master/aws/dev/energy-rds/databases.tf#L144
+        - {
+            name: entities,
+            value: "tariffs, tariff_versions, tariff_rates, tariff_standing_charges,eligibility_criteria, tariff_eligibility",
+          }
+        - { name: label, value: energy-tariff-system-export }
+        - { name: target-namespace, value: energy-platform }
+        - { name: cluster-name, value: dev-merit }
+        # Source DSN owned by energy teams and already available in energy-platform
+        - { name: adapter-secret, value: energy-tariff-system-data-adapter }
+        - { name: adapter-dsn-key, value: POSTGRES_DSN }

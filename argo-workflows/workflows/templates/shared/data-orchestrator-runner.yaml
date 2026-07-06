@@ -1,0 +1,272 @@
+# =============================================================================
+# data-orchestrator-runner — generic, ephemeral data-orchestrator run
+# =============================================================================
+# Renders a single-pod Kubernetes Job and dispatches it to a target
+# namespace/cluster via the `executor-remote-namespace` template. Per-system
+# CronWorkflows reference this via `workflowTemplateRef` and supply only the
+# adapter + run scope; everything else has an environment default below.
+#
+# Pod anatomy — one pod, four containers (see the Job spec for full wiring):
+#
+#   render-adapters-config  init      writes /etc/do/adapters.yaml (localhost wiring)
+#   orchestrator            sidecar   the data-orchestrator; owns the SHARED RDS + the
+#                                     S3 output bucket; serves gRPC on :50051
+#   adapter                 sidecar   the per-system SOURCE adapter; reads the team's
+#                                     source DB; serves the orchestrator on :8090
+#   trigger                 main      StartRun, then poll GetRunStatus to completion
+#
+# Two look-alike settings that mean DIFFERENT things per container — do not conflate:
+#   DB_DSN         orchestrator → shared orchestrator RDS (IAM auth, passwordless)
+#                  adapter      → the team's SOURCE DB (from adapter-secret)
+#   AWS_S3_BUCKET  orchestrator → output bucket it writes results to
+#                  adapter      → only relevant if the adapter streams to S3 itself
+#
+# Parameters fall into two groups. The CronWorkflow supplies the per-run set;
+# the rest are environment defaults, changed per environment.
+#
+#   Supplied per run
+#     mode, run-type, system-key         what to run
+#     adapter-secret, adapter-dsn-key     source DSN (team's secret in target ns)
+#     target-namespace, cluster-name      where to run / how to dispatch
+#
+#   Environment defaults
+#     entities, label, triggered-by       run scope / metadata
+#     orchestrator-image, adapter-image   container images
+#     adapter-args                        adapter argv
+#     aws-bucket, aws-region              S3 output
+#     orchestrator-db-dsn                 shared orchestrator RDS (IAM auth)
+#     runner-sa                           Job pod identity
+#     timeout                             run deadline
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: data-orchestrator-runner
+  annotations:
+    workflows.argoproj.io/description: >-
+      Generic, ephemeral data-orchestrator runner. Renders a single-pod Kubernetes Job — the
+      data-orchestrator and a per-system data adapter as native sidecars over localhost, plus a
+      trigger that calls StartRun and polls GetRunStatus — and dispatches it to `target-namespace`
+      via `executor-remote-namespace`. The orchestrator's worker claims the run, drives the adapter
+      at localhost:8090, and writes results to the shared DB/S3. Per-system CronWorkflows reference
+      this via `workflowTemplateRef`, supplying only the adapter and the run scope.
+  labels:
+    workflows.argoproj.io/creator: "system"
+spec:
+  entrypoint: run
+  # exec-kube (Argo side) uses this SA to read job-executor-tokens / cluster-ca-certs and report
+  # task results. This is NOT the identity the Job pod runs as — that is `runner-sa`, below.
+  serviceAccountName: workflow-step-executor
+
+  # ---------------------------------------------------------------------------
+  # Every parameter has a default. Per-system CronWorkflows override the per-run
+  # set (what to run + where); the rest are environment defaults.
+  # ---------------------------------------------------------------------------
+  arguments:
+    parameters:
+      # what to run
+      - { name: mode } # export | import — selects adapters.yaml section + adapter MODE
+      - { name: run-type } # RUN_TYPE_EXPORT | RUN_TYPE_IMPORT
+      - { name: system-key } # e.g. energy_tariff_system
+      # source DSN (owned by the target namespace)
+      - { name: adapter-secret, value: "" } # secret in target ns holding the source DSN
+      - { name: adapter-dsn-key, value: "DB_DSN" } # key within adapter-secret
+      # where to run / dispatch
+      - { name: target-namespace, value: "" } # namespace to run the Job in (source DB reachable)
+      - { name: cluster-name, value: "" } # target cluster → resolves CA + token + server 1:1
+      # run scope / metadata
+      - { name: entities, value: "" } # comma-separated list, e.g. "tariffs, tariff_rates". Empty = all.
+      - { name: label, value: adhoc }
+      - { name: triggered-by, value: argo }
+      # container images (env-specific)
+      - {
+          name: orchestrator-image,
+          value: "registry.uw.systems/dev-enablement/data-orchestrator:feat-data-orchestrator-poc",
+        }
+      - {
+          name: adapter-image,
+          value: "registry.uw.systems/dev-enablement/data-adapter-pg:feat-data-orchestrator-poc",
+        }
+      - { name: adapter-args, value: "serve" }
+      # S3 output (env-specific)
+      - { name: aws-bucket, value: uw-dev-qe-dev-data-orchestrator }
+      - { name: aws-region, value: eu-west-1 }
+      # shared orchestrator RDS — IAM auth, passwordless (env-specific).
+      #   This is NOT the adapter's source DB.
+      - {
+          name: orchestrator-db-dsn,
+          value: "postgres://dev_data_orchestrator_role@qe-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/dev_data_orchestrator_db?sslmode=require",
+        }
+      # Job pod identity — the bundle's data-orchestrator SA (carries the vault AWS role). env-neutral for now.
+      - { name: runner-sa, value: data-orchestrator }
+      - { name: timeout, value: 30m }
+
+  templates:
+    - name: run
+      inputs:
+        parameters:
+          # per-run (no default — must be supplied)
+          - { name: mode }
+          - { name: run-type }
+          - { name: system-key }
+          - { name: adapter-secret }
+          - { name: target-namespace }
+          - { name: cluster-name }
+          # environment defaults (apply when the caller omits them)
+          - { name: adapter-dsn-key, value: "DB_DSN" }
+          - { name: entities, value: "" }
+          - { name: label, value: adhoc }
+          - { name: triggered-by, value: argo }
+          - {
+              name: orchestrator-image,
+              value: "registry.uw.systems/dev-enablement/data-orchestrator:feat-data-orchestrator-poc",
+            }
+          - {
+              name: adapter-image,
+              value: "registry.uw.systems/dev-enablement/data-adapter-pg:feat-data-orchestrator-poc",
+            }
+          - { name: adapter-args, value: "serve" }
+          - { name: aws-bucket, value: uw-dev-qe-dev-data-orchestrator }
+          - { name: aws-region, value: eu-west-1 }
+          - {
+              name: orchestrator-db-dsn,
+              value: "postgres://dev_data_orchestrator_role@qe-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/dev_data_orchestrator_db?sslmode=require",
+            }
+          - { name: runner-sa, value: data-orchestrator }
+          - { name: timeout, value: 30m }
+      steps:
+        - - name: execute
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                # Full Job manifest, rendered as a string. Argo substitutes every
+                # {{inputs.parameters.*}} before exec-kube creates the Job in the target namespace.
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: do-run-{{inputs.parameters.system-key}}-
+                    spec:
+                      backoffLimit: 0
+                      template:
+                        metadata:
+                          annotations:
+                            # Turns runner-sa's vault.uw.systems/aws-role into injected AWS creds
+                            # (S3 + RDS IAM) — nothing stored in the target namespace.
+                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          restartPolicy: Never
+                          volumes:
+                            - name: do-config
+                              emptyDir: {}
+                          initContainers:
+                            # ---- render-adapters-config (init, runs to completion) --------------
+                            # Writes the orchestrator's localhost wiring: system-key → :8090.
+                            - name: render-adapters-config
+                              image: alpine:latest
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  cat > /etc/do/adapters.yaml <<EOF
+                                  {{inputs.parameters.mode}}:
+                                    - system_key: {{inputs.parameters.system-key}}
+                                      address: localhost:8090
+                                  EOF
+                                  echo "rendered /etc/do/adapters.yaml:"; cat /etc/do/adapters.yaml
+                              volumeMounts:
+                                - { name: do-config, mountPath: /etc/do }
+
+                            # ==== ORCHESTRATOR (sidecar) ======
+                            # The data-orchestrator. Owns the SHARED RDS + the S3 output bucket, and
+                            # serves gRPC on :50051 (the trigger drives it). AWS creds come from
+                            # vault injection (runner-sa's role); RDS is IAM auth, so DB_DSN is
+                            # passwordless — the app mints the token.
+                            - name: orchestrator
+                              restartPolicy: Always
+                              image: {{inputs.parameters.orchestrator-image}}
+                              command: ["/svc", "serve"]
+                              env:
+                                - { name: GRPC_ADDR, value: ":50051" }
+                                - { name: HTTP_ADDR, value: ":8080" }
+                                - { name: ADAPTERS_CONFIG, value: /etc/do/adapters.yaml }
+                                - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
+                                - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }        # output bucket
+                                - { name: DB_DSN, value: "{{inputs.parameters.orchestrator-db-dsn}}" }    # SHARED orchestrator RDS
+                              volumeMounts:
+                                - { name: do-config, mountPath: /etc/do }
+
+                            # ==== ADAPTER (sidecar) ======
+                            # The per-system SOURCE adapter. Reads the team's source DB and serves
+                            # the orchestrator on :8090. DB_DSN here is the SOURCE DSN, mapped from
+                            # the team's own secret in the target ns (key = adapter-dsn-key).
+                            # Deliberately NOT envFrom: that would also inject any AWS_* keys in the
+                            # secret and clobber the vault-injected creds.
+                            - name: adapter
+                              restartPolicy: Always
+                              image: {{inputs.parameters.adapter-image}}
+                              args: [{{inputs.parameters.adapter-args}}]
+                              env:
+                                - name: DB_DSN                               # SOURCE DB (team's secret)
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.adapter-secret}}
+                                      key: {{inputs.parameters.adapter-dsn-key}}
+                                - { name: MODE, value: {{inputs.parameters.mode}} }
+                                - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
+                                - { name: GRPC_ADDR, value: ":8090" }    # fixed internal contract
+                                - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
+                                - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }
+                          containers:
+                            # ==== TRIGGER (main container) =======================================
+                            # Waits for the orchestrator API, StartRun, polls GetRunStatus to a
+                            # terminal state, and emits the run id (exec-kube captures
+                            # ARGO_RESULT_OUTPUT=). The orchestrator image must have gRPC server
+                            # reflection enabled.
+                            - name: trigger
+                              image: fullstorydev/grpcurl:latest
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # Normalise the entities list into a JSON array:
+                                  #   "tariffs, tariff_rates"  ->  "tariffs","tariff_rates"
+                                  #   ""                        ->  (empty = all entities)
+                                  ENTITIES_JSON=$(printf '%s' "{{inputs.parameters.entities}}" \
+                                    | tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d; s/^/"/; s/$/"/' \
+                                    | tr '\n' ',' | sed 's/,$//')
+                                  echo "waiting for orchestrator API on :50051 ..."
+                                  until grpcurl -plaintext localhost:50051 list >/dev/null 2>&1; do sleep 2; done
+                                  echo "starting run ({{inputs.parameters.run-type}} {{inputs.parameters.system-key}}) entities=[$ENTITIES_JSON] ..."
+                                  RUN=$(grpcurl -plaintext -d "{
+                                    \"runType\":\"{{inputs.parameters.run-type}}\",
+                                    \"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES_JSON]}],
+                                    \"label\":\"{{inputs.parameters.label}}\",
+                                    \"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"
+                                  }" localhost:50051 uw.platform.data.orchestrator.v1.OrchestratorService/StartRun \
+                                    | tr -d ' \n' | sed -n 's/.*"runId":"\([^"]*\)".*/\1/p')
+                                  if [ -z "$RUN" ]; then echo "StartRun rejected or no run_id returned"; exit 1; fi
+                                  echo "run_id=$RUN"
+                                  while :; do
+                                    S=$(grpcurl -plaintext -d "{\"runId\":\"$RUN\"}" localhost:50051 \
+                                      uw.platform.data.orchestrator.v1.OrchestratorService/GetRunStatus \
+                                      | tr -d ' \n' | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+                                    echo "run state: ${S:-<unknown>}"
+                                    case "$S" in
+                                      *SUCCEEDED*) echo "run succeeded"; echo "ARGO_RESULT_OUTPUT=$RUN"; exit 0 ;;
+                                      *FAILED*|*PARTIAL*|*CANCELLED*) echo "run did not succeed: $S"; exit 1 ;;
+                                    esac
+                                    sleep 5
+                                  done

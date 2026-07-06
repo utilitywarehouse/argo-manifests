@@ -11,8 +11,11 @@ spec:
     - name: execute-job
       inputs:
         parameters:
+          # cluster-name is the single key that resolves everything 1:1: the CA cert
+          # (cluster-ca-certs/<cluster-name>-ca.crt), the token
+          # (job-executor-tokens/<cluster-name>-<namespace>) and the API server URL
+          # (cluster-servers/<cluster-name>, see CLUSTER_SERVER below).
           - name: cluster-name
-          - name: cluster-server
           - name: target-namespace
           - name: job-template
           - name: timeout
@@ -47,8 +50,13 @@ spec:
         env:
           - name: CLUSTER_NAME
             value: "{{inputs.parameters.cluster-name}}"
+          # Resolved from the per-environment cluster-servers ConfigMap by cluster-name;
+          # Argo substitutes {{inputs.parameters.cluster-name}} into the key before submit.
           - name: CLUSTER_SERVER
-            value: "{{inputs.parameters.cluster-server}}"
+            valueFrom:
+              configMapKeyRef:
+                name: cluster-servers
+                key: "{{inputs.parameters.cluster-name}}"
           - name: NAMESPACE
             value: "{{inputs.parameters.target-namespace}}"
           - name: JOB_TEMPLATE
