@@ -1,0 +1,14 @@
+# Identity for the data-orchestrator Job pod (orchestrator + adapter sidecars), carrying
+# the vault AWS role that grants that environment's data-orchestrator RDS (rds-db:connect,
+# IAM auth) + S3 bucket. The runner sets runner-sa=data-orchestrator and stamps the Job pod
+# with the vault-sidecar-aws inject annotation.
+#
+# The role ARN is env-specific and is supplied by an overlay (overlays/dev, overlays/prod);
+# consume an overlay, never this base. The placeholder below is intentionally invalid so a
+# bare-base consumer fails loudly instead of silently getting another env's role.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: data-orchestrator
+  annotations:
+    vault.uw.systems/aws-role: "arn:aws:iam::000000000000:role/CHANGEME"

@@ -37,6 +37,9 @@ configMapGenerator:
   - name: cluster-ca-certs
     files:
       - secrets/exp-1-aws-ca.crt
+  - name: cluster-servers
+    literals:
+      - exp-1-aws=https://elb.master.k8s.exp-1.aws.uw.systems
 
 secretGenerator:
   - name: argocd-voodoobox-strongbox-keyring

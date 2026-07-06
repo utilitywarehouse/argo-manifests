@@ -115,6 +115,17 @@ configMapGenerator:
       - secrets/exp-1-gcp-ca.crt
 ```
 
+**4. Register the cluster's API server URL** in `kustomization.yaml` under `cluster-servers`,
+keyed by `cluster-name` (this is what the executor resolves into `CLUSTER_SERVER`, so callers
+only pass `cluster-name`):
+
+```yaml
+configMapGenerator:
+  - name: cluster-servers
+    literals:
+      - exp-1-aws=https://elb.master.k8s.exp-1.aws.uw.systems
+```
+
 ### Using the WorkflowTemplate
 
 ```yaml
@@ -136,8 +147,6 @@ spec:
               parameters:
                 - name: cluster-name
                   value: "exp-1-aws"
-                - name: cluster-server
-                  value: "https://elb.master.k8s.exp-1.aws.uw.systems"
                 - name: target-namespace
                   value: "sys-k6"
                 - name: job-template
@@ -159,8 +168,7 @@ spec:
 
 | Parameter          | Description                                                    | Default  |
 | ------------------ | -------------------------------------------------------------- | -------- |
-| `cluster-name`     | Name of the target cluster, must match CA cert filename prefix | required |
-| `cluster-server`   | API server URL of the target cluster                           | required |
+| `cluster-name`     | Target cluster; resolves the CA cert, token, and API server URL (via the `cluster-servers` ConfigMap) 1:1 | required |
 | `target-namespace` | Namespace to run the job in                                    | required |
 | `job-template`     | Full Job manifest as a YAML string                             | required |
 | `timeout`          | How long to wait for job completion                            | `5m`     |

@@ -50,6 +50,10 @@ configMapGenerator:
     files:
       - secrets/dev-aws-ca.crt
       - secrets/dev-merit-ca.crt
+  - name: cluster-servers
+    literals:
+      - dev-merit=https://lb.master.dev.merit.uw.systems
+      - dev-aws=https://elb.master.k8s.dev.uw.systems
 
 secretGenerator:
   - name: argocd-voodoobox-strongbox-keyring

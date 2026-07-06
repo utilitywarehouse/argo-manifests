@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: ServiceAccount
+      name: data-orchestrator
+    patch: |
+      - op: replace
+        path: /metadata/annotations/vault.uw.systems~1aws-role
+        value: "arn:aws:iam::950135041896:role/qe-dev-data-orchestrator-rw"
