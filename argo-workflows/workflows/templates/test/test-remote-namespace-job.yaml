@@ -9,8 +9,6 @@ spec:
     parameters:
       - name: cluster-name
         value: "exp-1-aws"
-      - name: cluster-server
-        value: "https://elb.master.k8s.exp-1.aws.uw.systems"
       - name: target-namespace
         value: "sys-k6"
       - name: log-level
@@ -42,7 +40,6 @@ spec:
       inputs:
         parameters:
           - name: cluster-name
-          - name: cluster-server
           - name: target-namespace
           - name: log-level
           - name: job-template
@@ -55,8 +52,6 @@ spec:
               parameters:
                 - name: cluster-name
                   value: "{{inputs.parameters.cluster-name}}"
-                - name: cluster-server
-                  value: "{{inputs.parameters.cluster-server}}"
                 - name: target-namespace
                   value: "{{inputs.parameters.target-namespace}}"
                 - name: log-level
