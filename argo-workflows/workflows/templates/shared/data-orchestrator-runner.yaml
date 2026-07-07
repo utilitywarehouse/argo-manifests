@@ -10,9 +10,9 @@
 #
 #   render-adapters-config  init      writes /etc/do/adapters.yaml (localhost wiring)
 #   orchestrator            sidecar   the data-orchestrator; owns the SHARED RDS + the
-#                                     S3 output bucket; serves gRPC on :50051
+#                                     S3 output bucket; serves gRPC on :8090
 #   adapter                 sidecar   the per-system SOURCE adapter; reads the team's
-#                                     source DB; serves the orchestrator on :8090
+#                                     source DB; serves the orchestrator on :50051
 #   trigger                 main      StartRun, then poll GetRunStatus to completion
 #
 # Two look-alike settings that mean DIFFERENT things per container — do not conflate:
@@ -46,10 +46,7 @@ metadata:
     workflows.argoproj.io/description: >-
       Generic, ephemeral data-orchestrator runner. Renders a single-pod Kubernetes Job — the
       data-orchestrator and a per-system data adapter as native sidecars over localhost, plus a
-      trigger that calls StartRun and polls GetRunStatus — and dispatches it to `target-namespace`
-      via `executor-remote-namespace`. The orchestrator's worker claims the run, drives the adapter
-      at localhost:8090, and writes results to the shared DB/S3. Per-system CronWorkflows reference
-      this via `workflowTemplateRef`, supplying only the adapter and the run scope.
+      trigger that calls StartRun and polls GetRunStatus.
   labels:
     workflows.argoproj.io/creator: "system"
 spec:
@@ -179,7 +176,7 @@ spec:
                               emptyDir: {}
                           initContainers:
                             # ---- render-adapters-config (init, runs to completion) --------------
-                            # Writes the orchestrator's localhost wiring: system-key → :8090.
+                            # Writes the orchestrator's localhost wiring: system-key → :50051.
                             - name: render-adapters-config
                               image: alpine:3.24.1
                               command: [sh, -c]
@@ -188,7 +185,7 @@ spec:
                                   cat > /etc/do/adapters.yaml <<EOF
                                   {{inputs.parameters.mode}}:
                                     - system_key: {{inputs.parameters.system-key}}
-                                      address: localhost:8090
+                                      address: localhost:50051
                                   EOF
                                   echo "rendered /etc/do/adapters.yaml:"; cat /etc/do/adapters.yaml
                               volumeMounts:
@@ -196,7 +193,7 @@ spec:
 
                             # ==== ORCHESTRATOR (sidecar) ======
                             # The data-orchestrator. Owns the SHARED RDS + the S3 output bucket, and
-                            # serves gRPC on :50051 (the trigger drives it). AWS creds come from
+                            # serves gRPC on :8090 (the trigger drives it). AWS creds come from
                             # vault injection (runner-sa's role); RDS is IAM auth, so DB_DSN is
                             # passwordless — the app mints the token.
                             - name: orchestrator
@@ -204,7 +201,7 @@ spec:
                               image: {{inputs.parameters.orchestrator-image}}
                               command: ["/svc", "serve"]
                               env:
-                                - { name: GRPC_ADDR, value: ":50051" }
+                                - { name: GRPC_ADDR, value: ":8090" }
                                 - { name: HTTP_ADDR, value: ":8080" }
                                 - { name: ADAPTERS_CONFIG, value: /etc/do/adapters.yaml }
                                 - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
@@ -215,7 +212,7 @@ spec:
 
                             # ==== ADAPTER (sidecar) ======
                             # The per-system SOURCE adapter. Reads the team's source DB and serves
-                            # the orchestrator on :8090. DB_DSN here is the SOURCE DSN, mapped from
+                            # the orchestrator on :50051. DB_DSN here is the SOURCE DSN, mapped from
                             # the team's own secret in the target ns (key = adapter-dsn-key).
                             # Deliberately NOT envFrom: that would also inject any AWS_* keys in the
                             # secret and clobber the vault-injected creds.
@@ -231,7 +228,8 @@ spec:
                                       key: {{inputs.parameters.adapter-dsn-key}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
-                                - { name: GRPC_ADDR, value: ":8090" }    # fixed internal contract
+                                - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
+                                - { name: HTTP_ADDR, value: ":8081" }
                                 - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
                                 - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }
                           containers:
@@ -252,20 +250,20 @@ spec:
                                   ENTITIES_JSON=$(printf '%s' "{{inputs.parameters.entities}}" \
                                     | tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d; s/^/"/; s/$/"/' \
                                     | tr '\n' ',' | sed 's/,$//')
-                                  echo "waiting for orchestrator API on :50051 ..."
-                                  until grpcurl -plaintext localhost:50051 list >/dev/null 2>&1; do sleep 2; done
+                                  echo "waiting for orchestrator API on :8090 ..."
+                                  until grpcurl -plaintext localhost:8090 list >/dev/null 2>&1; do sleep 2; done
                                   echo "starting run ({{inputs.parameters.run-type}} {{inputs.parameters.system-key}}) entities=[$ENTITIES_JSON] ..."
                                   RUN=$(grpcurl -plaintext -d "{
                                     \"runType\":\"{{inputs.parameters.run-type}}\",
                                     \"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES_JSON]}],
                                     \"label\":\"{{inputs.parameters.label}}\",
                                     \"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"
-                                  }" localhost:50051 uw.platform.data.orchestrator.v1.OrchestratorService/StartRun \
+                                  }" localhost:8090 uw.platform.data.orchestrator.v1.OrchestratorService/StartRun \
                                     | tr -d ' \n' | sed -n 's/.*"runId":"\([^"]*\)".*/\1/p')
                                   if [ -z "$RUN" ]; then echo "StartRun rejected or no run_id returned"; exit 1; fi
                                   echo "run_id=$RUN"
                                   while :; do
-                                    S=$(grpcurl -plaintext -d "{\"runId\":\"$RUN\"}" localhost:50051 \
+                                    S=$(grpcurl -plaintext -d "{\"runId\":\"$RUN\"}" localhost:8090 \
                                       uw.platform.data.orchestrator.v1.OrchestratorService/GetRunStatus \
                                       | tr -d ' \n' | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
                                     echo "run state: ${S:-<unknown>}"
