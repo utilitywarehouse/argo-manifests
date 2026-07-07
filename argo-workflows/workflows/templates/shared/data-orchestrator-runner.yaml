@@ -181,7 +181,7 @@ spec:
                             # ---- render-adapters-config (init, runs to completion) --------------
                             # Writes the orchestrator's localhost wiring: system-key → :8090.
                             - name: render-adapters-config
-                              image: alpine:latest
+                              image: alpine:3.24.1
                               command: [sh, -c]
                               args:
                                 - |
@@ -241,7 +241,7 @@ spec:
                             # ARGO_RESULT_OUTPUT=). The orchestrator image must have gRPC server
                             # reflection enabled.
                             - name: trigger
-                              image: fullstorydev/grpcurl:latest
+                              image: fullstorydev/grpcurl:v1.9.3-alpine
                               command: [sh, -c]
                               args:
                                 - |
