@@ -35,4 +35,4 @@ spec:
         - { name: cluster-name, value: dev-merit }
         # Source DSN owned by energy teams and already available in energy-platform
         - { name: adapter-secret, value: energy-tariff-system-data-adapter }
-        - { name: adapter-dsn-key, value: POSTGRES_DSN }
+        - { name: adapter-dsn-key, value: bg_con_url }
