@@ -99,6 +99,12 @@ spec:
       # Docker hub pull creds (namespace-specific) — the Job pod must pull the private dev-enablement images.
       - { name: image-pull-secret, value: dockerhub-key }
       - { name: timeout, value: 30m }
+      # Job self-cleanup safety net, independent of exec-kube (which stops managing the Job at
+      # its own timeout): activeDeadlineSeconds force-terminates a runaway/crashlooping pod and
+      # marks the Job Failed; ttlSecondsAfterFinished GCs a finished (retained-for-debug) Job
+      # after the window so failures don't accumulate.
+      - { name: job-active-deadline, value: 35m } # backstop just beyond the 30m timeout
+      - { name: job-ttl, value: 24h } # debug retention, then auto-delete
 
   templates:
     - name: run
@@ -134,6 +140,8 @@ spec:
           - { name: runner-sa, value: data-orchestrator }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: timeout, value: 30m }
+          - { name: job-active-deadline, value: 35m }
+          - { name: job-ttl, value: 24h }
       steps:
         - - name: execute
             templateRef:
@@ -160,11 +168,17 @@ spec:
                       generateName: do-run-{{inputs.parameters.system-key}}-
                     spec:
                       backoffLimit: 0
+                      # Bounds total lifetime: a stuck/crashlooping/infinite-loop pod is force-
+                      # terminated at the deadline and the Job marked Failed — so it stops even if
+                      # exec-kube has already exited and left the Job retained for debugging.
+                      # k8s wants integer seconds; the {{=...}} expr converts the duration param.
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters.job-active-deadline).Seconds())}}
+                      # Auto-delete the finished Job (and its pod) after this window: retained
+                      # failed Jobs are kept for debugging but do not pile up forever.
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters.job-ttl).Seconds())}}
                       template:
                         metadata:
                           annotations:
-                            # Turns runner-sa's vault.uw.systems/aws-role into injected AWS creds
-                            # (S3 + RDS IAM) — nothing stored in the target namespace.
                             uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
