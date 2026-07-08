@@ -5,11 +5,12 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Export energy_tariff_system via the generic data-orchestrator-runner. Supplies only the
-      tariff adapter (image/args/source-DSN secret) + scope; the orchestrator, trigger,
-      config, Job rendering and remote-namespace dispatch come from data-orchestrator-runner.
+      energy_tariff_system data export from energy-platform
+
   labels:
     workflows.argoproj.io/creator: energy
+    data.uw.systems/system: energy-tariff-system
+    data.uw.systems/capability: data-export
 spec:
   schedules:
     - "0 2 * * *"
@@ -18,6 +19,12 @@ spec:
   concurrencyPolicy: Forbid
   workflowSpec:
     serviceAccountName: workflow-step-executor
+    # Stamp each spawned Workflow run with the same intrinsic labels, so runs (not just
+    # the cron) are filterable. cluster/namespace are appended here per-deployment by the overlays.
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: energy-tariff-system
+        data.uw.systems/capability: data-export
     workflowTemplateRef:
       name: data-orchestrator-runner
     arguments:
@@ -31,8 +38,8 @@ spec:
             value: "tariffs, tariff_versions, tariff_rates, tariff_standing_charges,eligibility_criteria, tariff_eligibility",
           }
         - { name: label, value: energy-tariff-system-export }
-        - { name: target-namespace, value: energy-platform }
-        - { name: cluster-name, value: dev-merit }
-        # Source DSN owned by energy teams and already available in energy-platform
+        # target-namespace + cluster-name are deployment/cluster-specific — appended by the
+        # per-deployment overlay (workflows/energy-platform/overlays/<cluster>), not set here.
+        # Source DSN owned by energy teams and already available in the target namespace
         - { name: adapter-secret, value: energy-tariff-system-data-adapter }
         - { name: adapter-dsn-key, value: bg_con_url }

@@ -3,9 +3,11 @@ kind: WorkflowTemplate
 metadata:
   name: executor-remote-namespace
   annotations:
-    workflows.argoproj.io/description: "Internal executor - use in other WorkflowTemplates via templateRef only"
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI.
   labels:
-    workflows.argoproj.io/creator: "system"
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
 spec:
   templates:
     - name: execute-job

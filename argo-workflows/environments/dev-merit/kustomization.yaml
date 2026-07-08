@@ -7,6 +7,8 @@ resources:
   - ../../system/namespaced/controller
   - ../../system/namespaced/server
   - ../../workflows/templates
+  - ../../workflows/energy-platform/overlays/dev-merit
+  - ../../workflows/staging-ept/overlays/dev-merit
   - workflow-step-executor-sa.yaml
   - ingress.yaml
   - auth.yaml
