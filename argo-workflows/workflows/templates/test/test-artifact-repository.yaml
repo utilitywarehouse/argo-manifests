@@ -3,6 +3,12 @@ kind: WorkflowTemplate
 metadata:
   name: test-artifact-upload
   namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Smoke test artifact uploads
+  labels:
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
 spec:
   entrypoint: main
   arguments:

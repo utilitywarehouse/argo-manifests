@@ -44,11 +44,11 @@ metadata:
   name: data-orchestrator-runner
   annotations:
     workflows.argoproj.io/description: >-
-      Generic, ephemeral data-orchestrator runner. Renders a single-pod Kubernetes Job — the
-      data-orchestrator and a per-system data adapter as native sidecars over localhost, plus a
-      trigger that calls StartRun and polls GetRunStatus.
+      Do NOT submit from the UI. Consumed by per-system
+      CronWorkflows via workflowTemplateRef.
   labels:
-    workflows.argoproj.io/creator: "system"
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
 spec:
   entrypoint: run
   # exec-kube (Argo side) uses this SA to read job-executor-tokens / cluster-ca-certs and report
@@ -65,9 +65,13 @@ spec:
       - { name: mode } # export | import — selects adapters.yaml section + adapter MODE
       - { name: run-type } # RUN_TYPE_EXPORT | RUN_TYPE_IMPORT
       - { name: system-key } # e.g. energy_tariff_system
-      # source DSN (owned by the target namespace)
-      - { name: adapter-secret, value: "" } # secret in target ns holding the source DSN
+      # adapter DSN — two mutually exclusive ways to supply it (adapter-dsn wins if set):
+      #   secret  : adapter-secret + adapter-dsn-key → valueFrom secretKeyRef (password DSN, e.g. export source)
+      #   literal : adapter-dsn                        → plain value (IAM-auth passwordless DSN, e.g. import dest;
+      #                                                  the pod's runner-sa vault role mints the RDS token)
+      - { name: adapter-secret, value: "" } # secret in target ns holding the DSN
       - { name: adapter-dsn-key, value: "DB_DSN" } # key within adapter-secret
+      - { name: adapter-dsn, value: "" } # literal DSN; alternative to adapter-secret, takes precedence when set
       # where to run / dispatch
       - { name: target-namespace, value: "" } # namespace to run the Job in (source DB reachable)
       - { name: cluster-name, value: "" } # target cluster → resolves CA + token + server 1:1
@@ -119,6 +123,7 @@ spec:
           - { name: cluster-name }
           # environment defaults (apply when the caller omits them)
           - { name: adapter-dsn-key, value: "DB_DSN" }
+          - { name: adapter-dsn, value: "" }
           - { name: entities, value: "" }
           - { name: label, value: adhoc }
           - { name: triggered-by, value: argo }
@@ -235,11 +240,11 @@ spec:
                               image: {{inputs.parameters.adapter-image}}
                               args: [{{inputs.parameters.adapter-args}}]
                               env:
-                                - name: DB_DSN                               # SOURCE DB (team's secret)
-                                  valueFrom:
-                                    secretKeyRef:
-                                      name: {{inputs.parameters.adapter-secret}}
-                                      key: {{inputs.parameters.adapter-dsn-key}}
+                                # DB_DSN — literal adapter-dsn (IAM auth, passwordless) if provided, else
+                                # valueFrom the team's secret (password DSN). Emitted as one flow-YAML line
+                                # by the expr so exactly one form applies. See adapter-dsn param docs above.
+                                - name: DB_DSN
+                                  {{=inputs.parameters.adapter-dsn != '' ? 'value: "' + inputs.parameters.adapter-dsn + '"' : 'valueFrom: {secretKeyRef: {name: ' + inputs.parameters.adapter-secret + ', key: ' + inputs.parameters.adapter-dsn-key + '}}'}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
