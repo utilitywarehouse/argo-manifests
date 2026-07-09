@@ -75,6 +75,3 @@ secretGenerator:
   - name: argo-postgres-config
     envs:
       - secrets/argo-postgres-config.env
-  - name: data-orchestrator-db
-    envs:
-      - secrets/data-orchestrator-db.env
