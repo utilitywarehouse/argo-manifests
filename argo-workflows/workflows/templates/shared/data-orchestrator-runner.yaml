@@ -77,6 +77,9 @@ spec:
       - { name: cluster-name, value: "" } # target cluster → resolves CA + token + server 1:1
       # run scope / metadata
       - { name: entities, value: "" } # comma-separated list, e.g. "tariffs, tariff_rates". Empty = all.
+      # IMPORT only: which export run to import from. Empty = the orchestrator resolves the latest
+      # completed export run for system-key. Ignored for export. Sent to StartRun only when non-empty.
+      - { name: source-run-id, value: "" }
       - { name: label, value: adhoc }
       - { name: triggered-by, value: argo }
       # container images (env-specific)
@@ -125,6 +128,7 @@ spec:
           - { name: adapter-dsn-key, value: "DB_DSN" }
           - { name: adapter-dsn, value: "" }
           - { name: entities, value: "" }
+          - { name: source-run-id, value: "" }
           - { name: label, value: adhoc }
           - { name: triggered-by, value: argo }
           - {
@@ -244,7 +248,7 @@ spec:
                                 # valueFrom the team's secret (password DSN). Emitted as one flow-YAML line
                                 # by the expr so exactly one form applies. See adapter-dsn param docs above.
                                 - name: DB_DSN
-                                  {{=inputs.parameters.adapter-dsn != '' ? 'value: "' + inputs.parameters.adapter-dsn + '"' : 'valueFrom: {secretKeyRef: {name: ' + inputs.parameters.adapter-secret + ', key: ' + inputs.parameters.adapter-dsn-key + '}}'}}
+                                  {{=inputs.parameters.adapter-dsn != '' ? 'value: "' + inputs.parameters.adapter-dsn + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters.adapter-secret + ', key: ' + inputs.parameters.adapter-dsn-key + ' } }'}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
@@ -269,12 +273,20 @@ spec:
                                   ENTITIES_JSON=$(printf '%s' "{{inputs.parameters.entities}}" \
                                     | tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d; s/^/"/; s/$/"/' \
                                     | tr '\n' ',' | sed 's/,$//')
+                                  # IMPORT: source-run-id pins which export run to import. When empty the
+                                  # orchestrator resolves the latest completed export run for system-key, so we
+                                  # emit the sourceRunId field only when set (exports never carry one).
+                                  SRC_JSON=""
+                                  if [ -n "{{inputs.parameters.source-run-id}}" ]; then
+                                    SRC_JSON="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","
+                                  fi
                                   echo "waiting for orchestrator API on :8090 ..."
                                   until grpcurl -plaintext localhost:8090 list >/dev/null 2>&1; do sleep 2; done
-                                  echo "starting run ({{inputs.parameters.run-type}} {{inputs.parameters.system-key}}) entities=[$ENTITIES_JSON] ..."
+                                  echo "starting run ({{inputs.parameters.run-type}} {{inputs.parameters.system-key}}) entities=[$ENTITIES_JSON] source-run-id=[{{inputs.parameters.source-run-id}}] ..."
                                   RUN=$(grpcurl -plaintext -d "{
                                     \"runType\":\"{{inputs.parameters.run-type}}\",
                                     \"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES_JSON]}],
+                                    ${SRC_JSON}
                                     \"label\":\"{{inputs.parameters.label}}\",
                                     \"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"
                                   }" localhost:8090 uw.platform.data.orchestrator.v1.OrchestratorService/StartRun \
