@@ -248,7 +248,7 @@ spec:
                                 # valueFrom the team's secret (password DSN). Emitted as one flow-YAML line
                                 # by the expr so exactly one form applies. See adapter-dsn param docs above.
                                 - name: DB_DSN
-                                  {{=inputs.parameters.adapter-dsn != '' ? 'value: "' + inputs.parameters.adapter-dsn + '"' : 'valueFrom: {secretKeyRef: {name: ' + inputs.parameters.adapter-secret + ', key: ' + inputs.parameters.adapter-dsn-key + '}}'}}
+                                  {{=inputs.parameters.adapter-dsn != '' ? 'value: "' + inputs.parameters.adapter-dsn + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters.adapter-secret + ', key: ' + inputs.parameters.adapter-dsn-key + ' } }'}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
