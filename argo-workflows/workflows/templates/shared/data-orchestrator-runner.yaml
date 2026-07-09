@@ -121,10 +121,13 @@ spec:
           - { name: mode }
           - { name: run-type }
           - { name: system-key }
-          - { name: adapter-secret }
           - { name: target-namespace }
           - { name: cluster-name }
           # environment defaults (apply when the caller omits them)
+          # adapter-secret defaults to "" so the DB_DSN expr can always resolve it:
+          # import passes adapter-dsn instead and omits adapter-secret. Without a default
+          # the {{=...}} expr fails to evaluate, leaving a raw tag that breaks the Job YAML.
+          - { name: adapter-secret, value: "" }
           - { name: adapter-dsn-key, value: "DB_DSN" }
           - { name: adapter-dsn, value: "" }
           - { name: entities, value: "" }
