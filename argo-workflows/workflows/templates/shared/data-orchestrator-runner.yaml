@@ -170,6 +170,7 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "DEBUG" }
                 # Full Job manifest, rendered as a string. Argo substitutes every
                 # {{inputs.parameters.*}} before exec-kube creates the Job in the target namespace.
                 - name: job-template
@@ -184,10 +185,10 @@ spec:
                       # terminated at the deadline and the Job marked Failed — so it stops even if
                       # exec-kube has already exited and left the Job retained for debugging.
                       # k8s wants integer seconds; the {{=...}} expr converts the duration param.
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters.job-active-deadline).Seconds())}}
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
                       # Auto-delete the finished Job (and its pod) after this window: retained
                       # failed Jobs are kept for debugging but do not pile up forever.
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters.job-ttl).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
                         metadata:
                           annotations:
@@ -251,7 +252,7 @@ spec:
                                 # valueFrom the team's secret (password DSN). Emitted as one flow-YAML line
                                 # by the expr so exactly one form applies. See adapter-dsn param docs above.
                                 - name: DB_DSN
-                                  {{=inputs.parameters.adapter-dsn != '' ? 'value: "' + inputs.parameters.adapter-dsn + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters.adapter-secret + ', key: ' + inputs.parameters.adapter-dsn-key + ' } }'}}
+                                  {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }'}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
