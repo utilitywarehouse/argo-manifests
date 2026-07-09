@@ -12,11 +12,3 @@ patches:
       - op: replace
         path: /metadata/annotations/vault.uw.systems~1aws-role
         value: "arn:aws:iam::950135041896:role/staging-ept-data-orchestrator-rw"
-
-secretGenerator:
-  - name: data-orchestrator-db
-    envs:
-      - secrets/data-orchestrator-db.env
-
-generatorOptions:
-  disableNameSuffixHash: true
