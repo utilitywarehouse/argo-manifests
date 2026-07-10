@@ -1,0 +1,20 @@
+# dev-merit overlay for base/data-export-energy-meterpoints.yaml
+# Appends deployment/cluster-specific params + labels for this cluster/namespace.
+- op: add
+  path: /spec/workflowSpec/arguments/parameters/-
+  value: { name: target-namespace, value: energy-platform }
+- op: add
+  path: /spec/workflowSpec/arguments/parameters/-
+  value: { name: cluster-name, value: dev-merit }
+- op: add
+  path: /metadata/labels/data.uw.systems~1cluster
+  value: dev-merit
+- op: add
+  path: /metadata/labels/data.uw.systems~1namespace
+  value: energy-platform
+- op: add
+  path: /spec/workflowSpec/workflowMetadata/labels/data.uw.systems~1cluster
+  value: dev-merit
+- op: add
+  path: /spec/workflowSpec/workflowMetadata/labels/data.uw.systems~1namespace
+  value: energy-platform

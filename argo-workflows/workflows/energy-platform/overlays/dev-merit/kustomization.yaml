@@ -9,3 +9,15 @@ patches:
       kind: CronWorkflow
       name: data-export-energy-tariff-system
     path: data-export-energy-tariff-system.yaml
+  - target:
+      kind: CronWorkflow
+      name: data-export-energy-meterpoints
+    path: data-export-energy-meterpoints.yaml
+  - target:
+      kind: CronWorkflow
+      name: data-export-energy-services
+    path: data-export-energy-services.yaml
+  - target:
+      kind: CronWorkflow
+      name: data-export-energy-services-event-store
+    path: data-export-energy-services-event-store.yaml

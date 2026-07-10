@@ -1,0 +1,50 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-energy-services
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      energy service data export from energy-platform
+
+  labels:
+    workflows.argoproj.io/creator: energy
+    data.uw.systems/system: energy-service
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: energy-service
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: energy_service }
+        # omit to get all
+        # - {
+        #     name: entities,
+        #     value: "service_snapshot,occupancies,meterpoint_lookup,service_tariff_mapping,psr_record,psr_record_reason,psr_customer_vulnerability,psr_contact,psr_vulnerability_service,home_moves,home_move_service_lookup",
+        #   }
+        - { name: label, value: energy-service-export }
+        - { name: adapter-driver, value: cockroachdb }
+        - {
+            name: adapter-dsn,
+            value: "postgresql://services@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
+          }
+        # CockroachDB cert auth - available in the target namespace. The adapter mints its
+        # client cert from the CA service using these; omit for postgres-based exports.
+        - { name: ca-secret, value: ca.auth.keys.energy-platform }
+        - { name: ca-auth-key, value: moist.auth.key }
+        - { name: ca-config, value: ca.config.energy-platform }
+        - { name: ca-profile-key, value: ca.node.profile }
+        - { name: ca-address-key, value: ca.endpoint }
