@@ -33,6 +33,7 @@
 #     entities, label, triggered-by       run scope / metadata
 #     orchestrator-image, adapter-image   container images
 #     adapter-args                        adapter argv
+#     adapter-driver                      adapter DB driver (postgres | cockroach)
 #     aws-bucket, aws-region              S3 output
 #     orchestrator-db-dsn                 shared orchestrator RDS (literal, IAM auth);
 #       or orchestrator-db-secret + -key  ...sourced from a secret instead (password DSN)
@@ -90,9 +91,10 @@ spec:
         }
       - {
           name: adapter-image,
-          value: "registry.uw.systems/dev-enablement/data-adapter-pg:feat-data-orchestrator-poc",
+          value: "registry.uw.systems/dev-enablement/data-adapter:feat-data-orchestrator-poc",
         }
       - { name: adapter-args, value: "serve" }
+      - { name: adapter-driver, value: postgres }
       # S3 output (env-specific)
       - { name: aws-bucket, value: uw-dev-qe-dev-data-orchestrator }
       - { name: aws-region, value: eu-west-1 }
@@ -144,9 +146,10 @@ spec:
             }
           - {
               name: adapter-image,
-              value: "registry.uw.systems/dev-enablement/data-adapter-pg:feat-data-orchestrator-poc",
+              value: "registry.uw.systems/dev-enablement/data-adapter:feat-data-orchestrator-poc",
             }
           - { name: adapter-args, value: "serve" }
+          - { name: adapter-driver, value: postgres }
           - { name: aws-bucket, value: uw-dev-qe-dev-data-orchestrator }
           - { name: aws-region, value: eu-west-1 }
           - {
@@ -257,6 +260,7 @@ spec:
                               env:
                                 - name: DB_DSN
                                   {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }'}}
+                                - { name: DB_DRIVER, value: {{inputs.parameters.adapter-driver}} }   # postgres | cockroach
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
@@ -265,50 +269,36 @@ spec:
                                 - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }
                           containers:
                             # ==== TRIGGER (main container) =======================================
-                            # Waits for the orchestrator API, StartRun, polls GetRunStatus to a
-                            # terminal state, and emits the run id (exec-kube captures
-                            # ARGO_RESULT_OUTPUT=). The orchestrator image must have gRPC server
+                            # Drives the run via the call-grpc executor (gRPC server reflection):
+                            # waits for the orchestrator API, StartRun (capturing runId), then polls
+                            # GetRunStatus to a terminal state. The shell only sequences the two
+                            # calls and applies the zero-jobs guard; all gRPC I/O and field
+                            # extraction is done by /app/executor. Emits the run id for exec-kube
+                            # (ARGO_RESULT_OUTPUT=). The orchestrator image must have gRPC server
                             # reflection enabled.
                             - name: trigger
-                              image: fullstorydev/grpcurl:v1.9.3-alpine
+                              image: registry.uw.systems/dev-enablement/call-grpc:feat-bq-exporter
                               command: [sh, -c]
                               args:
                                 - |
                                   set -eu
-                                  # Normalise the entities list into a JSON array:
-                                  #   "tariffs, tariff_rates"  ->  "tariffs","tariff_rates"
-                                  #   ""                        ->  (empty = all entities)
-                                  ENTITIES_JSON=$(printf '%s' "{{inputs.parameters.entities}}" \
-                                    | tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d; s/^/"/; s/$/"/' \
-                                    | tr '\n' ',' | sed 's/,$//')
-                                  # IMPORT: source-run-id pins which export run to import. When empty the
-                                  # orchestrator resolves the latest completed export run for system-key, so we
-                                  # emit the sourceRunId field only when set (exports never carry one).
-                                  SRC_JSON=""
-                                  if [ -n "{{inputs.parameters.source-run-id}}" ]; then
-                                    SRC_JSON="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","
-                                  fi
-                                  echo "waiting for orchestrator API on :8090 ..."
-                                  until grpcurl -plaintext localhost:8090 list >/dev/null 2>&1; do sleep 2; done
-                                  echo "starting run ({{inputs.parameters.run-type}} {{inputs.parameters.system-key}}) entities=[$ENTITIES_JSON] source-run-id=[{{inputs.parameters.source-run-id}}] ..."
-                                  RUN=$(grpcurl -plaintext -d "{
-                                    \"runType\":\"{{inputs.parameters.run-type}}\",
-                                    \"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES_JSON]}],
-                                    ${SRC_JSON}
-                                    \"label\":\"{{inputs.parameters.label}}\",
-                                    \"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"
-                                  }" localhost:8090 uw.platform.data.orchestrator.v1.OrchestratorService/StartRun \
-                                    | tr -d ' \n' | sed -n 's/.*"runId":"\([^"]*\)".*/\1/p')
-                                  if [ -z "$RUN" ]; then echo "StartRun rejected or no run_id returned"; exit 1; fi
-                                  echo "run_id=$RUN"
-                                  while :; do
-                                    S=$(grpcurl -plaintext -d "{\"runId\":\"$RUN\"}" localhost:8090 \
-                                      uw.platform.data.orchestrator.v1.OrchestratorService/GetRunStatus \
-                                      | tr -d ' \n' | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
-                                    echo "run state: ${S:-<unknown>}"
-                                    case "$S" in
-                                      *SUCCEEDED*) echo "run succeeded"; echo "ARGO_RESULT_OUTPUT=$RUN"; exit 0 ;;
-                                      *FAILED*|*PARTIAL*|*CANCELLED*) echo "run did not succeed: $S"; exit 1 ;;
-                                    esac
-                                    sleep 5
-                                  done
+                                  SERVICE=uw.platform.data.orchestrator.v1.OrchestratorService
+                                  # entities: "tariffs, tariff_rates" -> "tariffs","tariff_rates"  (empty = all)
+                                  ENTITIES=$(printf '%s' "{{inputs.parameters.entities}}" | tr ',' '\n' \
+                                    | sed 's/^ *//; s/ *$//; /^$/d; s/^/"/; s/$/"/' | tr '\n' ',' | sed 's/,$//')
+                                  # IMPORT only: pin a specific export run. Empty = orchestrator resolves the latest.
+                                  SRC=""
+                                  if [ -n "{{inputs.parameters.source-run-id}}" ]; then SRC="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","; fi
+
+                                  /app/executor --address localhost:8090 --method "$SERVICE/StartRun" \
+                                    --payload "{\"runType\":\"{{inputs.parameters.run-type}}\",\"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES]}],$SRC\"label\":\"{{inputs.parameters.label}}\",\"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"}" \
+                                    --result-field runId --result-path /tmp/run-id --output /dev/null
+                                  RUN=$(cat /tmp/run-id); echo "run_id=$RUN"
+
+                                  /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
+                                    --payload "{\"runId\":\"$RUN\"}" \
+                                    --poll-field state --poll-success SUCCEEDED --poll-failure FAILED,PARTIAL,CANCELLED \
+                                    --timeout {{=int(duration(inputs.parameters['timeout']).Seconds())}} --output /tmp/status.json
+
+                                  grep -q '"jobId"' /tmp/status.json || { echo "SUCCEEDED but planned 0 jobs — nothing moved; check orchestrator/adapter logs above"; cat /tmp/status.json; exit 1; }
+                                  echo "run succeeded"; echo "ARGO_RESULT_OUTPUT=$RUN"
