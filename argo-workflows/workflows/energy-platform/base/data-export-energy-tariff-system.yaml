@@ -19,8 +19,6 @@ spec:
   concurrencyPolicy: Forbid
   workflowSpec:
     serviceAccountName: workflow-step-executor
-    # Stamp each spawned Workflow run with the same intrinsic labels, so runs (not just
-    # the cron) are filterable. cluster/namespace are appended here per-deployment by the overlays.
     workflowMetadata:
       labels:
         data.uw.systems/system: energy-tariff-system
@@ -33,13 +31,11 @@ spec:
         - { name: run-type, value: RUN_TYPE_EXPORT }
         - { name: system-key, value: energy_tariff_system }
         # tables available to readonly user - https://github.com/utilitywarehouse/terraform/blob/master/aws/dev/energy-rds/databases.tf#L144
-        - {
-            name: entities,
-            value: "tariffs, tariff_versions, tariff_rates, tariff_standing_charges,eligibility_criteria, tariff_eligibility",
-          }
+        # omit to get all
+        # - {
+        #     name: entities,
+        #     value: "tariffs, tariff_versions, tariff_rates, tariff_standing_charges,eligibility_criteria, tariff_eligibility",
+        #   }
         - { name: label, value: energy-tariff-system-export }
-        # target-namespace + cluster-name are deployment/cluster-specific — appended by the
-        # per-deployment overlay (workflows/energy-platform/overlays/<cluster>), not set here.
-        # Source DSN owned by energy teams and already available in the target namespace
         - { name: adapter-secret, value: energy-tariff-system-data-adapter }
         - { name: adapter-dsn-key, value: bg_con_url }
