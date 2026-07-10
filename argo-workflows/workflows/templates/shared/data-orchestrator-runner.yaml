@@ -302,7 +302,7 @@ spec:
 
                                   /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
                                     --payload "{\"runId\":\"$RUN\"}" \
-                                    --poll-field state --poll-success SUCCEEDED --poll-failure FAILED,PARTIAL,CANCELLED \
+                                    --poll-field run.state --poll-success RUN_STATE_SUCCEEDED --poll-failure RUN_STATE_FAILED,RUN_STATE_PARTIAL,RUN_STATE_CANCELLED \
                                     --timeout {{=int(duration(inputs.parameters['timeout']).Seconds())}} --output /tmp/status.json
 
                                   grep -q '"jobId"' /tmp/status.json || { echo "SUCCEEDED but planned 0 jobs — nothing moved; check orchestrator/adapter logs above"; cat /tmp/status.json; exit 1; }
