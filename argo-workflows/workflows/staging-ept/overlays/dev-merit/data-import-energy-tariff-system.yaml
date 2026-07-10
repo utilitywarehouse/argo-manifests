@@ -22,7 +22,7 @@
   value: { name: orchestrator-db-dsn-key, value: "" }
 - op: add
   path: /spec/workflowSpec/arguments/parameters/-
-  value: { name: aws-bucket, value: uw-dev-staging-ept-data-orchestrator }
+  value: { name: aws-bucket, value: uw-dev-qe-dev-data-orchestrator }
 # Destination DB (tariff_system_db) the import writes into — IAM auth, passwordless.
 - op: add
   path: /spec/workflowSpec/arguments/parameters/-
