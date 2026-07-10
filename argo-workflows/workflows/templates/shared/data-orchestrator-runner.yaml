@@ -146,7 +146,7 @@ spec:
             }
           - {
               name: adapter-image,
-              value: "registry.uw.systems/dev-enablement/data-adapter-pg:feat-data-orchestrator-poc",
+              value: "registry.uw.systems/dev-enablement/data-adapter:feat-data-orchestrator-poc",
             }
           - { name: adapter-args, value: "serve" }
           - { name: adapter-driver, value: postgres }
@@ -277,7 +277,7 @@ spec:
                             # (ARGO_RESULT_OUTPUT=). The orchestrator image must have gRPC server
                             # reflection enabled.
                             - name: trigger
-                              image: registry.uw.systems/dev-enablement/call-grpc:latest
+                              image: registry.uw.systems/dev-enablement/call-grpc:feat-bq-exporter
                               command: [sh, -c]
                               args:
                                 - |
