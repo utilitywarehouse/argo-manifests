@@ -290,9 +290,14 @@ spec:
                                   SRC=""
                                   if [ -n "{{inputs.parameters.source-run-id}}" ]; then SRC="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","; fi
 
-                                  /app/executor --address localhost:8090 --method "$SERVICE/StartRun" \
+                                  # StartRun. A rejected run comes back on the `rejected` oneof branch, so
+                                  # accepted.runId is absent and extraction fails — echo the response (which
+                                  # carries rejected.reason) instead of a misleading "field not found".
+                                  if ! /app/executor --address localhost:8090 --method "$SERVICE/StartRun" \
                                     --payload "{\"runType\":\"{{inputs.parameters.run-type}}\",\"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES]}],$SRC\"label\":\"{{inputs.parameters.label}}\",\"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"}" \
-                                    --result-field runId --result-path /tmp/run-id --output /dev/null
+                                    --result-field accepted.runId --result-path /tmp/run-id --output /tmp/start.json; then
+                                    echo "StartRun was not accepted:"; cat /tmp/start.json 2>/dev/null; exit 1
+                                  fi
                                   RUN=$(cat /tmp/run-id); echo "run_id=$RUN"
 
                                   /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
