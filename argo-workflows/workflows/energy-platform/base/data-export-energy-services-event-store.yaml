@@ -34,7 +34,7 @@ spec:
         # - { name: entities, value: "aggregates,events,outbox" }
         - { name: label, value: energy-service-events-export }
         - { name: adapter-driver, value: cockroachdb }
-        - { name: adapter-secret, value: services-store-config }
+        - { name: adapter-config, value: services-store-config }
         - { name: adapter-dsn-key, value: event_store_url }
         # CockroachDB cert auth - available in the target namespace. The adapter mints its
         # client cert from the CA service using these; omit for postgres-based exports.
