@@ -35,6 +35,7 @@ spec:
             value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping",
           }
         - { name: label, value: energy-meterpoints-export }
+        - { name: log-level, value: debug }
         - { name: adapter-driver, value: cockroachdb }
         - { name: adapter-secret, value: meterpoint-projector-secrets }
         - { name: adapter-dsn-key, value: v2.url }
