@@ -321,6 +321,46 @@ spec:
                                   SRC=""
                                   if [ -n "{{inputs.parameters.source-run-id}}" ]; then SRC="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","; fi
 
+                                  # ---- Preflight: adapter reachable + advertises what we requested -----
+                                  # Talk straight to the in-pod adapter (localhost:50051) via reflection,
+                                  # BEFORE StartRun. A missing/typo'd entity fails loudly here instead of
+                                  # surfacing later as a green run that silently plans 0 jobs. GetCapabilities
+                                  # exists on both the export and import adapter services.
+                                  case "{{inputs.parameters.mode}}" in
+                                    export) ADAPTER_SVC=uw.platform.data.export.v1.ExportAdapterService ;;
+                                    import) ADAPTER_SVC=uw.platform.data.import.v1.ImportAdapterService ;;
+                                    *) echo "preflight: unknown mode {{inputs.parameters.mode}}"; exit 1 ;;
+                                  esac
+                                  # Retry: the adapter sidecar starts in parallel with this container, so
+                                  # :50051 may not be listening for the first second or two.
+                                  i=0
+                                  until /app/executor --address localhost:50051 --method "$ADAPTER_SVC/GetCapabilities" \
+                                    --payload '{}' --result-field systemKey --result-path /tmp/sk --output /tmp/caps.json 2>/tmp/pf.err; do
+                                    i=$((i+1))
+                                    if [ "$i" -ge 30 ]; then
+                                      echo "preflight FAILED: adapter GetCapabilities unreachable on localhost:50051 after $i attempts"
+                                      cat /tmp/pf.err 2>/dev/null; exit 1
+                                    fi
+                                    echo "preflight: waiting for adapter on localhost:50051 ($i)"; sleep 2
+                                  done
+                                  # Advertised entity names, one per line (entities[].name only).
+                                  grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/caps.json \
+                                    | sed 's/.*: *"\(.*\)"/\1/' | sort -u > /tmp/adv.txt || true
+                                  echo "preflight: adapter '$(cat /tmp/sk)' advertises $(wc -l < /tmp/adv.txt) entities:"; cat /tmp/adv.txt
+                                  # Requested entities (empty = all advertised → nothing to assert).
+                                  REQ=$(printf '%s' "{{inputs.parameters.entities}}" | tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d')
+                                  if [ -n "$REQ" ]; then
+                                    MISSING=""
+                                    for e in $REQ; do grep -qx "$e" /tmp/adv.txt || MISSING="$MISSING $e"; done
+                                    if [ -n "$MISSING" ]; then
+                                      echo "preflight FAILED: requested entities not advertised by adapter:$MISSING"
+                                      echo "requested: $(printf '%s' "$REQ" | tr '\n' ' ')"; exit 1
+                                    fi
+                                    echo "preflight OK: all requested entities are advertised"
+                                  else
+                                    echo "preflight OK: no entity filter (run covers all advertised entities)"
+                                  fi
+
                                   # StartRun. A rejected run comes back on the `rejected` oneof branch, so
                                   # accepted.runId is absent and extraction fails — echo the response (which
                                   # carries rejected.reason) instead of a misleading "field not found".
