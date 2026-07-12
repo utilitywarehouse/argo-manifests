@@ -289,16 +289,16 @@ spec:
                                 {{=inputs.parameters['ca-secret'] != '' ? '- { name: CA_AUTH_KEY, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['ca-secret'] + ', key: ' + inputs.parameters['ca-auth-key'] + ' } } }' : ''}}
                                 {{=inputs.parameters['ca-config'] != '' ? '- { name: CA_PROFILE, valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['ca-config'] + ', key: ' + inputs.parameters['ca-profile-key'] + ' } } }' : ''}}
                                 {{=inputs.parameters['ca-config'] != '' ? '- { name: CA_ADDRESS, valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['ca-config'] + ', key: ' + inputs.parameters['ca-address-key'] + ' } } }' : ''}}
-                              startupProbe:
-                                httpGet: { path: /__/ready, port: http }
-                                initialDelaySeconds: 15
-                                timeoutSeconds: 10
                               readinessProbe:
-                                httpGet: { path: /__/ready, port: http }
+                                httpGet: 
+                                  path: /__/ready
+                                  port: http
                                 initialDelaySeconds: 15
                                 timeoutSeconds: 10
                               livenessProbe:
-                                httpGet: { path: /__/health, port: http }
+                                httpGet: 
+                                  path: /__/health
+                                  port: http
                                 initialDelaySeconds: 15
                                 timeoutSeconds: 10
 
