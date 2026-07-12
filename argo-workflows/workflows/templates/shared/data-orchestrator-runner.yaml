@@ -250,6 +250,10 @@ spec:
                               image: {{inputs.parameters.orchestrator-image}}
                               imagePullPolicy: Always
                               command: ["/svc", "serve"]
+                              resources:
+                                limits:
+                                  cpu: 2
+                                  memory: 2Gi
                               env:
                                 - { name: GRPC_ADDR, value: ":8090" }
                                 - { name: HTTP_ADDR, value: ":8080" }
@@ -272,6 +276,13 @@ spec:
                               image: {{inputs.parameters.adapter-image}}
                               imagePullPolicy: Always
                               args: [{{inputs.parameters.adapter-args}}]
+                              resources:
+                                requests:
+                                  cpu: 1
+                                  memory: 1Gi
+                                limits:
+                                  cpu: 4
+                                  memory: 4Gi
                               env:
                                 - name: DB_DSN
                                   {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }'}}
