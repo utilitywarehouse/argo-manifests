@@ -30,8 +30,10 @@ spec:
         - { name: mode, value: export }
         - { name: run-type, value: RUN_TYPE_EXPORT }
         - { name: system-key, value: energy_meterpoints }
-        # omit to get all
-        # - { name: entities, value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping" }
+        - {
+            name: entities,
+            value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping",
+          }
         - { name: label, value: energy-meterpoints-export }
         - { name: adapter-driver, value: cockroachdb }
         - { name: adapter-secret, value: meterpoint-projector-secrets }
