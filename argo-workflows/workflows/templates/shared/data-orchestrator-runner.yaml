@@ -9,11 +9,17 @@
 # Pod anatomy — one pod, four containers (see the Job spec for full wiring):
 #
 #   render-adapters-config  init      writes /etc/do/adapters.yaml (localhost wiring)
-#   orchestrator            sidecar   the data-orchestrator; owns the SHARED RDS + the
-#                                     S3 output bucket; serves gRPC on :8090
 #   adapter                 sidecar   the per-system SOURCE adapter; reads the team's
-#                                     source DB; serves the orchestrator on :50051
+#                                     source DB; serves the orchestrator on :50051. Its
+#                                     startupProbe GATES the orchestrator — see below.
+#   orchestrator            sidecar   the data-orchestrator; owns the SHARED RDS + the
+#                                     S3 output bucket; serves gRPC on :8090. Starts only
+#                                     after the adapter is /__/ready.
 #   trigger                 main      StartRun, then poll GetRunStatus to completion
+#
+# Startup ordering is deliberate: adapter (ready) → orchestrator → trigger. The adapter is
+# sequenced ahead of the orchestrator so its boot-time RDS/IAM call lands after the kyverno
+# vault-sidecar-aws is serving creds on :8098 (that race crashed the orchestrator on cold start).
 #
 # Two look-alike settings that mean DIFFERENT things per container — do not conflate:
 #   DB_DSN         orchestrator → shared orchestrator RDS (IAM auth, passwordless)
@@ -245,34 +251,7 @@ spec:
                               volumeMounts:
                                 - { name: do-config, mountPath: /etc/do }
 
-                            # ==== ORCHESTRATOR (sidecar) ======
-                            # The data-orchestrator. Owns the SHARED RDS + the S3 output bucket, and
-                            # serves gRPC on :8090 (the trigger drives it). AWS creds come from
-                            # vault injection (runner-sa's role); RDS is IAM auth, so DB_DSN is
-                            # passwordless — the app mints the token.
-                            - name: orchestrator
-                              restartPolicy: Always
-                              image: {{inputs.parameters.orchestrator-image}}
-                              imagePullPolicy: Always
-                              command: ["/svc", "serve"]
-                              resources:
-                                limits:
-                                  cpu: 2
-                                  memory: 2Gi
-                              env:
-                                - { name: UW_LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                - { name: GRPC_ADDR, value: ":8090" }
-                                - { name: HTTP_ADDR, value: ":8080" }
-                                - { name: ADAPTERS_CONFIG, value: /etc/do/adapters.yaml }
-                                - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
-                                - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }        # output bucket
-                                - name: DB_DSN
-                                  {{=inputs.parameters['orchestrator-db-dsn'] != '' ? 'value: "' + inputs.parameters['orchestrator-db-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['orchestrator-db-secret'] + ', key: ' + inputs.parameters['orchestrator-db-dsn-key'] + ' } }'}}
-                              volumeMounts:
-                                - { name: do-config, mountPath: /etc/do }
-
-                            # ==== ADAPTER (sidecar) ======
+                            # ==== ADAPTER (sidecar) — starts BEFORE the orchestrator ======
                             # The per-system SOURCE adapter. Reads the team's source DB and serves
                             # the orchestrator on :50051. DB_DSN here is the SOURCE DSN, mapped from
                             # the team's own secret OR configmap in the target ns (key = adapter-dsn-key).
@@ -283,6 +262,8 @@ spec:
                               image: {{inputs.parameters.adapter-image}}
                               imagePullPolicy: Always
                               args: [{{inputs.parameters.adapter-args}}]
+                              ports:
+                                - { name: http, containerPort: 8081 }   # HTTP_ADDR — health endpoints
                               resources:
                                 requests:
                                   cpu: 1
@@ -308,6 +289,45 @@ spec:
                                 {{=inputs.parameters['ca-secret'] != '' ? '- { name: CA_AUTH_KEY, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['ca-secret'] + ', key: ' + inputs.parameters['ca-auth-key'] + ' } } }' : ''}}
                                 {{=inputs.parameters['ca-config'] != '' ? '- { name: CA_PROFILE, valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['ca-config'] + ', key: ' + inputs.parameters['ca-profile-key'] + ' } } }' : ''}}
                                 {{=inputs.parameters['ca-config'] != '' ? '- { name: CA_ADDRESS, valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['ca-config'] + ', key: ' + inputs.parameters['ca-address-key'] + ' } } }' : ''}}
+                              startupProbe:
+                                httpGet: { path: /__/ready, port: http }
+                                initialDelaySeconds: 15
+                                timeoutSeconds: 10
+                              readinessProbe:
+                                httpGet: { path: /__/ready, port: http }
+                                initialDelaySeconds: 15
+                                timeoutSeconds: 10
+                              livenessProbe:
+                                httpGet: { path: /__/health, port: http }
+                                initialDelaySeconds: 15
+                                timeoutSeconds: 10
+
+                            # ==== ORCHESTRATOR (sidecar) — starts only after the adapter is /__/ready ======
+                            # The data-orchestrator. Owns the SHARED RDS + the S3 output bucket, and
+                            # serves gRPC on :8090 (the trigger drives it). AWS creds come from
+                            # vault injection (runner-sa's role); RDS is IAM auth, so DB_DSN is
+                            # passwordless — the app mints the token.
+                            - name: orchestrator
+                              restartPolicy: Always
+                              image: {{inputs.parameters.orchestrator-image}}
+                              imagePullPolicy: Always
+                              command: ["/svc", "serve"]
+                              resources:
+                                limits:
+                                  cpu: 2
+                                  memory: 2Gi
+                              env:
+                                - { name: UW_LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: GRPC_ADDR, value: ":8090" }
+                                - { name: HTTP_ADDR, value: ":8080" }
+                                - { name: ADAPTERS_CONFIG, value: /etc/do/adapters.yaml }
+                                - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
+                                - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }        # output bucket
+                                - name: DB_DSN
+                                  {{=inputs.parameters['orchestrator-db-dsn'] != '' ? 'value: "' + inputs.parameters['orchestrator-db-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['orchestrator-db-secret'] + ', key: ' + inputs.parameters['orchestrator-db-dsn-key'] + ' } }'}}
+                              volumeMounts:
+                                - { name: do-config, mountPath: /etc/do }
                           containers:
                             # ==== TRIGGER (main container) =======================================
                             # Drives the run via the call-grpc executor (gRPC server reflection):
