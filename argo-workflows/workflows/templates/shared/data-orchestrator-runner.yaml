@@ -248,6 +248,7 @@ spec:
                             - name: orchestrator
                               restartPolicy: Always
                               image: {{inputs.parameters.orchestrator-image}}
+                              imagePullPolicy: Always
                               command: ["/svc", "serve"]
                               env:
                                 - { name: GRPC_ADDR, value: ":8090" }
@@ -269,6 +270,7 @@ spec:
                             - name: adapter
                               restartPolicy: Always
                               image: {{inputs.parameters.adapter-image}}
+                              imagePullPolicy: Always
                               args: [{{inputs.parameters.adapter-args}}]
                               env:
                                 - name: DB_DSN
