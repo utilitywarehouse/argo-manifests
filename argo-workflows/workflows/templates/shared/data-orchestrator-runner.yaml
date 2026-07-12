@@ -84,6 +84,7 @@ spec:
       - { name: source-run-id, value: "" }
       - { name: label, value: adhoc }
       - { name: triggered-by, value: argo }
+      - { name: log-level, value: info }
       # container images (env-specific)
       - {
           name: orchestrator-image,
@@ -148,6 +149,7 @@ spec:
           - { name: source-run-id, value: "" }
           - { name: label, value: adhoc }
           - { name: triggered-by, value: argo }
+          - { name: log-level, value: info }
           - {
               name: orchestrator-image,
               value: "registry.uw.systems/dev-enablement/data-orchestrator:feat-data-orchestrator-poc",
@@ -192,7 +194,7 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
-                - { name: log-level, value: "DEBUG" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 # Full Job manifest, rendered as a string. Argo substitutes every
                 # {{inputs.parameters.*}} before exec-kube creates the Job in the target namespace.
                 - name: job-template
@@ -255,6 +257,8 @@ spec:
                                   cpu: 2
                                   memory: 2Gi
                               env:
+                                - { name: UW_LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
                                 - { name: GRPC_ADDR, value: ":8090" }
                                 - { name: HTTP_ADDR, value: ":8080" }
                                 - { name: ADAPTERS_CONFIG, value: /etc/do/adapters.yaml }
@@ -284,6 +288,8 @@ spec:
                                   cpu: 4
                                   memory: 4Gi
                               env:
+                                - { name: UW_LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
                                 - name: DB_DSN
                                   {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }'}}
                                 - { name: DB_DRIVER, value: {{inputs.parameters.adapter-driver}} }   # postgres | cockroach
