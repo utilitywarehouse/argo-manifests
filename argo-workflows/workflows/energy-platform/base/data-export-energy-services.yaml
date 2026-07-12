@@ -37,10 +37,8 @@ spec:
         #   }
         - { name: label, value: energy-service-export }
         - { name: adapter-driver, value: cockroachdb }
-        - {
-            name: adapter-dsn,
-            value: "postgresql://services@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
-          }
+        - { name: adapter-secret, value: services-store-config }
+        - { name: adapter-dsn-key, value: state_store_url }
         # CockroachDB cert auth - available in the target namespace. The adapter mints its
         # client cert from the CA service using these; omit for postgres-based exports.
         - { name: ca-secret, value: ca.auth.keys.energy-platform }
