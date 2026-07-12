@@ -14,6 +14,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # exec-kube resolves kustomize-hashed Secret/ConfigMap names at runtime by
+  # listing metadata only (PartialObjectMetadata; object data is never fetched).
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
