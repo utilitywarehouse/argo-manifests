@@ -17,7 +17,7 @@
 #
 # Two look-alike settings that mean DIFFERENT things per container — do not conflate:
 #   DB_DSN         orchestrator → shared orchestrator RDS (IAM auth, passwordless)
-#                  adapter      → the team's SOURCE DB (from adapter-secret)
+#                  adapter      → the team's SOURCE DB (from adapter-secret/-config, or literal adapter-dsn)
 #   AWS_S3_BUCKET  orchestrator → output bucket it writes results to
 #                  adapter      → only relevant if the adapter streams to S3 itself
 #
@@ -26,7 +26,7 @@
 #
 #   Supplied per run
 #     mode, run-type, system-key         what to run
-#     adapter-secret, adapter-dsn-key     source DSN (team's secret in target ns)
+#     adapter-secret|-config, adapter-dsn-key  source DSN (team's secret or configmap in target ns)
 #     target-namespace, cluster-name      where to run / how to dispatch
 #
 #   Environment defaults
@@ -67,13 +67,15 @@ spec:
       - { name: mode } # export | import — selects adapters.yaml section + adapter MODE
       - { name: run-type } # RUN_TYPE_EXPORT | RUN_TYPE_IMPORT
       - { name: system-key } # e.g. energy_tariff_system
-      # adapter DSN — two mutually exclusive ways to supply it (adapter-dsn wins if set):
-      #   secret  : adapter-secret + adapter-dsn-key → valueFrom secretKeyRef (password DSN, e.g. export source)
-      #   literal : adapter-dsn                        → plain value (IAM-auth passwordless DSN, e.g. import dest;
-      #                                                  the pod's runner-sa vault role mints the RDS token)
+      # adapter DSN — three mutually exclusive ways to supply it.
+      # Precedence: literal, then secret, then configmap:
+      #   literal   : adapter-dsn → plain value
+      #   secret    : adapter-secret + adapter-dsn-key  → valueFrom secretKeyRef
+      #   configmap : adapter-config + adapter-dsn-key  → valueFrom configMapKeyRef
       - { name: adapter-secret, value: "" } # secret in target ns holding the DSN
-      - { name: adapter-dsn-key, value: "DB_DSN" } # key within adapter-secret
-      - { name: adapter-dsn, value: "" } # literal DSN; alternative to adapter-secret, takes precedence when set
+      - { name: adapter-config, value: "" } # configmap in target ns holding the DSN (alternative to adapter-secret)
+      - { name: adapter-dsn-key, value: "DB_DSN" } # key within adapter-secret / adapter-config
+      - { name: adapter-dsn, value: "" } # literal DSN; alternative to adapter-secret/-config, takes precedence when set
       # where to run / dispatch
       - { name: target-namespace, value: "" } # namespace to run the Job in (source DB reachable)
       - { name: cluster-name, value: "" } # target cluster → resolves CA + token + server 1:1
@@ -143,6 +145,7 @@ spec:
           - { name: target-namespace }
           - { name: cluster-name }
           - { name: adapter-secret, value: "" }
+          - { name: adapter-config, value: "" }
           - { name: adapter-dsn-key, value: "DB_DSN" }
           - { name: adapter-dsn, value: "" }
           - { name: entities, value: "" }
@@ -272,7 +275,7 @@ spec:
                             # ==== ADAPTER (sidecar) ======
                             # The per-system SOURCE adapter. Reads the team's source DB and serves
                             # the orchestrator on :50051. DB_DSN here is the SOURCE DSN, mapped from
-                            # the team's own secret in the target ns (key = adapter-dsn-key).
+                            # the team's own secret OR configmap in the target ns (key = adapter-dsn-key).
                             # Deliberately NOT envFrom: that would also inject any AWS_* keys in the
                             # secret and clobber the vault-injected creds.
                             - name: adapter
@@ -291,7 +294,7 @@ spec:
                                 - { name: UW_LOG_LEVEL, value: {{inputs.parameters.log-level}} }
                                 - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
                                 - name: DB_DSN
-                                  {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }'}}
+                                  {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : (inputs.parameters['adapter-secret'] != '' ? 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }' : 'valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['adapter-config'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }')}}
                                 - { name: DB_DRIVER, value: {{inputs.parameters.adapter-driver}} }   # postgres | cockroach
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
