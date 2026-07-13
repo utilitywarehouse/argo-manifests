@@ -30,8 +30,7 @@ spec:
         - { name: mode, value: export }
         - { name: run-type, value: RUN_TYPE_EXPORT }
         - { name: system-key, value: energy_service_event_store }
-        # omit to get all
-        # - { name: entities, value: "aggregates,events,outbox" }
+        - { name: entities, value: "aggregates,events,outbox" }
         - { name: label, value: energy-service-events-export }
         - { name: adapter-driver, value: cockroachdb }
         - { name: adapter-config, value: services-store-config }
