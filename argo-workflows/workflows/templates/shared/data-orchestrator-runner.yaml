@@ -254,7 +254,7 @@ spec:
                                   cat > /etc/do/adapters.yaml <<EOF
                                   {{inputs.parameters.mode}}:
                                     - system_key: {{inputs.parameters.system-key}}
-                                      address: "passthrough:///adapter:50051"
+                                      address: "passthrough:///127.0.0.1:50051"
                                   EOF
                                   echo "rendered /etc/do/adapters.yaml:"; cat /etc/do/adapters.yaml
                               volumeMounts:
