@@ -9,11 +9,8 @@ resources:
 # Single source of truth for the critical image versions. Bump a tag here and
 # it propagates to every environment (all envs pull templates/ -> shared/).
 #
-# These images can't be pinned by kustomize's `images:` transformer: three are
-# Argo *parameter* strings (not container image fields) and call-grpc lives in
-# the exec-kube Job heredoc. So instead we hold the tags in a local-config
-# ConfigMap (used only as a replacement source, never deployed) and inject them
-# into the real fields with `replacements:`.
+# These images can't be pinned by kustomize's `images:` transformer if they are
+# Argo *parameter* strings or job heredoc (not container image fields).
 #
 # To bump a version: edit the literal below. To override per-environment: patch
 # these literals (or add replacements) in the environment overlay.
