@@ -254,7 +254,7 @@ spec:
                                   cat > /etc/do/adapters.yaml <<EOF
                                   {{inputs.parameters.mode}}:
                                     - system_key: {{inputs.parameters.system-key}}
-                                      address: localhost:50051
+                                      address: "passthrough:///localhost:50051"
                                   EOF
                                   echo "rendered /etc/do/adapters.yaml:"; cat /etc/do/adapters.yaml
                               volumeMounts:
@@ -422,10 +422,16 @@ spec:
                                   RUN=$(cat /tmp/run-id); echo "run_id=$RUN"
                                   echo "StartRun response:"; cat /tmp/start.json 2>/dev/null; echo
 
-                                  /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
+                                  if ! /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
                                     --payload "{\"runId\":\"$RUN\"}" \
                                     --poll-field run.state --poll-success RUN_STATE_SUCCEEDED --poll-failure RUN_STATE_FAILED,RUN_STATE_PARTIAL,RUN_STATE_CANCELLED \
-                                    --timeout {{=int(duration(inputs.parameters['timeout']).Seconds())}} --output /tmp/status.json
+                                    --timeout {{=int(duration(inputs.parameters['timeout']).Seconds())}} --output /tmp/status.json; then
+                                    echo "run did not succeed — final status:"
+                                    /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
+                                      --payload "{\"runId\":\"$RUN\"}" --output /tmp/status.json 2>/dev/null || true
+                                    cat /tmp/status.json 2>/dev/null; echo
+                                    exit 1
+                                  fi
 
                                   grep -q '"jobId"' /tmp/status.json || { echo "SUCCEEDED but planned 0 jobs — nothing moved; check orchestrator/adapter logs above"; cat /tmp/status.json; exit 1; }
                                   echo "run succeeded"; echo "ARGO_RESULT_OUTPUT=$RUN"
