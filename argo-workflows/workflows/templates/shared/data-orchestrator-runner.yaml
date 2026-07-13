@@ -367,20 +367,39 @@ spec:
                                   SRC=""
                                   if [ -n "{{inputs.parameters.source-run-id}}" ]; then SRC="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","; fi
 
+                                  SYS="{{inputs.parameters.system-key}}"
+                                  # Dump the full health/ready payloads from BOTH the orchestrator (:8080) and
+                                  # the adapter (:8081) so a 0-job run can be diagnosed as readiness vs no-data.
+                                  dump_health() {
+                                    echo "=== orchestrator /__/health (:8080) ==="; wget -qO- http://127.0.0.1:8080/__/health 2>/dev/null; echo
+                                    echo "=== orchestrator /__/ready  (:8080) ==="; wget -qO- http://127.0.0.1:8080/__/ready  2>/dev/null; echo
+                                    echo "=== adapter      /__/health (:8081) ==="; wget -qO- http://127.0.0.1:8081/__/health 2>/dev/null; echo
+                                    echo "=== adapter      /__/ready  (:8081) ==="; wget -qO- http://127.0.0.1:8081/__/ready  2>/dev/null; echo
+                                  }
                                   echo "waiting for orchestrator :8080 /__/health to report all deps healthy..."
                                   i=0
                                   until body=$(wget -qO- http://127.0.0.1:8080/__/health 2>/dev/null); [ -n "$body" ] && ! printf '%s' "$body" | grep -q '"unhealthy"'
                                   do
                                     i=$((i+1))
                                     if [ "$i" -ge 150 ]; then
-                                      echo "orchestrator never became fully healthy after $i tries; last /__/health body:"
-                                      printf '%s\n' "$body"
+                                      echo "orchestrator never became fully healthy after $i tries; health snapshot:"
+                                      dump_health
                                       exit 1
                                     fi
                                     echo "orchestrator not ready yet ($i)"
                                     sleep 2
                                   done
-                                  echo "orchestrator healthy — db, s3 and adapter all connected; starting run"
+                                  echo "orchestrator reports no unhealthy deps — health snapshot before StartRun:"
+                                  dump_health
+                                  # Soft registration check: a "no unhealthy" body still passes when THIS run's
+                                  # adapter check is simply ABSENT — which plans 0 jobs. Flag it, don't block
+                                  # (the runs that work today must keep working).
+                                  if printf '%s' "$body" | grep -q "$SYS"; then
+                                    echo "OK: '$SYS' present in orchestrator /__/health (adapter registered for this run)"
+                                  else
+                                    echo "WARN: '$SYS' NOT found in orchestrator /__/health check names — adapter may be unregistered for planning; a 0-job run is likely"
+                                  fi
+                                  echo "starting run"
 
                                   # StartRun. A rejected run comes back on the `rejected` oneof branch, so
                                   # accepted.runId is absent and extraction fails — echo the response (which
