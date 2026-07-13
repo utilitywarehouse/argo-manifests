@@ -4,3 +4,60 @@ kind: Kustomization
 resources:
   - executor-remote-namespace.yaml
   - data-orchestrator-runner.yaml
+
+# ---------------------------------------------------------------------------
+# Single source of truth for the critical image versions. Bump a tag here and
+# it propagates to every environment (all envs pull templates/ -> shared/).
+#
+# These images can't be pinned by kustomize's `images:` transformer: three are
+# Argo *parameter* strings (not container image fields) and call-grpc lives in
+# the exec-kube Job heredoc. So instead we hold the tags in a local-config
+# ConfigMap (used only as a replacement source, never deployed) and inject them
+# into the real fields with `replacements:`.
+#
+# To bump a version: edit the literal below. To override per-environment: patch
+# these literals (or add replacements) in the environment overlay.
+# ---------------------------------------------------------------------------
+configMapGenerator:
+  - name: image-versions
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:1e665baecb828287a0bdcb533b2bfb372a8f5b99
+      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:1e665baecb828287a0bdcb533b2bfb372a8f5b99
+      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:9ef49fe90e4b73605b2f2471943d0c2a8456d4bb
+      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:157f54497d3fc376f5e7d2781e7e02d4bf971609
+generatorOptions:
+  disableNameSuffixHash: true
+
+replacements:
+  - source:
+      {
+        kind: ConfigMap,
+        name: image-versions,
+        fieldPath: data.data-orchestrator,
+      }
+    targets:
+      - select: { kind: WorkflowTemplate, name: data-orchestrator-runner }
+        fieldPaths:
+          - spec.arguments.parameters.[name=orchestrator-image].value
+          - spec.templates.[name=run].inputs.parameters.[name=orchestrator-image].value
+  - source:
+      { kind: ConfigMap, name: image-versions, fieldPath: data.data-adapter }
+    targets:
+      - select: { kind: WorkflowTemplate, name: data-orchestrator-runner }
+        fieldPaths:
+          - spec.arguments.parameters.[name=adapter-image].value
+          - spec.templates.[name=run].inputs.parameters.[name=adapter-image].value
+  - source: { kind: ConfigMap, name: image-versions, fieldPath: data.call-grpc }
+    targets:
+      - select: { kind: WorkflowTemplate, name: data-orchestrator-runner }
+        fieldPaths:
+          - spec.arguments.parameters.[name=call-grpc-image].value
+          - spec.templates.[name=run].inputs.parameters.[name=call-grpc-image].value
+  - source: { kind: ConfigMap, name: image-versions, fieldPath: data.exec-kube }
+    targets:
+      - select: { kind: WorkflowTemplate, name: executor-remote-namespace }
+        fieldPaths:
+          - spec.templates.[name=execute-job].container.image
