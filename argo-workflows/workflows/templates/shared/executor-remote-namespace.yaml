@@ -48,7 +48,7 @@ spec:
           configMap:
             name: cluster-ca-certs
       container:
-        image: registry.uw.systems/dev-enablement/exec-kube:157f54497d3fc376f5e7d2781e7e02d4bf971609
+        image: registry.uw.systems/dev-enablement/exec-kube:main
         env:
           - name: CLUSTER_NAME
             value: "{{inputs.parameters.cluster-name}}"

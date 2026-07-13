@@ -97,15 +97,15 @@ spec:
       # container images (env-specific)
       - {
           name: orchestrator-image,
-          value: "registry.uw.systems/dev-enablement/data-orchestrator:1e665baecb828287a0bdcb533b2bfb372a8f5b99",
+          value: "registry.uw.systems/dev-enablement/data-orchestrator:main",
         }
       - {
           name: adapter-image,
-          value: "registry.uw.systems/dev-enablement/data-adapter:1e665baecb828287a0bdcb533b2bfb372a8f5b99",
+          value: "registry.uw.systems/dev-enablement/data-adapter:main",
         }
       - {
           name: call-grpc-image,
-          value: "registry.uw.systems/dev-enablement/call-grpc:9ef49fe90e4b73605b2f2471943d0c2a8456d4bb",
+          value: "registry.uw.systems/dev-enablement/call-grpc:main",
         }
       - { name: adapter-args, value: "serve" }
       - { name: adapter-driver, value: postgres }
@@ -166,15 +166,15 @@ spec:
           - { name: log-level, value: info }
           - {
               name: orchestrator-image,
-              value: "registry.uw.systems/dev-enablement/data-orchestrator:1e665baecb828287a0bdcb533b2bfb372a8f5b99",
+              value: "registry.uw.systems/dev-enablement/data-orchestrator:main",
             }
           - {
               name: adapter-image,
-              value: "registry.uw.systems/dev-enablement/data-adapter:1e665baecb828287a0bdcb533b2bfb372a8f5b99",
+              value: "registry.uw.systems/dev-enablement/data-adapter:main",
             }
           - {
               name: call-grpc-image,
-              value: "registry.uw.systems/dev-enablement/call-grpc:9ef49fe90e4b73605b2f2471943d0c2a8456d4bb",
+              value: "registry.uw.systems/dev-enablement/call-grpc:main",
             }
           - { name: adapter-args, value: "serve" }
           - { name: adapter-driver, value: postgres }
@@ -298,6 +298,8 @@ spec:
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract
                                 - { name: HTTP_ADDR, value: ":8081" }
+                                - { name: GRPC_GO_LOG_SEVERITY_LEVEL, value: "info" }
+                                - { name: GRPC_GO_LOG_VERBOSITY_LEVEL, value: "99" }
                                 - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
                                 - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }
                                 # CockroachDB cert auth (optional). Each entry renders only when its source
@@ -345,6 +347,8 @@ spec:
                                 - { name: GRPC_ADDR, value: ":8090" }
                                 - { name: HTTP_ADDR, value: ":8080" }
                                 - { name: ADAPTERS_CONFIG, value: /etc/do/adapters.yaml }
+                                - { name: GRPC_GO_LOG_SEVERITY_LEVEL, value: "info" }
+                                - { name: GRPC_GO_LOG_VERBOSITY_LEVEL, value: "99" }
                                 - { name: AWS_REGION, value: {{inputs.parameters.aws-region}} }
                                 - { name: AWS_S3_BUCKET, value: {{inputs.parameters.aws-bucket}} }        # output bucket
                                 - name: DB_DSN
