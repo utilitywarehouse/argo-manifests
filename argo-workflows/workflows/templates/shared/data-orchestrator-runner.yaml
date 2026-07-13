@@ -311,13 +311,11 @@ spec:
                                 httpGet: 
                                   path: /__/ready
                                   port: http
-                                initialDelaySeconds: 15
                                 timeoutSeconds: 10
                               livenessProbe:
                                 httpGet: 
                                   path: /__/health
                                   port: http
-                                initialDelaySeconds: 15
                                 timeoutSeconds: 10
 
                             # ==== ORCHESTRATOR (sidecar) ======
