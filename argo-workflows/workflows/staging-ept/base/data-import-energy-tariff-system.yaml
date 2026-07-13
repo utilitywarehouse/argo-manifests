@@ -37,6 +37,7 @@ spec:
             value: "tariffs, tariff_versions, tariff_rates, tariff_standing_charges,eligibility_criteria, tariff_eligibility",
           }
         - { name: label, value: energy-tariff-system-import }
+        - { name: log-level, value: debug }
         # Deployment-target params are appended per-overlay (workflows/staging-ept/overlays/<cluster>),
         # not set here: dispatch (target-namespace, cluster-name) + data plane (orchestrator-db-dsn,
         # adapter-dsn destination, aws-bucket) — these differ per environment (dev-merit vs prod).
