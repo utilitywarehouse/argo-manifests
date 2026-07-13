@@ -34,7 +34,7 @@ spec:
         # tables available to readonly user - https://github.com/utilitywarehouse/terraform/blob/master/aws/dev/energy-rds/databases.tf#L144
         - {
             name: entities,
-            value: "tariffs, tariff_versions, tariff_rates, tariff_standing_charges,eligibility_criteria, tariff_eligibility",
+            value: "tariffs,tariff_versions,tariff_rates,tariff_standing_charges,eligibility_criteria,tariff_eligibility",
           }
         - { name: label, value: energy-tariff-system-import }
         - { name: log-level, value: debug }
