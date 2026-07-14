@@ -21,8 +21,8 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:977c7e0d36d6a5bf99753f600d1772bcaed9a1f6
-      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:977c7e0d36d6a5bf99753f600d1772bcaed9a1f6
+      - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:5c9063aa3d12e0482d7cd37c368950e750377868
+      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:5c9063aa3d12e0482d7cd37c368950e750377868
       - call-grpc=registry.uw.systems/dev-enablement/call-grpc:9ef49fe90e4b73605b2f2471943d0c2a8456d4bb
       - exec-kube=registry.uw.systems/dev-enablement/exec-kube:157f54497d3fc376f5e7d2781e7e02d4bf971609
 generatorOptions:
