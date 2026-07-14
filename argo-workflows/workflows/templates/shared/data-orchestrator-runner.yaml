@@ -334,7 +334,7 @@ spec:
                                     echo "waiting for vault AWS creds on :8098"; sleep 1
                                   done
                                   echo "vault AWS creds live; starting orchestrator"
-                                  exec /svc serve
+                                  exec /svc {{inputs.parameters.mode}}
                               resources:
                                 limits:
                                   cpu: 2
