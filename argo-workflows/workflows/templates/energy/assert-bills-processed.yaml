@@ -96,14 +96,21 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  # query-pg writes the CSV result (header + one row) to OUTPUT
-                                  query-pg
-                                  count=$(tail -n 1 /tmp/out.csv)
-                                  echo "unprocessed=$count"
-                                  if [ "$count" != "0" ]; then
-                                    echo "bills not processed for {{inputs.parameters.external-account-number}} (unprocessed=$count)"
+                                  /app/executor
+                                  tally=$(tail -n 1 /tmp/out.csv)
+                                  total=${tally%%:*}
+                                  unprocessed=${tally##*:}
+                                  acct="{{inputs.parameters.external-account-number}}"
+                                  echo "account=$acct total=$total unprocessed=$unprocessed"
+                                  if [ "$total" = "0" ]; then
+                                    echo "no billing_period_accounts rows for $acct — there are no bills to process"
                                     exit 1
                                   fi
+                                  if [ "$unprocessed" != "0" ]; then
+                                    echo "bills not fully processed for $acct ($unprocessed of $total unprocessed)"
+                                    exit 1
+                                  fi
+                                  echo "all $total bill(s) processed for $acct"
                                   echo "ARGO_RESULT_OUTPUT=processed"
                               env:
                                 - name: QUERY

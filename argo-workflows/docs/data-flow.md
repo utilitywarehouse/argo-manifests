@@ -9,7 +9,7 @@ full / partial / specific properties they need — without assembling JSON in SQ
 Do the plainest, fastest thing at each stage:
 
 1. **Query flat.** A producer (e.g. `query-pg`) runs a plain `SELECT` and streams the rows to
-   a file — no `json_build_object` / `json_agg`, no CSV-quoting. Shaping output *inside* the
+   a file — no `json_build_object` / `json_agg`, no CSV-quoting. Shaping output _inside_ the
    query pushes serialization and aggregation onto the DB and is a real bottleneck at scale.
 2. **Capture the file as an artifact.** The result becomes an Argo artifact (any size) plus a
    small parameter mirror.
@@ -50,8 +50,8 @@ echo ARGO_RESULT_END
 and removes those lines from `logs` — so the result is never duplicated into the logs.
 
 **Why `END` matters.** `kubectl logs` merges stdout and stderr, and the two streams interleave
-by arrival at the kubelet, *not* by program order — a diagnostic flushed late can appear
-*after* the payload. The `END` marker bounds the capture so such a line is excluded. A
+by arrival at the kubelet, _not_ by program order — a diagnostic flushed late can appear
+_after_ the payload. The `END` marker bounds the capture so such a line is excluded. A
 `BEGIN` with no `END` yields an empty result and a warning; capture-to-EOF is deliberately not
 supported.
 
@@ -69,10 +69,10 @@ Only `<value>` is written to `result`. If neither marker is present, `result` is
 Output **parameters** live in the Workflow object (etcd) — keep them small. Artifacts live in
 the S3 artifact repository — any size.
 
-| Result size | How it comes back | How to consume |
-| --- | --- | --- |
+| Result size                      | How it comes back          | How to consume                                                                      |
+| -------------------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
 | **Small** (id maps, short lists) | the `result` **parameter** | controller expr `{{= jsonpath(...) }}` / `{{= fromJson(...) }}`, or a `select` step |
-| **Large** (bulk rows) | the `result` **artifact** | a `select` step that mounts the artifact |
+| **Large** (bulk rows)            | the `result` **artifact**  | a `select` step that mounts the artifact                                            |
 
 ## Selecting fields (`select`)
 
@@ -81,13 +81,13 @@ artifact **files**. So selecting fields out of an artifact file **must run in a 
 step is the `select` executor: it reads an input file/artifact, evaluates an
 [expr-lang](https://expr-lang.org) expression against `rows`, and emits the result.
 
-| Env var         | Default  | Meaning |
-| --------------- | -------- | ------- |
-| `INPUT`         | `-`      | Input file (`-` = stdin) |
-| `FORMAT`        | `ndjson` | Input format: `json`, `ndjson`, `lines` |
+| Env var         | Default  | Meaning                                     |
+| --------------- | -------- | ------------------------------------------- |
+| `INPUT`         | `-`      | Input file (`-` = stdin)                    |
+| `FORMAT`        | `ndjson` | Input format: `json`, `ndjson`, `lines`     |
 | `SELECT`        | —        | expr-lang expression over `rows` (required) |
-| `OUTPUT`        | `-`      | Output file (`-` = stdout) |
-| `OUTPUT_FORMAT` | `json`   | Output format: `json`, `ndjson`, `lines` |
+| `OUTPUT`        | `-`      | Output file (`-` = stdout)                  |
+| `OUTPUT_FORMAT` | `json`   | Output format: `json`, `ndjson`, `lines`    |
 
 The input is parsed into `rows` (a list of objects). `json` output is a **bare** array
 (`["J…","K…"]`, not `[{"value":…}]`) so it drops straight into `withParam`; `lines` emits
@@ -99,19 +99,19 @@ scalars bare, one per line (readable, shell- and SQL-friendly).
 include `map, filter, uniq, join, sort, sortBy, concat, flatten, reduce, groupBy, keys,
 values`.
 
-| Need | `SELECT` | `OUTPUT_FORMAT` |
-| --- | --- | --- |
-| fan-out list for `withParam` | `uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))` | `json` → `["J…","K…"]` |
-| readable / shell list | `map(rows, .mpxn)` | `lines` |
-| SQL `IN (…)`, string ids | `join(map(uniq(map(rows, .x)), "'" + # + "'"), ",")` | `lines` → `'J…','K…'` |
-| SQL `IN (…)`, numeric ids | `join(map(rows, string(.id)), ",")` | `lines` → `31222,31245` |
-| specific scalar | `rows[0].gentrack_customer_id` | `json` / `lines` |
-| filter, then project | `map(filter(rows, .gentrack_account_number == "K12345"), .mpxn)` | `json` |
-| partial objects | `map(rows, {mpxn: .mpxn, agr: .gentrack_agreement_id})` | `json` / `ndjson` |
+| Need                         | `SELECT`                                                                             | `OUTPUT_FORMAT`         |
+| ---------------------------- | ------------------------------------------------------------------------------------ | ----------------------- |
+| fan-out list for `withParam` | `uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))` | `json` → `["J…","K…"]`  |
+| readable / shell list        | `map(rows, .mpxn)`                                                                   | `lines`                 |
+| SQL `IN (…)`, string ids     | `join(map(uniq(map(rows, .x)), "'" + # + "'"), ",")`                                 | `lines` → `'J…','K…'`   |
+| SQL `IN (…)`, numeric ids    | `join(map(rows, string(.id)), ",")`                                                  | `lines` → `31222,31245` |
+| specific scalar              | `rows[0].gentrack_customer_id`                                                       | `json` / `lines`        |
+| filter, then project         | `map(filter(rows, .gentrack_account_number == "K12345"), .mpxn)`                     | `json`                  |
+| partial objects              | `map(rows, {mpxn: .mpxn, agr: .gentrack_agreement_id})`                              | `json` / `ndjson`       |
 
 ### expr does not flow across steps
 
-expr-lang runs *inside a step*, over parsed values (hence it is format-agnostic). It does
+expr-lang runs _inside a step_, over parsed values (hence it is format-agnostic). It does
 **not** flow between steps on its own:
 
 - **Inside a step** (a `select` container, or a `call-*` assert): expr over a file or a
@@ -120,8 +120,8 @@ expr-lang runs *inside a step*, over parsed values (hence it is format-agnostic)
   — over **parameters only**, never artifact files.
 
 So an artifact from one workflow consumed by another is just an input-artifact **file** to a
-step that runs `select`. It translates across steps and workflows — but always *through a step
-that does the selection*, never as free-floating controller magic.
+step that runs `select`. It translates across steps and workflows — but always _through a step
+that does the selection_, never as free-floating controller magic.
 
 ## Worked example: resolve → bill an account
 
@@ -142,7 +142,7 @@ env:
 args:
   - |
     set -eu
-    query-pg
+    /bin/executor
     echo ARGO_RESULT_BEGIN
     cat /tmp/out.ndjson
     echo ARGO_RESULT_END
@@ -153,26 +153,34 @@ rows** — the account model, unshaped. `account_id` is the input, not repeated 
 
 **Composer — `resolve-account`** (`templates/account/`) passes the `identifiers` artifact
 through and adds the `account-id` and `account-number` parameters. One artifact + two scalars
-*are* the model, queried selectively downstream.
+_are_ the model, queried selectively downstream.
 
 **Consumer — `bill-account`** (to build) needs different fields at different stages:
 
 ```yaml
 # Stage 1 — distinct gentrack numbers, as a JSON array, to fan out:
 - - name: gentrack-numbers
-    template: select-step                       # a container running the `select` image
+    template: select-step # a container running the `select` image
     arguments:
-      artifacts:  [ { name: input, from: "{{steps.resolve.outputs.artifacts.identifiers}}" } ]
+      artifacts:
+        [
+          {
+            name: input,
+            from: "{{steps.resolve.outputs.artifacts.identifiers}}",
+          },
+        ]
       parameters:
         - { name: format, value: ndjson }
-        - { name: select, value: "uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))" }
+        - {
+            name: select,
+            value: "uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))",
+          }
         - { name: output-format, value: json }
 - - name: bill-each
-    withParam: "{{steps.gentrack-numbers.outputs.parameters.result}}"   # ["J20000032681", …]
+    withParam: "{{steps.gentrack-numbers.outputs.parameters.result}}" # ["J20000032681", …]
     template: bill-one
     arguments:
-      parameters: [ { name: gentrack-account-number, value: "{{item}}" } ]
-
+      parameters: [{ name: gentrack-account-number, value: "{{item}}" }]
 # Inside bill-one — Stage 2: the supplies for THIS gentrack number, to drive a query/step:
 #   SELECT='filter(rows, .gentrack_account_number == "{{inputs.parameters.gentrack-account-number}}")'
 # Stage 3, later — account_id / account_number / mpxns, individually or together:

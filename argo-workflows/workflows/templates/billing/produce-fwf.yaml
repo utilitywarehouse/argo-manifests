@@ -129,11 +129,7 @@ spec:
                                   until nc -w 1 127.0.0.1 8098; do
                                     echo "waiting for vault AWS creds on :8098"; sleep 1
                                   done
-                                  # one account per line
-                                  printf '%s\n' "{{inputs.parameters.account-number}}" > /tmp/accounts.txt
-                                  # fabricate (env-driven) -> upload to S3 -> register with the
-                                  # uploader; the executor writes the minted filename to RESULT_PATH.
-                                  fabricate-migrated-fwf
+                                  /svc
                                   echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result)"
                               env:
                                 - { name: INPUT, value: /tmp/accounts.txt }
