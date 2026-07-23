@@ -1,6 +1,6 @@
 # =============================================================================
-# resolve-service-identifiers — customer account_id → compiled energy service /
-# gentrack identifier map (from energy-platform `service_snapshot`)
+# resolve-energy-service-identifiers — customer account_id → compiled energy
+# service / gentrack identifier map (from energy-platform `service_snapshot`)
 # =============================================================================
 # Energy-owned, reusable leaf: given a customer account_id, return the account's
 # energy-service supplies as flat ndjson rows, so any workflow can SELECT the
@@ -22,12 +22,13 @@
 #        supplies yields an empty result; consumers decide how to handle it. See
 #        docs/data-flow.md for the full data-passing standard.
 #
-# Reference-only: consumed via templateRef (e.g. by resolve-account).
+# Reference-only: the energy stage of the account pipeline, consumed via
+# templateRef by the test-account-select orchestrator (piped account-id in).
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: resolve-service-identifiers
+  name: resolve-energy-service-identifiers
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
@@ -68,6 +69,10 @@ spec:
       - { name: timeout, value: 3m }
       - { name: job-active-deadline, value: 5m }
       - { name: job-ttl, value: 24h }
+      # Debug knob: set false to stop exec-kube deleting the remote Job on completion
+      # so it can be inspected (kubectl -n energy-platform on dev-merit). job-ttl still
+      # GCs it afterwards. Default true = normal teardown.
+      - { name: teardown, value: "true" }
   templates:
     - name: resolve
       inputs:
@@ -95,6 +100,7 @@ spec:
           - { name: timeout, value: 3m }
           - { name: job-active-deadline, value: 5m }
           - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" }
       outputs:
         # Artifact-first: the flat ndjson supplies are exposed as an ARTIFACT (a file
         # in the S3 artifact repo) so downstream steps can pull it and select all /
@@ -102,13 +108,14 @@ spec:
         # mirror is kept for small results (a handful of supplies).
         artifacts:
           - name: identifiers # the flat ndjson supply rows, as a file
-            from: "{{steps.execute.outputs.artifacts.result}}"
+            from: "{{steps.energy-platform.outputs.artifacts.result}}"
         parameters:
           - name: identifiers
             valueFrom:
-              parameter: "{{steps.execute.outputs.parameters.result}}"
+              parameter: "{{steps.energy-platform.outputs.parameters.result}}"
       steps:
-        - - name: execute
+        # energy-platform: account_id → the account's supplies as flat ndjson
+        - - name: energy-platform
             templateRef:
               name: executor-remote-namespace
               template: execute-job
@@ -124,12 +131,13 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
                     metadata:
-                      generateName: resolve-service-identifiers-
+                      generateName: resolve-energy-service-identifiers-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}

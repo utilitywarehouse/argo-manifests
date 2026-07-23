@@ -25,7 +25,7 @@ replacements:
         fieldPaths:
           - spec.arguments.parameters.[name=query-pg-image].value
           - spec.templates.[name=resolve].inputs.parameters.[name=query-pg-image].value
-      - select: { kind: WorkflowTemplate, name: resolve-service-identifiers }
+      - select: { kind: WorkflowTemplate, name: resolve-energy-service-identifiers }
         fieldPaths:
           - spec.arguments.parameters.[name=query-pg-image].value
           - spec.templates.[name=resolve].inputs.parameters.[name=query-pg-image].value
