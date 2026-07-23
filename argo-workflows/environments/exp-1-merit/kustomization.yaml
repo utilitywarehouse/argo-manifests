@@ -18,6 +18,10 @@ patches:
     target:
       kind: Deployment
       name: argo-server
+  - path: patches/workflow-controller-configmap.yaml
+    target:
+      kind: ConfigMap
+      name: workflow-controller-configmap
   - patch: |-
       - op: add
         path: /rules/-
@@ -56,3 +60,6 @@ secretGenerator:
   - name: job-executor-tokens
     envs:
       - secrets/job-executor-tokens.env
+  - name: argo-s3-secret
+    envs:
+      - secrets/argo-s3-secret.env

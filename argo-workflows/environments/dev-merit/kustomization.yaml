@@ -76,3 +76,6 @@ secretGenerator:
   - name: argo-postgres-config
     envs:
       - secrets/argo-postgres-config.env
+  - name: argo-s3-secret
+    envs:
+      - secrets/argo-s3-secret.env
