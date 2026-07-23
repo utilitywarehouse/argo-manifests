@@ -1,0 +1,194 @@
+# =============================================================================
+# healthcheck-namespace — fail unless every (selected) pod in a namespace is
+# healthy. A reusable gate to decide when it is safe to run workflows/steps
+# against a namespace.
+# =============================================================================
+# Dispatches a short-lived Job into the target namespace via
+# executor-remote-namespace (exec-kube). The Job runs kubectl against the LOCAL
+# (in-cluster) API — it inherits the argo-workflow-job-executor ServiceAccount,
+# which already has pods get/list/watch — and exits non-zero when any selected
+# pod is unhealthy, failing the caller.
+#
+# A pod is UNHEALTHY when:
+#   - phase is not Running/Succeeded (Pending, Failed, Unknown — catches
+#     ImagePullBackOff/unschedulable/etc.), OR
+#   - it is Running but any container reports ready=false (catches
+#     CrashLoopBackOff and other waiting/terminated container states).
+# Succeeded pods (completed Job pods) are treated as healthy and ignored.
+#
+# By default pods OWNED BY A Job/CronJob are skipped entirely — one-shot Job
+# pods (backups, *-db-init, *-create-index, es-curator, ...) legitimately end
+# up Failed/Succeeded and are noise for a service-health gate. Set
+# include-job-pods=true to gate on them too.
+#
+# Selection (precedence): label-selector > services > whole namespace.
+#   - label-selector : raw selector, e.g. "app in (billing-api,billing-worker)"
+#                      or "app.kubernetes.io/part-of=billing"
+#   - services       : comma list, e.g. "billing-api,billing-worker" — expanded
+#                      to "<service-label-key> in (...)"
+#   - (both empty)   : every pod in the namespace
+#
+#
+# Reference-only: consumed via templateRef (also submittable standalone for a
+# manual check).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: healthcheck-namespace
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Fails unless every selected pod in the target namespace is healthy
+      (no CrashLoopBackOff / not-ready / pending). Consumed via templateRef.
+  labels:
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
+spec:
+  entrypoint: check
+  arguments:
+    parameters:
+      - { name: cluster-name }
+      - { name: target-namespace }
+      # selection — precedence label-selector > services > whole namespace
+      - { name: label-selector, value: "" }
+      - { name: services, value: "" }
+      - { name: service-label-key, value: app }
+      - { name: include-job-pods, value: "false" }
+      - {
+          name: kubectl-image,
+          value: "registry.uw.systems/dev-enablement/exec-kube:main",
+        }
+      - { name: image-pull-secret, value: "" }
+      - { name: log-level, value: info }
+      - { name: timeout, value: 3m }
+      - { name: job-active-deadline, value: 4m }
+      - { name: job-ttl, value: 1h }
+  templates:
+    - name: check
+      inputs:
+        parameters:
+          - { name: cluster-name }
+          - { name: target-namespace }
+          - { name: label-selector, value: "" }
+          - { name: services, value: "" }
+          - { name: service-label-key, value: app }
+          - {
+              name: kubectl-image,
+              value: "registry.uw.systems/dev-enablement/exec-kube:main",
+            }
+          - { name: image-pull-secret, value: "" }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 3m }
+          - { name: job-active-deadline, value: 4m }
+          - { name: job-ttl, value: 1h }
+      steps:
+        - - name: execute
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: healthcheck-{{inputs.parameters.target-namespace}}-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: argo-workflow-job-executor
+                          restartPolicy: Never
+                          {{=inputs.parameters['image-pull-secret'] != '' ? 'imagePullSecrets: [{ name: ' + inputs.parameters['image-pull-secret'] + ' }]' : ''}}
+                          containers:
+                            - name: healthcheck
+                              image: {{inputs.parameters.kubectl-image}}
+                              imagePullPolicy: IfNotPresent
+                              command: [sh, -c]
+                              env:
+                                - { name: NS, value: "{{inputs.parameters.target-namespace}}" }
+                                - { name: LABEL_SELECTOR, value: "{{inputs.parameters.label-selector}}" }
+                                - { name: SERVICES, value: "{{inputs.parameters.services}}" }
+                                - { name: SERVICE_LABEL_KEY, value: "{{inputs.parameters.service-label-key}}" }
+                                - { name: INCLUDE_JOB_PODS, value: "{{inputs.parameters.include-job-pods}}" }
+                              args:
+                                - |
+                                  set -eu
+
+                                  # ---- resolve selector (label-selector > services > all) ----
+                                  if [ -n "$LABEL_SELECTOR" ]; then
+                                    SEL="$LABEL_SELECTOR"
+                                  elif [ -n "$SERVICES" ]; then
+                                    SEL="$SERVICE_LABEL_KEY in ($SERVICES)"
+                                  else
+                                    SEL=""
+                                  fi
+                                  echo "== healthcheck namespace=$NS selector=[${SEL:-<all>}] =="
+
+                                  COLS='POD:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,WAITING:.status.containerStatuses[*].state.waiting.reason,RESTARTS:.status.containerStatuses[*].restartCount,OWNER:.metadata.ownerReferences[*].kind'
+                                  if [ -n "$SEL" ]; then
+                                    OUT=$(kubectl get pods -n "$NS" -l "$SEL" --no-headers -o custom-columns="$COLS")
+                                  else
+                                    OUT=$(kubectl get pods -n "$NS" --no-headers -o custom-columns="$COLS")
+                                  fi
+
+                                  if [ -z "$OUT" ]; then
+                                    echo "no pods matched selector — treating as UNHEALTHY (nothing to gate on)"
+                                    echo "ARGO_RESULT_OUTPUT=no-pods"
+                                    exit 1
+                                  fi
+
+                                  total=0
+                                  unhealthy=0
+                                  echo "$OUT" | while IFS= read -r line; do
+                                    [ -z "$line" ] && continue
+                                    pod=$(echo "$line" | awk '{print $1}')
+                                    phase=$(echo "$line" | awk '{print $2}')
+                                    ready=$(echo "$line" | awk '{print $3}')
+                                    waiting=$(echo "$line" | awk '{print $4}')
+                                    restarts=$(echo "$line" | awk '{print $5}')
+                                    owner=$(echo "$line" | awk '{print $6}')
+                                    # Skip one-shot Job/CronJob-owned pods (backups, db-init, create-index,
+                                    # es-curator, ...) unless explicitly told to gate on them. Their owner
+                                    # kind is "Job" (CronJob -> Job -> Pod); Deployments -> ReplicaSet.
+                                    case "$INCLUDE_JOB_PODS" in
+                                      true|True|TRUE|1|yes) ;;
+                                      *) case "$owner" in *Job*) echo "skip       $pod  (owner=$owner)"; continue ;; esac ;;
+                                    esac
+                                    total=$((total+1))
+                                    bad=""
+                                    case "$phase" in
+                                      Succeeded) ;;                                   # completed Job pod — ignore
+                                      Running) case "$ready" in *false*) bad="not-ready" ;; esac ;;
+                                      *) bad="phase=$phase" ;;
+                                    esac
+                                    if [ -n "$bad" ]; then
+                                      unhealthy=$((unhealthy+1))
+                                      echo "UNHEALTHY  $pod  phase=$phase ready=$ready waiting=$waiting restarts=$restarts  ($bad)"
+                                    else
+                                      echo "ok         $pod  phase=$phase ready=$ready"
+                                    fi
+                                    echo "$total $unhealthy" > /tmp/tally     # subshell-safe running tally
+                                  done
+
+                                  read total unhealthy < /tmp/tally 2>/dev/null || { total=0; unhealthy=0; }
+                                  echo "summary: $unhealthy/$total unhealthy"
+                                  if [ "$unhealthy" -gt 0 ]; then
+                                    echo "ARGO_RESULT_OUTPUT=unhealthy:$unhealthy"
+                                    exit 1
+                                  fi
+                                  echo "ARGO_RESULT_OUTPUT=healthy"

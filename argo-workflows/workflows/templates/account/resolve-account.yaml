@@ -1,0 +1,167 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: resolve-account
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Builds account context from an account number.
+  labels:
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: account
+spec:
+  entrypoint: resolve
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-number }
+      - { name: resolve-gentrack, value: "true" }
+      - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
+
+      - { name: account-cluster-name, value: dev-aws }
+      - { name: account-namespace, value: account-platform }
+      - {
+          name: account-connection-string,
+          value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
+        }
+      - { name: account-runner-sa, value: default }
+      - { name: account-ca-secret, value: ca-auth-key } # → CA_AUTH_KEY
+      - { name: account-ca-auth-key, value: auth.key } # key within account-ca-secret
+      - { name: account-ca-address, value: "certificate-authority:8080" } # → CA_ADDRESS
+      - { name: account-ca-profile, value: client } # → CA_PROFILE (client cert)
+      - {
+          name: query-pg-image,
+          value: "registry.uw.systems/dev-enablement/query-pg:main",
+        }
+      - { name: image-pull-secret, value: dockerhub-key }
+      - { name: log-level, value: info }
+      - { name: timeout, value: 3m }
+      - { name: job-active-deadline, value: 5m }
+      - { name: job-ttl, value: 24h }
+  templates:
+    - name: resolve
+      inputs:
+        parameters:
+          - { name: account-number }
+          - { name: resolve-gentrack, value: "true" }
+          - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
+          - { name: account-cluster-name, value: dev-aws }
+          - { name: account-namespace, value: account-platform }
+          - {
+              name: account-connection-string,
+              value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
+            }
+          - { name: account-runner-sa, value: default }
+          - { name: account-ca-secret, value: ca-auth-key }
+          - { name: account-ca-auth-key, value: auth.key }
+          - { name: account-ca-address, value: "certificate-authority:8080" }
+          - { name: account-ca-profile, value: client }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 3m }
+          - { name: job-active-deadline, value: 5m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        artifacts:
+          - name: identifiers
+            from: "{{steps.resolve-identifiers.outputs.artifacts.identifiers}}"
+            optional: true
+        parameters:
+          - name: account-id
+            valueFrom:
+              parameter: "{{steps.account-id.outputs.parameters.result}}"
+          - name: identifiers
+            valueFrom:
+              parameter: "{{steps.resolve-identifiers.outputs.parameters.identifiers}}"
+              default: ""
+      steps:
+        - - name: account-id
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.account-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.account-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: resolve-account-id-{{inputs.parameters.account-number}}-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.account-runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: query
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # query-pg writes CSV (header + rows) to OUTPUT
+                                  query-pg
+                                  # first data row (skip the header); empty => no match
+                                  account_id=$(tail -n +2 /tmp/out.csv | sed '/^$/d' | head -n 1)
+                                  if [ -z "$account_id" ]; then
+                                    echo "resolve-account: no account_numbers row for account-number={{inputs.parameters.account-number}}"
+                                    exit 1
+                                  fi
+                                  echo "account_id=$account_id"
+                                  echo "ARGO_RESULT_OUTPUT=$account_id"
+                              env:
+                                # `number` is the VARCHAR primary key (covers account_id) → point lookup.
+                                - name: QUERY
+                                  value: >-
+                                    SELECT account_id FROM account_numbers
+                                    WHERE number = '{{inputs.parameters.account-number}}'
+                                - { name: FORMAT, value: csv }
+                                - { name: OUTPUT, value: /tmp/out.csv }
+                                - { name: DB_TYPE, value: cockroachdb }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - name: CONNECTION_STRING
+                                  value: "{{inputs.parameters.account-connection-string}}"
+                                - name: CA_AUTH_KEY
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.account-ca-secret}}
+                                      key: {{inputs.parameters.account-ca-auth-key}}
+                                - { name: CA_ADDRESS, value: "{{inputs.parameters.account-ca-address}}" }
+                                - { name: CA_PROFILE, value: "{{inputs.parameters.account-ca-profile}}" }
+
+        - - name: resolve-identifiers
+            when: "{{inputs.parameters.resolve-gentrack}} == true"
+            templateRef:
+              name: resolve-service-identifiers
+              template: resolve
+            arguments:
+              parameters:
+                - {
+                    name: account-id,
+                    value: "{{steps.account-id.outputs.parameters.result}}",
+                  }
+                - {
+                    name: billing-platform,
+                    value: "{{inputs.parameters.billing-platform}}",
+                  }

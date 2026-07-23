@@ -1,0 +1,121 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: assert-bills-processed
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Fails unless every billing_period_accounts row for the account is processed.
+  labels:
+    workflows.argoproj.io/creator: energy
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: energy-billing
+spec:
+  entrypoint: assert
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: external-account-number } # the gentrack account number (e.g. J20000032681)
+      - {
+          name: connection-string,
+          value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
+        }
+      - { name: dsn-secret, value: "" } # alt: Secret in target ns holding the DSN
+      - { name: dsn-key, value: DB_DSN } # key within dsn-secret
+      - { name: db-type, value: postgres } # postgres | cockroachdb
+      - { name: target-namespace }
+      - {
+          name: query-pg-image,
+          value: "registry.uw.systems/dev-enablement/query-pg:main",
+        }
+      - { name: runner-sa, value: billing-adapter-rds-user }
+      - { name: image-pull-secret, value: dockerhub-key }
+      - { name: log-level, value: info }
+      - { name: timeout, value: 5m }
+      - { name: job-active-deadline, value: 7m }
+      - { name: job-ttl, value: 24h }
+  templates:
+    - name: assert
+      inputs:
+        parameters:
+          - { name: external-account-number }
+          - { name: connection-string, value: "" }
+          - { name: dsn-secret, value: "" }
+          - { name: dsn-key, value: DB_DSN }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name }
+          - { name: target-namespace }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: billing-adapter-rds-user }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: execute
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: assert-bills-processed-{{inputs.parameters.external-account-number}}-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: query
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # query-pg writes the CSV result (header + one row) to OUTPUT
+                                  query-pg
+                                  count=$(tail -n 1 /tmp/out.csv)
+                                  echo "unprocessed=$count"
+                                  if [ "$count" != "0" ]; then
+                                    echo "bills not processed for {{inputs.parameters.external-account-number}} (unprocessed=$count)"
+                                    exit 1
+                                  fi
+                                  echo "ARGO_RESULT_OUTPUT=processed"
+                              env:
+                                - name: QUERY
+                                  value: >-
+                                    SELECT count(*) AS unprocessed
+                                    FROM public.billing_period_accounts
+                                    WHERE external_account_number = '{{inputs.parameters.external-account-number}}'
+                                      AND processed_at IS NULL
+                                - { name: FORMAT, value: csv }
+                                - { name: OUTPUT, value: /tmp/out.csv }
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                # DSN: literal connection-string (IAM, passwordless) wins; else secretKeyRef.
+                                - name: CONNECTION_STRING
+                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}

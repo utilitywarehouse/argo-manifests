@@ -1,0 +1,188 @@
+# =============================================================================
+# resolve-service-identifiers — customer account_id → compiled energy service /
+# gentrack identifier map (from energy-platform `service_snapshot`)
+# =============================================================================
+# Energy-owned, reusable leaf: given a customer account_id, return the account's
+# energy-service supplies as flat ndjson rows, so any workflow can SELECT the
+# properties it needs (gentrack numbers, MPxNs, agreement/customer ids …).
+#
+#   in : account-id  (customer_account_id, uuid)
+#   out: identifiers  — exposed ARTIFACT-FIRST (a file in the S3 artifact repo) plus a
+#        parameter mirror. The producer runs the plainest, fastest query (a flat
+#        SELECT — no server-side JSON assembly) and streams ndjson, one supply per
+#        line, which exec-kube captures verbatim between the ARGO_RESULT_BEGIN/END
+#        markers. Row shape:
+#          {"supply_type","mpxn","gentrack_account_number","gentrack_account_id",
+#           "gentrack_agreement_id","gentrack_customer_id"}
+#        Consumers select all / partial / specific properties downstream with the
+#        `select` executor (expr over `rows`) — e.g. the distinct gentrack numbers
+#        for a fan-out:
+#          uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))
+#        account_id is the input, not repeated per row. An account with no matching
+#        supplies yields an empty result; consumers decide how to handle it. See
+#        docs/data-flow.md for the full data-passing standard.
+#
+# Runs a `query-pg` Job dispatched into energy-platform by executor-remote-namespace,
+# CockroachDB CERT auth (CA_AUTH_KEY / CA_PROFILE / CA_ADDRESS via cfssl.FromEnv),
+# same mechanism as the data-orchestrator adapter for this DB.
+#
+# Reference-only: consumed via templateRef (e.g. by resolve-account).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: resolve-service-identifiers
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI (read-only). customer account_id → flat ndjson of the
+      account's energy-service supplies from service_snapshot. Consumed via templateRef.
+  labels:
+    workflows.argoproj.io/creator: energy
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: energy-service
+spec:
+  entrypoint: resolve
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-id } # customer_account_id (uuid)
+      # Filter to a billing platform; empty selects all platforms.
+      - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
+      # dispatch + connection (CockroachDB cert auth)
+      - { name: service-cluster-name, value: dev-merit }
+      - { name: service-namespace, value: energy-platform }
+      - {
+          name: service-connection-string,
+          value: "postgres://root@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
+        }
+      - { name: service-runner-sa, value: default }
+      - { name: ca-secret, value: ca.auth.keys.energy-platform } # → CA_AUTH_KEY
+      - { name: ca-auth-key, value: moist.auth.key } # key within ca-secret
+      - { name: ca-config, value: ca.config.energy-platform } # CA profile + endpoint
+      - { name: ca-profile-key, value: ca.node.profile } # → CA_PROFILE
+      - { name: ca-address-key, value: ca.endpoint } # → CA_ADDRESS
+      # common
+      - {
+          name: query-pg-image,
+          value: "registry.uw.systems/dev-enablement/query-pg:main",
+        }
+      - { name: image-pull-secret, value: dockerhub-key }
+      - { name: log-level, value: info }
+      - { name: timeout, value: 3m }
+      - { name: job-active-deadline, value: 5m }
+      - { name: job-ttl, value: 24h }
+  templates:
+    - name: resolve
+      inputs:
+        parameters:
+          - { name: account-id }
+          - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
+          - { name: service-cluster-name, value: dev-merit }
+          - { name: service-namespace, value: energy-platform }
+          - {
+              name: service-connection-string,
+              value: "postgres://root@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
+            }
+          - { name: service-runner-sa, value: default }
+          - { name: ca-secret, value: ca.auth.keys.energy-platform }
+          - { name: ca-auth-key, value: moist.auth.key }
+          - { name: ca-config, value: ca.config.energy-platform }
+          - { name: ca-profile-key, value: ca.node.profile }
+          - { name: ca-address-key, value: ca.endpoint }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 3m }
+          - { name: job-active-deadline, value: 5m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        # Artifact-first: the flat ndjson supplies are exposed as an ARTIFACT (a file
+        # in the S3 artifact repo) so downstream steps can pull it and select all /
+        # partial / specific properties with the `select` executor. The parameter
+        # mirror is kept for small results (a handful of supplies).
+        artifacts:
+          - name: identifiers # the flat ndjson supply rows, as a file
+            from: "{{steps.execute.outputs.artifacts.result}}"
+        parameters:
+          - name: identifiers
+            valueFrom:
+              parameter: "{{steps.execute.outputs.parameters.result}}"
+      steps:
+        - - name: execute
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.service-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.service-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: resolve-service-identifiers-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.service-runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: query
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  query-pg
+                                  echo ARGO_RESULT_BEGIN
+                                  cat /tmp/out.ndjson
+                                  echo ARGO_RESULT_END
+                              env:
+                                - name: QUERY
+                                  value: >-
+                                    SELECT s.supply_type, s.mpxn, s.gentrack_account_number,
+                                           s.gentrack_account_id, s.gentrack_agreement_id,
+                                           s.gentrack_customer_id
+                                    FROM service_snapshot s
+                                    WHERE s.customer_account_id = '{{inputs.parameters.account-id}}'
+                                      AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
+                                - { name: FORMAT, value: ndjson }
+                                - { name: OUTPUT, value: /tmp/out.ndjson }
+                                - { name: DB_TYPE, value: cockroachdb }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - name: CONNECTION_STRING
+                                  value: "{{inputs.parameters.service-connection-string}}"
+                                - name: CA_AUTH_KEY
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.ca-secret}}
+                                      key: {{inputs.parameters.ca-auth-key}}
+                                - name: CA_PROFILE
+                                  valueFrom:
+                                    configMapKeyRef:
+                                      name: {{inputs.parameters.ca-config}}
+                                      key: {{inputs.parameters.ca-profile-key}}
+                                - name: CA_ADDRESS
+                                  valueFrom:
+                                    configMapKeyRef:
+                                      name: {{inputs.parameters.ca-config}}
+                                      key: {{inputs.parameters.ca-address-key}}

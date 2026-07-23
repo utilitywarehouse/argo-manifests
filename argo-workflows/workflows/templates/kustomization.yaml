@@ -3,4 +3,29 @@ kind: Kustomization
 
 resources:
   - shared/
+  - billing/
+  - energy/
+  - account/
   - test/
+
+replacements:
+  - source: { kind: ConfigMap, name: image-versions, fieldPath: data.call-http }
+    targets:
+      - select: { kind: WorkflowTemplate, name: billing-graphql-call }
+        fieldPaths:
+          - spec.arguments.parameters.[name=call-http-image].value
+          - spec.templates.[name=call].inputs.parameters.[name=call-http-image].value
+  - source: { kind: ConfigMap, name: image-versions, fieldPath: data.query-pg }
+    targets:
+      - select: { kind: WorkflowTemplate, name: assert-bills-processed }
+        fieldPaths:
+          - spec.arguments.parameters.[name=query-pg-image].value
+          - spec.templates.[name=assert].inputs.parameters.[name=query-pg-image].value
+      - select: { kind: WorkflowTemplate, name: resolve-account }
+        fieldPaths:
+          - spec.arguments.parameters.[name=query-pg-image].value
+          - spec.templates.[name=resolve].inputs.parameters.[name=query-pg-image].value
+      - select: { kind: WorkflowTemplate, name: resolve-service-identifiers }
+        fieldPaths:
+          - spec.arguments.parameters.[name=query-pg-image].value
+          - spec.templates.[name=resolve].inputs.parameters.[name=query-pg-image].value

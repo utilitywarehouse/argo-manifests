@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - billing-graphql-call.yaml
+  - await-segment-state.yaml
+  - produce-fwf.yaml
+  - bill-run.yaml

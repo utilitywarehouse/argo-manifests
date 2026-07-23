@@ -1,0 +1,116 @@
+# =============================================================================
+# generate-bill — one-click bill generation from an account number
+# =============================================================================
+# The top-level entrypoint. Given an account number (+ a short-lived token), it
+# produces the FWF and runs the full segment pipeline to completion:
+#
+#   produce-fwf  (fabricate → upload → register; emits the filename)
+#        │  filename  (authoritative, minted by the fabricate script)
+#        ▼
+#   bill-run.main  (Create → Bill → Commit → Export → Fulfil, each gated
+#                           on the segment reaching its bo.State end-state)
+#
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: generate-bill
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      One-click bill generation from an account number: produce the FWF, then run
+      the segment pipeline (Create → Bill → Commit → Export → Fulfil) to completion.
+  labels:
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-number }
+      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
+      - { name: validation-mode, value: attended } # attended pauses before Commit
+      # FWF options (forwarded to produce-fwf)
+      - { name: invoice-number, value: "" } # override to skip invoice-preferences-api
+      - { name: bill-period, value: "" } # YYYY-MM; empty => current month
+      - { name: engineer-visit, value: "false" }
+      # where billing-graphql / billing services live (patched per environment)
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+      - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-number }
+          - { name: token, value: "" }
+          - { name: validation-mode, value: attended }
+          - { name: invoice-number, value: "" }
+          - { name: bill-period, value: "" }
+          - { name: engineer-visit, value: "false" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+      steps:
+        - - name: produce-fwf
+            templateRef: { name: produce-fwf, template: produce }
+            arguments:
+              parameters:
+                - {
+                    name: account-number,
+                    value: "{{inputs.parameters.account-number}}",
+                  }
+                - {
+                    name: invoice-number,
+                    value: "{{inputs.parameters.invoice-number}}",
+                  }
+                - {
+                    name: bill-period,
+                    value: "{{inputs.parameters.bill-period}}",
+                  }
+                - {
+                    name: engineer-visit,
+                    value: "{{inputs.parameters.engineer-visit}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        - - name: run-pipeline
+            templateRef: { name: bill-run, template: main }
+            arguments:
+              parameters:
+                - {
+                    name: account-number,
+                    value: "{{inputs.parameters.account-number}}",
+                  }
+                - {
+                    name: segment-name,
+                    value: "{{steps.produce-fwf.outputs.parameters.filename}}",
+                  }
+                - {
+                    name: segment-ids,
+                    value: "{{steps.produce-fwf.outputs.parameters.filename}}",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: validation-mode,
+                    value: "{{inputs.parameters.validation-mode}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }

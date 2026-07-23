@@ -9,6 +9,7 @@ resources:
   - ../../workflows/templates
   - ../../workflows/energy-platform/overlays/dev-merit
   - ../../workflows/staging-ept/overlays/dev-merit
+  - ../../workflows/billing/overlays/dev-merit
   - workflow-step-executor-sa.yaml
   - ingress.yaml
   - auth.yaml

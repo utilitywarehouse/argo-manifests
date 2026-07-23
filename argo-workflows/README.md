@@ -18,6 +18,7 @@
 
 - [Installation Options](https://argo-workflows.readthedocs.io/en/latest/installation/#installation-options)
 - [GitHub Project](https://github.com/argoproj/argo-workflows/tree/main/manifests)
+- [Data flow: capturing query results and selecting fields between steps](docs/data-flow.md) — the file-first data-passing standard for workflow authors (produce → capture → `select`).
 
 ### Provisional ADRs
 

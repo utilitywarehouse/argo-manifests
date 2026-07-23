@@ -1,0 +1,76 @@
+# =============================================================================
+# await-segment-state — poll a segment until it reaches a target bo.State
+# =============================================================================
+# Convenience wrapper over `billing-graphql-call`: polls `read_segments` until
+# the named segment reports `target-state` (optionally also satisfying an extra
+# predicate over its stats), failing fast on GraphQL errors. This is the gate the
+# billing-operations-frontend applies to enable the next action's button — a
+# transition only counts as done when the segment reaches the target -ED state.
+#
+# `extra-expr` is ANDed into the per-segment predicate (default "true"). The
+# frontend requires `produced == total && reported == total` before Commit
+# (after Billed) and before Fulfil (after Exported); pass that here for those
+# gates. Fields available: id, state, stats.{produced,reported,total,...}.
+#
+# Reference-only: consumed by billing workflows via templateRef. Not for the UI.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: await-segment-state
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Polls read_segments until a segment reaches a
+      target bo.State (with optional stats predicate). Consumed via templateRef.
+  labels:
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+spec:
+  entrypoint: await
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: segment-id }
+      - { name: target-state } # bo.State enum name, e.g. STATE_BILLED
+      - { name: extra-expr, value: "true" } # extra per-segment predicate, ANDed in
+      - { name: token, value: "" }
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+      - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+      - { name: timeout, value: 10m }
+  templates:
+    - name: await
+      inputs:
+        parameters:
+          - { name: segment-id }
+          - { name: target-state }
+          - { name: extra-expr, value: "true" }
+          - { name: token, value: "" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+          - { name: timeout, value: 10m }
+      steps:
+        - - name: poll
+            templateRef:
+              name: billing-graphql-call
+              template: call
+            arguments:
+              parameters:
+                - { name: op-name, value: "await-{{inputs.parameters.target-state}}" }
+                - name: payload
+                  value: '{"query":"{ read_segments { segments { id state stats { produced reported total } } } }"}'
+                - name: success-expr
+                  value: >-
+                    any(body.data.read_segments.segments,
+                        {.id == "{{inputs.parameters.segment-id}}"
+                         && .state == "{{inputs.parameters.target-state}}"
+                         && ({{inputs.parameters.extra-expr}})})
+                - { name: failure-expr, value: "body.errors != nil" }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - { name: cluster-name, value: "{{inputs.parameters.cluster-name}}" }
+                - { name: target-namespace, value: "{{inputs.parameters.target-namespace}}" }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
