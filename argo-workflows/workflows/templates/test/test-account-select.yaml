@@ -1,0 +1,144 @@
+# =============================================================================
+# test-account-select — end-to-end check of the file-first data-passing flow
+# =============================================================================
+# Given an account-number:
+#   1. resolve-account  -> account-id (param) + identifiers (flat ndjson supplies, artifact)
+#   2. select (isolate) -> the distinct gentrack_account_numbers, as a JSON array PARAMETER
+#                          (i.e. "pull and isolate" — this is what a fan-out would use)
+#   3. select (map)     -> an account_number -> gentrack_account_number map printed to the
+#                          LOGS (OUTPUT=- -> stdout), NOT a workflow result
+#   4. summary          -> echo the account map (account-number / account-id / gentrack) to logs
+#
+# Purpose: see post-processing + selection working over a captured artifact — no jq, no
+# JSON assembled in SQL. See docs/data-flow.md.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: test-account-select
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Test the data-passing flow: account-number -> resolve-account (flat supplies) ->
+      `select` isolates the gentrack_account_numbers and prints an account_number ->
+      gentrack_account_number map to the logs (not a result). Submittable.
+  labels:
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: account
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-number }
+      - {
+          name: select-image,
+          value: "registry.uw.systems/dev-enablement/select:chore-redesign-wkflw-data-prop",
+        }
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-number }
+          - { name: select-image }
+      steps:
+        # 1) account-number -> account map (account-id param + identifiers ndjson artifact)
+        - - name: resolve
+            templateRef:
+              name: resolve-account
+              template: resolve
+            arguments:
+              parameters:
+                - {
+                    name: account-number,
+                    value: "{{inputs.parameters.account-number}}",
+                  }
+
+        # 2) pull & isolate the distinct gentrack_account_numbers -> a JSON array PARAMETER
+        - - name: isolate-gentrack
+            template: select
+            arguments:
+              artifacts:
+                - {
+                    name: input,
+                    from: "{{steps.resolve.outputs.artifacts.identifiers}}",
+                  }
+              parameters:
+                - {
+                    name: select-image,
+                    value: "{{inputs.parameters.select-image}}",
+                  }
+                - name: expr
+                  value: "uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))"
+                - { name: output, value: /tmp/out } # capture as the `result` parameter
+                - { name: output-format, value: json }
+
+        # 3) build the account_number -> gentrack_account_number map, printed to LOGS (not a result)
+        - - name: print-map
+            template: select
+            arguments:
+              artifacts:
+                - {
+                    name: input,
+                    from: "{{steps.resolve.outputs.artifacts.identifiers}}",
+                  }
+              parameters:
+                - {
+                    name: select-image,
+                    value: "{{inputs.parameters.select-image}}",
+                  }
+                - name: expr
+                  value: >-
+                    map(
+                      uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number)),
+                      {account_number: "{{inputs.parameters.account-number}}", gentrack_account_number: #}
+                    )
+                - { name: output, value: "-" } # "-" -> stdout -> pod logs (no result captured)
+                - { name: output-format, value: json }
+
+        # 4) echo the isolated account map to the logs
+        - - name: summary
+            inline:
+              container:
+                image: alpine:3.21
+                command: [sh, -c]
+                args:
+                  - |
+                    echo "=== account map (post-processed via select) ==="
+                    echo "account_number = {{inputs.parameters.account-number}}"
+                    echo "account_id     = {{steps.resolve.outputs.parameters.account-id}}"
+                    echo "gentrack_account_numbers = {{steps.isolate-gentrack.outputs.parameters.result}}"
+
+    # Reusable select step: mounts an ndjson artifact at /tmp/in.ndjson, runs an expr over
+    # `rows`, and emits. output=/tmp/out captures the emission as the `result` parameter;
+    # output=- streams it to stdout (the pod logs) and `result` defaults to "".
+    - name: select
+      inputs:
+        artifacts:
+          - { name: input, path: /tmp/in.ndjson }
+        parameters:
+          - { name: select-image }
+          - { name: expr }
+          - { name: output, value: "-" }
+          - { name: format, value: ndjson }
+          - { name: output-format, value: json }
+      container:
+        image: "{{inputs.parameters.select-image}}"
+        imagePullPolicy: Always # branch tag is mutable while validating in dev
+        env:
+          - { name: INPUT, value: /tmp/in.ndjson }
+          - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+          - { name: SELECT, value: "{{inputs.parameters.expr}}" }
+          - { name: OUTPUT, value: "{{inputs.parameters.output}}" }
+          - {
+              name: OUTPUT_FORMAT,
+              value: "{{inputs.parameters.output-format}}",
+            }
+          - { name: LOG_LEVEL, value: info }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/out
+              default: ""

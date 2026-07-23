@@ -1,0 +1,355 @@
+# =============================================================================
+# bill-run — segment lifecycle via billing-graphql (mirrors the UI)
+# =============================================================================
+# Automates the billing-operations-frontend segment flow. Each action triggers a
+# state transition via update_segment (setting the -ING state), then we poll
+# read_segments until the segment reaches the -ED state — exactly how the UI
+# enables the next action's button. The transitions and gates are taken from the
+# frontend (getNextState + shouldAllow*Action):
+#
+#   Bill     PENDING   --update_segment(STATE_BILLING)--->    await BILLED  (+produced/reported==total)
+#   Commit   BILLED    --update_segment(STATE_COMMITTING)-->  await COMMITTED
+#   Export   COMMITTED --update_segment(STATE_EXPORTING)--->  await EXPORTED (+produced/reported==total)
+#   Fulfil   EXPORTED  --set_segment_delivery_schedule + update_segment(STATE_FULFILLING)--> await FULFILLED
+#
+# SCOPE: starts from an uploaded FWF (its derived segment ids). `generate-bill.yaml`
+# is the account-number entrypoint that produces the FWF and hands off here. This
+# template stays individually usable for re-running the pipeline.
+#
+#   argo submit --from workflowtemplate/bill-run \
+#     -p segment-name=UWCDATA1_D181225_T114259.052 \
+#     -p segment-ids=UWCDATA1_D181225_T114259.052 -p token=<bearer>
+#
+# AUTH: `token` is a short-lived bearer token the submitter supplies (any
+# engineer can generate one). It is intentionally a parameter, not a Secret.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: bill-run
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Segment lifecycle (Bill → Commit → Export → Fulfil) against billing-graphql,
+      mirroring the billing-operations-frontend flow with a state-poll gate after
+      each transition.
+  labels:
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      # --- per run ------------------------------------------------------------
+      - { name: account-number } # for labels/traceability
+      - { name: segment-name } # name for create_segment; also resolves the segment id
+      - { name: segment-ids } # csv of FWF-derived segment ids fed to create_segment
+      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
+      # attended  -> pause for human validation before the irreversible Commit
+      # unattended -> run straight through (state polls still gate every stage)
+      - { name: validation-mode, value: attended }
+      # Fulfil (Schedule) delivery: 0 = email, 1 = print, and the schedule entries.
+      # Default is a single same-day entry; override for multi-day/volume schedules.
+      - { name: delivery-type, value: "0" }
+      - name: schedule-entries
+        value: '[{"id":"0","total":1,"date":"{{workflow.creationTimestamp.RFC3339}}"}]'
+      # --- bo.State end-states awaited after each phase -----------------------
+      - { name: state-pending, value: STATE_PENDING }
+      - { name: state-billed, value: STATE_BILLED }
+      - { name: state-committed, value: STATE_COMMITTED }
+      - { name: state-exported, value: STATE_EXPORTED }
+      - { name: state-fulfilled, value: STATE_FULFILLED }
+      # --- where billing-graphql lives (patched per environment overlay) -------
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+      - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-number }
+          - { name: segment-name }
+          - { name: segment-ids }
+          - { name: token, value: "" }
+          - { name: validation-mode, value: attended }
+          - { name: delivery-type, value: "0" }
+          - {
+              name: schedule-entries,
+              value: '[{"id":"0","total":1,"date":"{{workflow.creationTimestamp.RFC3339}}"}]',
+            }
+          - { name: state-pending, value: STATE_PENDING }
+          - { name: state-billed, value: STATE_BILLED }
+          - { name: state-committed, value: STATE_COMMITTED }
+          - { name: state-exported, value: STATE_EXPORTED }
+          - { name: state-fulfilled, value: STATE_FULFILLED }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+      steps:
+        # ---- Create segment ------------------------------------------------
+        - - name: create-segment
+            templateRef: { name: billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: create-segment }
+                - name: payload
+                  value: >-
+                    {"query":"mutation($n:String,$ids:String){ create_segment(name:$n, segment_ids:$ids){ success error_message } }",
+                     "variables":{"n":"{{inputs.parameters.segment-name}}","ids":"{{inputs.parameters.segment-ids}}"}}
+                - {
+                    name: assert,
+                    value: "body.data.create_segment.success == true",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        # ---- Resolve id + precondition: poll until the segment is PENDING ----
+        - - name: resolve-segment
+            templateRef: { name: billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: resolve-segment }
+                - name: payload
+                  value: '{"query":"{ read_segments { segments { id name state } } }"}'
+                - name: success-expr
+                  value: >-
+                    any(body.data.read_segments.segments,
+                        {.name == "{{inputs.parameters.segment-name}}" && .state == "{{inputs.parameters.state-pending}}"})
+                - { name: failure-expr, value: "body.errors != nil" }
+                - name: result-expr
+                  value: >-
+                    filter(body.data.read_segments.segments,
+                           {.name == "{{inputs.parameters.segment-name}}"})[0].id
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        # ---- Bill:   PENDING -> STATE_BILLING -> await BILLED --------------
+        - - name: bill
+            templateRef: { name: billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: bill }
+                - name: payload
+                  value: >-
+                    {"query":"mutation($id:String,$s:String){ update_segment(id:$id, state:$s){ success error_message } }",
+                     "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_BILLING"}}
+                - {
+                    name: assert,
+                    value: "body.data.update_segment.success == true",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+        - - name: await-billed
+            templateRef: { name: await-segment-state, template: await }
+            arguments:
+              parameters:
+                - {
+                    name: segment-id,
+                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
+                  }
+                - {
+                    name: target-state,
+                    value: "{{inputs.parameters.state-billed}}",
+                  }
+                # Commit is gated on full production, same as the UI
+                - {
+                    name: extra-expr,
+                    value: ".stats.produced == .stats.total && .stats.reported == .stats.total",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        # ---- Human validation gate (attended only) -------------------------
+        - - name: validate
+            template: pause
+            when: "{{inputs.parameters.validation-mode}} == attended"
+
+        # ---- Commit: BILLED -> STATE_COMMITTING -> await COMMITTED ---------
+        - - name: commit
+            templateRef: { name: billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: commit }
+                - name: payload
+                  value: >-
+                    {"query":"mutation($id:String,$s:String){ update_segment(id:$id, state:$s){ success error_message } }",
+                     "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_COMMITTING"}}
+                - {
+                    name: assert,
+                    value: "body.data.update_segment.success == true",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+        - - name: await-committed
+            templateRef: { name: await-segment-state, template: await }
+            arguments:
+              parameters:
+                - {
+                    name: segment-id,
+                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
+                  }
+                - {
+                    name: target-state,
+                    value: "{{inputs.parameters.state-committed}}",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        # ---- Export: COMMITTED -> STATE_EXPORTING -> await EXPORTED --------
+        - - name: export
+            templateRef: { name: billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: export }
+                - name: payload
+                  value: >-
+                    {"query":"mutation($id:String,$s:String){ update_segment(id:$id, state:$s){ success error_message } }",
+                     "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_EXPORTING"}}
+                - {
+                    name: assert,
+                    value: "body.data.update_segment.success == true",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+        - - name: await-exported
+            templateRef: { name: await-segment-state, template: await }
+            arguments:
+              parameters:
+                - {
+                    name: segment-id,
+                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
+                  }
+                - {
+                    name: target-state,
+                    value: "{{inputs.parameters.state-exported}}",
+                  }
+                # Fulfil/Schedule is gated on full production, same as the UI
+                - {
+                    name: extra-expr,
+                    value: ".stats.produced == .stats.total && .stats.reported == .stats.total",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        # ---- Fulfil: EXPORTED -> schedule + STATE_FULFILLING -> await FULFILLED
+        # One mutation, as the UI does it: set the delivery schedule AND move the
+        # segment to STATE_FULFILLING; the scheduled dispatch drives it to FULFILLED.
+        - - name: fulfil
+            templateRef: { name: billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: fulfil }
+                - name: payload
+                  value: >-
+                    {"query":"mutation($id:String!,$t:Int,$e:[schedule_entry_input!]!,$s:String){ set_segment_delivery_schedule(segment_id:$id, type:$t, entries:$e){ success error_message } update_segment(id:$id, state:$s){ success error_message } }",
+                     "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","t":{{inputs.parameters.delivery-type}},"e":{{inputs.parameters.schedule-entries}},"s":"STATE_FULFILLING"}}
+                - name: assert
+                  value: "body.data.set_segment_delivery_schedule.success == true && body.data.update_segment.success == true"
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+        - - name: await-fulfilled
+            templateRef: { name: await-segment-state, template: await }
+            arguments:
+              parameters:
+                - {
+                    name: segment-id,
+                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
+                  }
+                - {
+                    name: target-state,
+                    value: "{{inputs.parameters.state-fulfilled}}",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+                - { name: timeout, value: 15m } # scheduled dispatch can lag; poll longer
+
+    # -------------------------------------------------------------------------
+    # pause — human validation checkpoint (attended mode). Resume from the Argo
+    # UI/CLI once totals/VAT are validated against Gentrack.
+    # -------------------------------------------------------------------------
+    - name: pause
+      suspend: {}

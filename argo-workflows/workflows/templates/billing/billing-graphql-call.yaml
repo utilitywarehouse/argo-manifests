@@ -1,0 +1,162 @@
+# =============================================================================
+# billing-graphql-call — one GraphQL request against billing-graphql
+# =============================================================================
+# The single reusable primitive behind every billing workflow step. It renders a
+# one-pod Job that runs the `call-http` executor and dispatches it — via the
+# shared `executor-remote-namespace` template — into the namespace/cluster where
+# billing-graphql actually runs (dev-merit/billing). The Argo controller cannot
+# reach billing-graphql directly, so the request executes from inside the target
+# namespace, exactly like `data-orchestrator-runner`.
+#
+# billing-graphql (github.com/utilitywarehouse/billing-graphql) abstracts the
+# underlying gRPC services (bo/OrchestrateBilling, fia, fola, fido, bce, txlog),
+# so a whole stage is one POST /graphql here — never a per-service integration.
+#
+# One call does both a WRITE and its VERIFY:
+#   - a mutation (create_segment / update_segment / set_segment_delivery_schedule)
+#   - OR a query polled until a predicate holds (read_segments,
+#     segment_delivery_status, invoice, ...)
+# The behaviour is driven by the executor's expr predicates:
+#   SUCCESS_EXPR  poll the query until true            (omit for a fire-once call)
+#   FAILURE_EXPR  bail early when true                 (e.g. a deadletter state)
+#   ASSERT        assert once, no polling              (mutually exclusive w/ SUCCESS_EXPR)
+#   RESULT_EXPR   capture a value (segment id, ...) -> emitted as the step `result`
+# Predicates evaluate against the response env {status, ok, headers, body, ...};
+# for GraphQL, `body` is the `{data, errors}` object. See qe-toolkit/executors
+# pkg/expect for the operators (any/all/filter/len/matches/in).
+#
+# AUTH: the bearer token is a short-lived token the submitter supplies (any
+# engineer can generate one) — passed as the `token` parameter, injected into the
+# Job as $TOKEN, and assembled into the Authorization header at runtime. It is
+# intentionally a workflow parameter, not a Kubernetes Secret: it is ephemeral and
+# scoped to the run. Assembling the header in-shell keeps it out of the HEADERS
+# literal in the rendered manifest.
+#
+# Reference-only: consumed by billing workflows via templateRef. Not for the UI.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: billing-graphql-call
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. One GraphQL request/poll against billing-graphql,
+      dispatched as a Job into the target namespace. Consumed by billing
+      workflows via templateRef.
+  labels:
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+spec:
+  entrypoint: call
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      # --- what to run (supplied per call) ------------------------------------
+      - { name: op-name } # short slug for the Job name + logs, e.g. create-segment
+      - { name: payload } # the GraphQL request body: {"query": "...", "variables": {...}}
+      - { name: success-expr, value: "" } # poll until true; empty => fire once
+      - { name: failure-expr, value: "" } # bail early when true
+      - { name: assert, value: "" } # assert-once alternative to success-expr
+      - { name: result-expr, value: "" } # value to capture -> step `result` output
+      - { name: token, value: "" } # short-lived submitter-supplied bearer token (see AUTH note)
+      # --- where billing-graphql lives (env defaults; override in overlay) -----
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+      - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+      # --- knobs --------------------------------------------------------------
+      - { name: call-http-image, value: "registry.uw.systems/dev-enablement/call-http:main" }
+      - { name: runner-sa, value: default } # pod identity in the target ns
+      - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
+      - { name: log-level, value: info }
+      - { name: timeout, value: 5m } # per-call deadline (covers the whole poll)
+      - { name: job-active-deadline, value: 7m } # backstop just beyond `timeout`
+      - { name: job-ttl, value: 24h } # keep finished Job for debug, then GC
+
+  templates:
+    - name: call
+      inputs:
+        parameters:
+          - { name: op-name }
+          - { name: payload }
+          - { name: success-expr, value: "" }
+          - { name: failure-expr, value: "" }
+          - { name: assert, value: "" }
+          - { name: result-expr, value: "" }
+          - { name: token, value: "" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+          - { name: call-http-image, value: "registry.uw.systems/dev-enablement/call-http:main" }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        # Surface the dispatched Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT)
+        # as this template's `result`, so callers can thread ids between stages.
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.execute.outputs.parameters.result}}"
+      steps:
+        - - name: execute
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - { name: cluster-name, value: "{{inputs.parameters.cluster-name}}" }
+                - { name: target-namespace, value: "{{inputs.parameters.target-namespace}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                # Full Job manifest as a string. Argo substitutes every
+                # {{inputs.parameters.*}} before exec-kube creates the Job.
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: bgql-{{inputs.parameters.op-name}}-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: call
+                              image: {{inputs.parameters.call-http-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # Assemble the auth header at runtime so the token is not baked
+                                  # into HEADERS in the manifest. TOKEN comes from the env below.
+                                  export HEADERS="Authorization: Bearer ${TOKEN},Content-Type: application/json"
+                                  # call-http reads URL/METHOD/PAYLOAD/HEADERS + the expr predicates
+                                  # from the env; it writes RESULT_EXPR's value to RESULT_PATH.
+                                  call-http
+                                  # Bridge call-http's captured value to exec-kube's result channel.
+                                  echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result 2>/dev/null || true)"
+                              env:
+                                - { name: URL, value: "{{inputs.parameters.endpoint}}" }
+                                - { name: METHOD, value: POST }
+                                - { name: PAYLOAD, value: '{{inputs.parameters.payload}}' }
+                                - { name: SUCCESS_EXPR, value: "{{inputs.parameters.success-expr}}" }
+                                - { name: FAILURE_EXPR, value: "{{inputs.parameters.failure-expr}}" }
+                                - { name: ASSERT, value: "{{inputs.parameters.assert}}" }
+                                - { name: RESULT_EXPR, value: "{{inputs.parameters.result-expr}}" }
+                                - { name: RESULT_PATH, value: /tmp/result }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                # Short-lived, submitter-supplied bearer token (not a Secret).
+                                - { name: TOKEN, value: "{{inputs.parameters.token}}" }

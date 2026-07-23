@@ -1,0 +1,147 @@
+# =============================================================================
+# produce-fwf — fabricate a FWF for an account, upload it, emit its filename
+# =============================================================================
+# The atomic upstream step: given an account number, generate the fixed-width
+# file (fabricate-migrated-fwf), upload it to the bill-extracts bucket, register
+# it with the uploader — and emit the ONE authoritative output: the minted
+# filename. The filename is set by the fabricate script, never by us, and flows
+# downstream as both the segment name and the segment id.
+#
+##
+# Reference-only: consumed by generate-bill via templateRef.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: produce-fwf
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Fabricate+upload a FWF for an account; emits the
+      minted filename. Consumed by generate-bill via templateRef.
+  labels:
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+spec:
+  entrypoint: produce
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-number }
+      - { name: invoice-number, value: "" } # override to skip invoice-preferences-api
+      - { name: bill-period, value: "" } # YYYY-MM; empty => current month
+      - { name: engineer-visit, value: "false" }
+      # where it runs / images
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+      - {
+          name: fwf-image,
+          value: "registry.uw.systems/dev-enablement/fabricate-migrated-fwf:f684d463e3c43f17626997d7eed53b4f8f98d7bf",
+        }
+      - { name: bucket, value: billing-bill-extracts-dev }
+      - {
+          name: uploader-endpoint,
+          value: "http://billing-bill-extracts-s3-uploader:8080/api/2.0/fwf",
+        }
+      - { name: runner-sa, value: default }
+      - { name: image-pull-secret, value: dockerhub-key }
+      - { name: aws-region, value: eu-west-1 }
+      - { name: log-level, value: info }
+      - { name: timeout, value: 10m }
+      - { name: job-active-deadline, value: 12m }
+      - { name: job-ttl, value: 24h }
+  templates:
+    - name: produce
+      inputs:
+        parameters:
+          - { name: account-number }
+          - { name: invoice-number, value: "" }
+          - { name: bill-period, value: "" }
+          - { name: engineer-visit, value: "false" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: fwf-image,
+              value: "registry.uw.systems/dev-enablement/fabricate-migrated-fwf:f684d463e3c43f17626997d7eed53b4f8f98d7bf",
+            }
+          - { name: bucket, value: billing-bill-extracts-dev }
+          - {
+              name: uploader-endpoint,
+              value: "http://billing-bill-extracts-s3-uploader:8080/api/2.0/fwf",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: aws-region, value: eu-west-1 }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 12m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: filename # the authoritative minted FWF filename
+            valueFrom:
+              parameter: "{{steps.execute.outputs.parameters.result}}"
+      steps:
+        - - name: execute
+            templateRef:
+              name: executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: produce-fwf-{{inputs.parameters.account-number}}-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        metadata:
+                          annotations:
+                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: fwf
+                              image: {{inputs.parameters.fwf-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  until nc -w 1 127.0.0.1 8098; do
+                                    echo "waiting for vault AWS creds on :8098"; sleep 1
+                                  done
+                                  # one account per line
+                                  printf '%s\n' "{{inputs.parameters.account-number}}" > /tmp/accounts.txt
+                                  # fabricate (env-driven) -> upload to S3 -> register with the
+                                  # uploader; the executor writes the minted filename to RESULT_PATH.
+                                  fabricate-migrated-fwf
+                                  echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result)"
+                              env:
+                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: INVOICE_NUMBER, value: "{{inputs.parameters.invoice-number}}" }
+                                - { name: BILL_PERIOD, value: "{{inputs.parameters.bill-period}}" }
+                                - { name: ENGINEER_VISIT, value: "{{inputs.parameters.engineer-visit}}" }
+                                - { name: BUCKET, value: "{{inputs.parameters.bucket}}" }
+                                - { name: UPLOADER_ENDPOINT, value: "{{inputs.parameters.uploader-endpoint}}" }
+                                - { name: RESULT_PATH, value: /tmp/result }
+                                - { name: AWS_REGION, value: "{{inputs.parameters.aws-region}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
