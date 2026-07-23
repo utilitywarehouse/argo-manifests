@@ -53,6 +53,9 @@ metadata:
 spec:
   entrypoint: main
   serviceAccountName: workflow-step-executor
+  podMetadata:
+    annotations:
+      uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
   arguments:
     parameters:
       - { name: account-number }
