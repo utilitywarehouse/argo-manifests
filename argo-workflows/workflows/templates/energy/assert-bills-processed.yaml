@@ -5,7 +5,8 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Fails unless every billing_period_accounts row for the account is processed.
+      Fails unless the account has at least one billing_period_accounts row and every
+      one is processed.
   labels:
     workflows.argoproj.io/creator: energy
     workflows.argoproj.io/invocation: standalone
@@ -115,10 +116,10 @@ spec:
                               env:
                                 - name: QUERY
                                   value: >-
-                                    SELECT count(*) AS unprocessed
+                                    SELECT concat(count(*), ':',
+                                                  (count(*) FILTER (WHERE processed_at IS NULL))) AS tally
                                     FROM public.billing_period_accounts
                                     WHERE external_account_number = '{{inputs.parameters.external-account-number}}'
-                                      AND processed_at IS NULL
                                 - { name: FORMAT, value: csv }
                                 - { name: OUTPUT, value: /tmp/out.csv }
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
