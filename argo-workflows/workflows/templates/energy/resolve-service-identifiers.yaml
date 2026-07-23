@@ -46,8 +46,8 @@ spec:
       # Filter to a billing platform; empty selects all platforms.
       - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
       # dispatch + connection (CockroachDB cert auth)
-      - { name: service-cluster-name, value: dev-merit }
-      - { name: service-namespace, value: energy-platform }
+      - { name: energy-service-cluster-name, value: dev-merit }
+      - { name: energy-service-namespace, value: energy-platform }
       - {
           name: service-connection-string,
           value: "postgres://root@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
@@ -74,8 +74,8 @@ spec:
         parameters:
           - { name: account-id }
           - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
-          - { name: service-cluster-name, value: dev-merit }
-          - { name: service-namespace, value: energy-platform }
+          - { name: energy-service-cluster-name, value: dev-merit }
+          - { name: energy-service-namespace, value: energy-platform }
           - {
               name: service-connection-string,
               value: "postgres://root@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
@@ -116,11 +116,11 @@ spec:
               parameters:
                 - {
                     name: cluster-name,
-                    value: "{{inputs.parameters.service-cluster-name}}",
+                    value: "{{inputs.parameters.energy-service-cluster-name}}",
                   }
                 - {
                     name: target-namespace,
-                    value: "{{inputs.parameters.service-namespace}}",
+                    value: "{{inputs.parameters.energy-service-namespace}}",
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
