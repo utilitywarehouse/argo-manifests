@@ -147,14 +147,14 @@ spec:
                     [{
                       account_number: "{{inputs.parameters.account-number}}",
                       account_id: "{{steps.resolve-account-id.outputs.parameters.account-id}}",
-                      supplies: map(rows, {
+                      supplies: map(rows, ({
                         supply_type: .supply_type,
                         mpxn: .mpxn,
                         gentrack_account_number: .gentrack_account_number,
                         gentrack_account_id: .gentrack_account_id,
                         gentrack_agreement_id: .gentrack_agreement_id,
                         gentrack_customer_id: .gentrack_customer_id
-                      })
+                      }))
                     }]
                 - { name: output, value: /tmp/out } # emit the model as an artifact
                 - { name: output-format, value: ndjson } # one account object per line
@@ -207,7 +207,7 @@ spec:
                     value: "{{inputs.parameters.select-image}}",
                   }
                 - name: expr
-                  value: "map(rows[0].supplies, {supply_type: .supply_type, mpxn: .mpxn})"
+                  value: "map(rows[0].supplies, ({supply_type: .supply_type, mpxn: .mpxn}))"
                 - { name: output, value: "-" } # -> pod logs
                 - { name: output-format, value: json }
 
