@@ -3,4 +3,4 @@ kind: Kustomization
 
 resources:
   - assert-bills-processed.yaml
-  - resolve-service-identifiers.yaml
+  - resolve-energy-service-identifiers.yaml

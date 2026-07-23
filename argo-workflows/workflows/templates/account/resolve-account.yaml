@@ -1,3 +1,19 @@
+# =============================================================================
+# resolve-account — account-platform leaf: account number → account_id
+# =============================================================================
+# Single responsibility: look up the customer account_id for a given account
+# number in the account-platform `account_numbers` table (a point lookup on the
+# `number` key), and expose it as the `account-id` parameter.
+#
+#   in : account-number
+#   out: account-id  (customer_account_id, uuid) — the leaf's `result` parameter
+#
+# This is ONE stage of the account pipeline. The orchestrator
+# (test-account-select) pipes account-id on into resolve-energy-service-identifiers
+# to get the account's energy supplies / gentrack identifiers. Kept submittable
+# standalone (a bare account# → account_id lookup is useful on its own) and also
+# consumed via templateRef. See docs/data-flow.md.
+# =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -5,7 +21,8 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Builds account context from an account number.
+      account-platform lookup: account-number → account_id (the `account-id` param).
+      Submittable, and consumed via templateRef by the account pipeline.
   labels:
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
@@ -16,13 +33,9 @@ spec:
   arguments:
     parameters:
       - { name: account-number }
-      - { name: resolve-gentrack, value: "true" }
-      - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
 
       - { name: account-cluster-name, value: dev-aws }
       - { name: account-namespace, value: account-platform }
-      - { name: energy-service-cluster-name, value: dev-merit }
-      - { name: energy-service-namespace, value: energy-platform }
       - {
           name: account-connection-string,
           value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
@@ -41,17 +54,15 @@ spec:
       - { name: timeout, value: 3m }
       - { name: job-active-deadline, value: 5m }
       - { name: job-ttl, value: 24h }
+      # Debug knob: set false to keep the remote lookup Job for inspection.
+      - { name: teardown, value: "true" }
   templates:
     - name: resolve
       inputs:
         parameters:
           - { name: account-number }
-          - { name: resolve-gentrack, value: "true" }
-          - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
-          - { name: energy-service-cluster-name, value: dev-merit }
-          - { name: energy-service-namespace, value: energy-platform }
           - {
               name: account-connection-string,
               value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
@@ -70,21 +81,15 @@ spec:
           - { name: timeout, value: 3m }
           - { name: job-active-deadline, value: 5m }
           - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" }
       outputs:
-        artifacts:
-          - name: identifiers
-            from: "{{steps.resolve-identifiers.outputs.artifacts.identifiers}}"
-            optional: true
         parameters:
           - name: account-id
             valueFrom:
-              parameter: "{{steps.account-id.outputs.parameters.result}}"
-          - name: identifiers
-            valueFrom:
-              parameter: "{{steps.resolve-identifiers.outputs.parameters.identifiers}}"
-              default: ""
+              parameter: "{{steps.account-platform.outputs.parameters.result}}"
       steps:
-        - - name: account-id
+        # account-platform: account-number → account_id (point lookup on `number`)
+        - - name: account-platform
             templateRef:
               name: executor-remote-namespace
               template: execute-job
@@ -100,6 +105,7 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
@@ -134,10 +140,9 @@ spec:
                                   echo "account_id=$account_id"
                                   echo "ARGO_RESULT_OUTPUT=$account_id"
                               env:
-                                # `number` is the VARCHAR primary key (covers account_id) → point lookup.
                                 - name: QUERY
                                   value: >-
-                                    SELECT account_id FROM account_numbers
+                                    SELECT account_id::string FROM account_numbers
                                     WHERE number = '{{inputs.parameters.account-number}}'
                                 - { name: FORMAT, value: csv }
                                 - { name: OUTPUT, value: /tmp/out.csv }
@@ -152,27 +157,3 @@ spec:
                                       key: {{inputs.parameters.account-ca-auth-key}}
                                 - { name: CA_ADDRESS, value: "{{inputs.parameters.account-ca-address}}" }
                                 - { name: CA_PROFILE, value: "{{inputs.parameters.account-ca-profile}}" }
-
-        - - name: resolve-identifiers
-            when: "{{inputs.parameters.resolve-gentrack}} == true"
-            templateRef:
-              name: resolve-service-identifiers
-              template: resolve
-            arguments:
-              parameters:
-                - {
-                    name: account-id,
-                    value: "{{steps.account-id.outputs.parameters.result}}",
-                  }
-                - {
-                    name: billing-platform,
-                    value: "{{inputs.parameters.billing-platform}}",
-                  }
-                - {
-                    name: energy-service-cluster-name,
-                    value: "{{inputs.parameters.energy-service-cluster-name}}",
-                  }
-                - {
-                    name: energy-service-namespace,
-                    value: "{{inputs.parameters.energy-service-namespace}}",
-                  }
