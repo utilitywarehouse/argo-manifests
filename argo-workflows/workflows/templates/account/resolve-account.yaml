@@ -21,6 +21,8 @@ spec:
 
       - { name: account-cluster-name, value: dev-aws }
       - { name: account-namespace, value: account-platform }
+      - { name: energy-service-cluster-name, value: dev-merit }
+      - { name: energy-service-namespace, value: energy-platform }
       - {
           name: account-connection-string,
           value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
@@ -48,6 +50,8 @@ spec:
           - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
+          - { name: energy-service-cluster-name, value: dev-merit }
+          - { name: energy-service-namespace, value: energy-platform }
           - {
               name: account-connection-string,
               value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
@@ -163,4 +167,12 @@ spec:
                 - {
                     name: billing-platform,
                     value: "{{inputs.parameters.billing-platform}}",
+                  }
+                - {
+                    name: energy-service-cluster-name,
+                    value: "{{inputs.parameters.energy-service-cluster-name}}",
+                  }
+                - {
+                    name: energy-service-namespace,
+                    value: "{{inputs.parameters.energy-service-namespace}}",
                   }

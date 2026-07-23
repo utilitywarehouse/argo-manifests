@@ -36,12 +36,24 @@ spec:
           name: select-image,
           value: "registry.uw.systems/dev-enablement/select:chore-redesign-wkflw-data-prop",
         }
+      # This pipeline spans two clusters/namespaces: the account lookup and the
+      # energy service-identifier lookup. Hardcoded here for the test; for
+      # cross-env use these are the knobs an invocation surface overrides per
+      # environment (namespaces stay the same, clusters differ).
+      - { name: account-cluster-name, value: dev-aws }
+      - { name: account-namespace, value: account-platform }
+      - { name: energy-service-cluster-name, value: dev-merit }
+      - { name: energy-service-namespace, value: energy-platform }
   templates:
     - name: main
       inputs:
         parameters:
           - { name: account-number }
           - { name: select-image }
+          - { name: account-cluster-name }
+          - { name: account-namespace }
+          - { name: energy-service-cluster-name }
+          - { name: energy-service-namespace }
       steps:
         # 1) account-number -> account map (account-id param + identifiers ndjson artifact)
         - - name: resolve
@@ -53,6 +65,22 @@ spec:
                 - {
                     name: account-number,
                     value: "{{inputs.parameters.account-number}}",
+                  }
+                - {
+                    name: account-cluster-name,
+                    value: "{{inputs.parameters.account-cluster-name}}",
+                  }
+                - {
+                    name: account-namespace,
+                    value: "{{inputs.parameters.account-namespace}}",
+                  }
+                - {
+                    name: energy-service-cluster-name,
+                    value: "{{inputs.parameters.energy-service-cluster-name}}",
+                  }
+                - {
+                    name: energy-service-namespace,
+                    value: "{{inputs.parameters.energy-service-namespace}}",
                   }
 
         # 2) pull & isolate the distinct gentrack_account_numbers -> a JSON array PARAMETER
@@ -98,17 +126,41 @@ spec:
                 - { name: output-format, value: json }
 
         # 4) echo the isolated account map to the logs
+        #    NB: pass the upstream step outputs in as arguments — an `inline` template
+        #    does NOT inherit the parent steps scope, so {{steps.*}} refs won't resolve
+        #    inside it. Use a normal template that takes them as inputs.
         - - name: summary
-            inline:
-              container:
-                image: alpine:3.21
-                command: [sh, -c]
-                args:
-                  - |
-                    echo "=== account map (post-processed via select) ==="
-                    echo "account_number = {{inputs.parameters.account-number}}"
-                    echo "account_id     = {{steps.resolve.outputs.parameters.account-id}}"
-                    echo "gentrack_account_numbers = {{steps.isolate-gentrack.outputs.parameters.result}}"
+            template: summary
+            arguments:
+              parameters:
+                - {
+                    name: account-number,
+                    value: "{{inputs.parameters.account-number}}",
+                  }
+                - {
+                    name: account-id,
+                    value: "{{steps.resolve.outputs.parameters.account-id}}",
+                  }
+                - {
+                    name: gentrack,
+                    value: "{{steps.isolate-gentrack.outputs.parameters.result}}",
+                  }
+
+    - name: summary
+      inputs:
+        parameters:
+          - { name: account-number }
+          - { name: account-id }
+          - { name: gentrack }
+      container:
+        image: alpine:3.21
+        command: [sh, -c]
+        args:
+          - |
+            echo "=== account map (post-processed via select) ==="
+            echo "account_number = {{inputs.parameters.account-number}}"
+            echo "account_id     = {{inputs.parameters.account-id}}"
+            echo "gentrack_account_numbers = {{inputs.parameters.gentrack}}"
 
     # Reusable select step: mounts an ndjson artifact at /tmp/in.ndjson, runs an expr over
     # `rows`, and emits. output=/tmp/out captures the emission as the `result` parameter;
