@@ -418,7 +418,9 @@ spec:
                                   echo "StartRun payload: $PAYLOAD"
                                   if ! /app/executor --address localhost:8090 --method "$SERVICE/StartRun" \
                                     --payload "$PAYLOAD" \
-                                    --result-field accepted.runId --result-path /tmp/run-id --output /tmp/start.json; then
+                                    --assert 'response.ok && response.body.accepted != nil' \
+                                    --assert-message 'StartRun rejected: {response.body.rejected.reason}' \
+                                    --result-expr 'response.body.accepted.runId' --result-path /tmp/run-id --output /tmp/start.json; then
                                     echo "StartRun was not accepted:"; cat /tmp/start.json 2>/dev/null; exit 1
                                   fi
                                   RUN=$(cat /tmp/run-id); echo "run_id=$RUN"
@@ -426,7 +428,8 @@ spec:
 
                                   if ! /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \
                                     --payload "{\"runId\":\"$RUN\"}" \
-                                    --poll-field run.state --poll-success RUN_STATE_SUCCEEDED --poll-failure RUN_STATE_FAILED,RUN_STATE_PARTIAL,RUN_STATE_CANCELLED \
+                                    --success-expr 'response.body.run.state == "RUN_STATE_SUCCEEDED"' \
+                                    --failure-expr 'response.body.run.state in ["RUN_STATE_FAILED","RUN_STATE_PARTIAL","RUN_STATE_CANCELLED"]' \
                                     --timeout {{=int(duration(inputs.parameters['timeout']).Seconds())}} --output /tmp/status.json; then
                                     echo "run did not succeed — final status:"
                                     /app/executor --address localhost:8090 --method "$SERVICE/GetRunStatus" \

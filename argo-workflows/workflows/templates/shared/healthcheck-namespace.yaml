@@ -129,7 +129,6 @@ spec:
                                 - |
                                   set -eu
 
-                                  # ---- resolve selector (label-selector > services > all) ----
                                   if [ -n "$LABEL_SELECTOR" ]; then
                                     SEL="$LABEL_SELECTOR"
                                   elif [ -n "$SERVICES" ]; then

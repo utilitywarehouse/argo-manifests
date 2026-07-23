@@ -5,7 +5,8 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Fails unless every billing_period_accounts row for the account is processed.
+      Fails unless the account has at least one billing_period_accounts row and every
+      one is processed.
   labels:
     workflows.argoproj.io/creator: energy
     workflows.argoproj.io/invocation: standalone
@@ -96,22 +97,29 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  # query-pg writes the CSV result (header + one row) to OUTPUT
-                                  query-pg
-                                  count=$(tail -n 1 /tmp/out.csv)
-                                  echo "unprocessed=$count"
-                                  if [ "$count" != "0" ]; then
-                                    echo "bills not processed for {{inputs.parameters.external-account-number}} (unprocessed=$count)"
+                                  /app/executor
+                                  tally=$(tail -n 1 /tmp/out.csv)
+                                  total=${tally%%:*}
+                                  unprocessed=${tally##*:}
+                                  acct="{{inputs.parameters.external-account-number}}"
+                                  echo "account=$acct total=$total unprocessed=$unprocessed"
+                                  if [ "$total" = "0" ]; then
+                                    echo "no billing_period_accounts rows for $acct — there are no bills to process"
                                     exit 1
                                   fi
+                                  if [ "$unprocessed" != "0" ]; then
+                                    echo "bills not fully processed for $acct ($unprocessed of $total unprocessed)"
+                                    exit 1
+                                  fi
+                                  echo "all $total bill(s) processed for $acct"
                                   echo "ARGO_RESULT_OUTPUT=processed"
                               env:
                                 - name: QUERY
                                   value: >-
-                                    SELECT count(*) AS unprocessed
+                                    SELECT concat(count(*), ':',
+                                                  (count(*) FILTER (WHERE processed_at IS NULL))) AS tally
                                     FROM public.billing_period_accounts
                                     WHERE external_account_number = '{{inputs.parameters.external-account-number}}'
-                                      AND processed_at IS NULL
                                 - { name: FORMAT, value: csv }
                                 - { name: OUTPUT, value: /tmp/out.csv }
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }

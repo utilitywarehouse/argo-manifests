@@ -120,8 +120,7 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  # query-pg writes CSV (header + rows) to OUTPUT
-                                  query-pg
+                                  /app/executor
                                   # first data row (skip the header); empty => no match
                                   account_id=$(tail -n +2 /tmp/out.csv | sed '/^$/d' | head -n 1)
                                   if [ -z "$account_id" ]; then

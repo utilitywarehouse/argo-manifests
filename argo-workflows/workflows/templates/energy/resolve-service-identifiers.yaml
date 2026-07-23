@@ -22,10 +22,6 @@
 #        supplies yields an empty result; consumers decide how to handle it. See
 #        docs/data-flow.md for the full data-passing standard.
 #
-# Runs a `query-pg` Job dispatched into energy-platform by executor-remote-namespace,
-# CockroachDB CERT auth (CA_AUTH_KEY / CA_PROFILE / CA_ADDRESS via cfssl.FromEnv),
-# same mechanism as the data-orchestrator adapter for this DB.
-#
 # Reference-only: consumed via templateRef (e.g. by resolve-account).
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
@@ -152,7 +148,7 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  query-pg
+                                  /app/executor
                                   echo ARGO_RESULT_BEGIN
                                   cat /tmp/out.ndjson
                                   echo ARGO_RESULT_END

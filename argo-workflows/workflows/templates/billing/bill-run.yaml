@@ -102,7 +102,7 @@ spec:
                      "variables":{"n":"{{inputs.parameters.segment-name}}","ids":"{{inputs.parameters.segment-ids}}"}}
                 - {
                     name: assert,
-                    value: "body.data.create_segment.success == true",
+                    value: "response.body.data.create_segment.success == true",
                   }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -125,12 +125,12 @@ spec:
                   value: '{"query":"{ read_segments { segments { id name state } } }"}'
                 - name: success-expr
                   value: >-
-                    any(body.data.read_segments.segments,
+                    any(response.body.data.read_segments.segments,
                         {.name == "{{inputs.parameters.segment-name}}" && .state == "{{inputs.parameters.state-pending}}"})
-                - { name: failure-expr, value: "body.errors != nil" }
+                - { name: failure-expr, value: "response.body.errors != nil" }
                 - name: result-expr
                   value: >-
-                    filter(body.data.read_segments.segments,
+                    filter(response.body.data.read_segments.segments,
                            {.name == "{{inputs.parameters.segment-name}}"})[0].id
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -155,7 +155,7 @@ spec:
                      "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_BILLING"}}
                 - {
                     name: assert,
-                    value: "body.data.update_segment.success == true",
+                    value: "response.body.data.update_segment.success == true",
                   }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -212,7 +212,7 @@ spec:
                      "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_COMMITTING"}}
                 - {
                     name: assert,
-                    value: "body.data.update_segment.success == true",
+                    value: "response.body.data.update_segment.success == true",
                   }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -259,7 +259,7 @@ spec:
                      "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_EXPORTING"}}
                 - {
                     name: assert,
-                    value: "body.data.update_segment.success == true",
+                    value: "response.body.data.update_segment.success == true",
                   }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -312,7 +312,7 @@ spec:
                     {"query":"mutation($id:String!,$t:Int,$e:[schedule_entry_input!]!,$s:String){ set_segment_delivery_schedule(segment_id:$id, type:$t, entries:$e){ success error_message } update_segment(id:$id, state:$s){ success error_message } }",
                      "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","t":{{inputs.parameters.delivery-type}},"e":{{inputs.parameters.schedule-entries}},"s":"STATE_FULFILLING"}}
                 - name: assert
-                  value: "body.data.set_segment_delivery_schedule.success == true && body.data.update_segment.success == true"
+                  value: "response.body.data.set_segment_delivery_schedule.success == true && response.body.data.update_segment.success == true"
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,

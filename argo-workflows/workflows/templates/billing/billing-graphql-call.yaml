@@ -21,9 +21,12 @@
 #   FAILURE_EXPR  bail early when true                 (e.g. a deadletter state)
 #   ASSERT        assert once, no polling              (mutually exclusive w/ SUCCESS_EXPR)
 #   RESULT_EXPR   capture a value (segment id, ...) -> emitted as the step `result`
-# Predicates evaluate against the response env {status, ok, headers, body, ...};
-# for GraphQL, `body` is the `{data, errors}` object. See qe-toolkit/executors
-# pkg/expect for the operators (any/all/filter/len/matches/in).
+# Predicates evaluate against the response env, addressed under `response.`:
+# response.{status, ok, headers, body, messages, raw}. For GraphQL, response.body
+# is the `{data, errors}` object — e.g. SUCCESS_EXPR
+# `any(response.body.data.read_segments.segments, .state == "…")`, FAILURE_EXPR
+# `response.body.errors != nil`. See qe-toolkit/executors pkg/expect for the
+# operators (any/all/filter/len/matches/in).
 #
 # AUTH: the bearer token is a short-lived token the submitter supplies (any
 # engineer can generate one) — passed as the `token` parameter, injected into the
@@ -66,7 +69,10 @@ spec:
       - { name: target-namespace, value: billing }
       - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       # --- knobs --------------------------------------------------------------
-      - { name: call-http-image, value: "registry.uw.systems/dev-enablement/call-http:main" }
+      - {
+          name: call-http-image,
+          value: "registry.uw.systems/dev-enablement/call-http:main",
+        }
       - { name: runner-sa, value: default } # pod identity in the target ns
       - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
       - { name: log-level, value: info }
@@ -88,7 +94,10 @@ spec:
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
-          - { name: call-http-image, value: "registry.uw.systems/dev-enablement/call-http:main" }
+          - {
+              name: call-http-image,
+              value: "registry.uw.systems/dev-enablement/call-http:main",
+            }
           - { name: runner-sa, value: default }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
@@ -109,8 +118,14 @@ spec:
               template: execute-job
             arguments:
               parameters:
-                - { name: cluster-name, value: "{{inputs.parameters.cluster-name}}" }
-                - { name: target-namespace, value: "{{inputs.parameters.target-namespace}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 # Full Job manifest as a string. Argo substitutes every
@@ -139,13 +154,7 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  # Assemble the auth header at runtime so the token is not baked
-                                  # into HEADERS in the manifest. TOKEN comes from the env below.
-                                  export HEADERS="Authorization: Bearer ${TOKEN},Content-Type: application/json"
-                                  # call-http reads URL/METHOD/PAYLOAD/HEADERS + the expr predicates
-                                  # from the env; it writes RESULT_EXPR's value to RESULT_PATH.
-                                  call-http
-                                  # Bridge call-http's captured value to exec-kube's result channel.
+                                  /app/executor
                                   echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result 2>/dev/null || true)"
                               env:
                                 - { name: URL, value: "{{inputs.parameters.endpoint}}" }
