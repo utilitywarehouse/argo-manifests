@@ -187,13 +187,12 @@ spec:
                     value: "{{inputs.parameters.select-image}}",
                   }
                 - { name: expr, value: "rows[0]" }
-                - { name: output, value: "-" } # -> pod logs
                 - { name: output-format, value: json }
 
-        # 5) PARTIAL over MULTIPLES — supply_type + mpxn PER supply. Maps over the whole
-        #    nested list, so the gas AND electricity rows both come out (2 objects), proving
-        #    we don't collapse or drop a fuel: [{gas,2474511605},{electricity,1410756580005}].
-        - - name: select-supply-pairs
+          # 5) PARTIAL over MULTIPLES — supply_type + mpxn PER supply. Maps over the whole
+          #    nested list, so the gas AND electricity rows both come out (2 objects), proving
+          #    we don't collapse or drop a fuel: [{gas,2474511605},{electricity,1410756580005}].
+          - name: select-supply-pairs
             template: select
             arguments:
               artifacts:
@@ -208,13 +207,12 @@ spec:
                   }
                 - name: expr
                   value: "map(rows[0].supplies, ({supply_type: .supply_type, mpxn: .mpxn}))"
-                - { name: output, value: "-" } # -> pod logs
                 - { name: output-format, value: json }
 
-        # 6) SINGLE property across MULTIPLES — just the mpxns, as a flat list. No fixed
-        #    index anywhere -> BOTH mpxns land: ["2474511605","1410756580005"]. This is the
-        #    shape a downstream fan-out / SQL IN(...) would consume.
-        - - name: select-mpxns
+          # 6) SINGLE property across MULTIPLES — just the mpxns, as a flat list. No fixed
+          #    index anywhere -> BOTH mpxns land: ["2474511605","1410756580005"]. This is the
+          #    shape a downstream fan-out / SQL IN(...) would consume.
+          - name: select-mpxns
             template: select
             arguments:
               artifacts:
@@ -228,11 +226,10 @@ spec:
                     value: "{{inputs.parameters.select-image}}",
                   }
                 - { name: expr, value: "map(rows[0].supplies, .mpxn)" }
-                - { name: output, value: "-" } # -> pod logs
                 - { name: output-format, value: lines } # one mpxn per line, readable
 
-        # 7) SINGLE / DIRECT — one top-level scalar off the account object (account_id).
-        - - name: select-account-id
+          # 7) SINGLE / DIRECT — one top-level scalar off the account object (account_id).
+          - name: select-account-id
             template: select
             arguments:
               artifacts:
@@ -246,14 +243,13 @@ spec:
                     value: "{{inputs.parameters.select-image}}",
                   }
                 - { name: expr, value: "rows[0].account_id" }
-                - { name: output, value: "-" } # -> pod logs
                 - { name: output-format, value: lines }
 
-        # 8) SINGLE / NESTED + DEDUP — the gentrack_account_number reached through the nested
-        #    supplies, uniq'd. The 2 supplies SHARE J20000032681, so uniq collapses them to a
-        #    single element ["J20000032681"] — proving dedup, not row loss. Captured as the
-        #    `result` PARAMETER: the clean fan-out key (one gentrack account, not two).
-        - - name: select-gentrack
+          # 8) SINGLE / NESTED + DEDUP — the gentrack_account_number reached through the nested
+          #    supplies, uniq'd. The 2 supplies SHARE J20000032681, so uniq collapses them to a
+          #    single element ["J20000032681"] — proving dedup, not row loss. Captured as the
+          #    `result` PARAMETER: the clean fan-out key (one gentrack account, not two).
+          - name: select-gentrack
             template: select
             arguments:
               artifacts:
@@ -309,10 +305,11 @@ spec:
             echo "gentrack_account_numbers = {{inputs.parameters.gentrack}}"
 
     # Reusable select step: mounts an ndjson artifact at /tmp/in.ndjson, runs an expr over
-    # `rows`, and emits. output=/tmp/out captures the emission as BOTH the `result` artifact
-    # (a file, for a downstream select to mount — e.g. the built model) and the `result`
-    # parameter; output=- streams it to stdout (the pod logs), so no file exists and both
-    # outputs are absent (the artifact is optional, the param defaults to "").
+    # `rows`, and emits. The result is ALWAYS written to stdout (the pod logs). `output` is
+    # additive: set it to /tmp/out to ALSO write the emission to a file, captured as BOTH the
+    # `result` artifact (for a downstream select to mount — e.g. the built model) and the
+    # `result` parameter. With the default output=- there is no file, so both are absent (the
+    # artifact is optional, the param defaults to "").
     - name: select
       inputs:
         artifacts:
@@ -338,8 +335,8 @@ spec:
           - { name: LOG_LEVEL, value: debug }
       outputs:
         artifacts:
-          # The emitted file (when output=/tmp/out) — e.g. the built model, mounted by a
-          # downstream select. optional: with output=- there is no file to capture.
+          # The emitted file — only when output is set (e.g. /tmp/out) — e.g. the built model,
+          # mounted by a downstream select. optional: with the default output=- there is no file.
           - name: result
             path: /tmp/out
             optional: true
