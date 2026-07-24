@@ -70,7 +70,7 @@ spec:
               name: kubectl-image,
               value: "registry.uw.systems/dev-enablement/exec-kube:main",
             }
-          - { name: image-pull-secret, value: "" }
+          - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
           - { name: log-level, value: info }
           - { name: timeout, value: 3m }
           - { name: job-active-deadline, value: 4m }
@@ -106,7 +106,8 @@ spec:
                         spec:
                           serviceAccountName: argo-workflow-job-executor
                           restartPolicy: Never
-                          {{=inputs.parameters['image-pull-secret'] != '' ? 'imagePullSecrets: [{ name: ' + inputs.parameters['image-pull-secret'] + ' }]' : ''}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
                           containers:
                             - name: healthcheck
                               image: {{inputs.parameters.kubectl-image}}
