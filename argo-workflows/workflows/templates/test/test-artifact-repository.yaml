@@ -11,6 +11,8 @@ metadata:
     workflows.argoproj.io/invocation: standalone
 spec:
   entrypoint: main
+  podGC:
+    strategy: OnWorkflowSuccess
   podMetadata:
     annotations:
       uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
