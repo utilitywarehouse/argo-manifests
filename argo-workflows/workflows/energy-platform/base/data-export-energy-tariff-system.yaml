@@ -24,7 +24,7 @@ spec:
         data.uw.systems/system: energy-tariff-system
         data.uw.systems/capability: data-export
     workflowTemplateRef:
-      name: data-orchestrator-runner
+      name: step-data-orchestrator-runner
     arguments:
       parameters:
         - { name: mode, value: export }

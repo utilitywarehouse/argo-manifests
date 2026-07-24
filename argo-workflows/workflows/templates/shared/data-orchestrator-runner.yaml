@@ -1,8 +1,8 @@
 # =============================================================================
-# data-orchestrator-runner — generic, ephemeral data-orchestrator run
+# step-data-orchestrator-runner — generic, ephemeral data-orchestrator run
 # =============================================================================
 # Renders a single-pod Kubernetes Job and dispatches it to a target
-# namespace/cluster via the `executor-remote-namespace` template. Per-system
+# namespace/cluster via the `step-executor-remote-namespace` template. Per-system
 # CronWorkflows reference this via `workflowTemplateRef` and supply only the
 # adapter + run scope; everything else has an environment default below.
 #
@@ -50,12 +50,13 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: data-orchestrator-runner
+  name: step-data-orchestrator-runner
   annotations:
     workflows.argoproj.io/description: >-
       Do NOT submit from the UI. Consumed by per-system
       CronWorkflows via workflowTemplateRef.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: reference-only
 spec:
@@ -94,19 +95,9 @@ spec:
       - { name: label, value: adhoc }
       - { name: triggered-by, value: argo }
       - { name: log-level, value: info }
-      # container images (env-specific)
-      - {
-          name: orchestrator-image,
-          value: "registry.uw.systems/dev-enablement/data-orchestrator:main",
-        }
-      - {
-          name: adapter-image,
-          value: "registry.uw.systems/dev-enablement/data-adapter:main",
-        }
-      - {
-          name: call-grpc-image,
-          value: "registry.uw.systems/dev-enablement/call-grpc:main",
-        }
+      # container images are NOT workflow arguments — they are template inputs
+      # only (see `templates[].inputs` below), pinned centrally by the
+      # image-versions ConfigMap in shared/kustomization.yaml. Not UI-settable.
       - { name: adapter-args, value: "serve" }
       - { name: adapter-driver, value: postgres }
       # CockroachDB cert auth for the adapter's SOURCE DB (optional). The adapter fetches its
@@ -199,7 +190,7 @@ spec:
       steps:
         - - name: execute
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:

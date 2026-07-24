@@ -1,21 +1,17 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: test-artifact-upload
+  name: flow-artifact-upload
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Smoke test artifact uploads
   labels:
+    app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
 spec:
   entrypoint: main
-  podGC:
-    strategy: OnWorkflowSuccess
-  podMetadata:
-    annotations:
-      uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
   arguments:
     parameters:
       - name: message
@@ -55,15 +51,6 @@ spec:
               none: {}
 
     - name: consume-artifact
-      podSpecPatch: |
-        initContainers:
-          - name: init
-            env:
-              - name: AWS_SHARED_CREDENTIALS_FILE
-                value: /etc/aws/credentials
-            volumeMounts:
-              - name: vault-aws-credentials
-                mountPath: /etc/aws
       inputs:
         artifacts:
           - name: message

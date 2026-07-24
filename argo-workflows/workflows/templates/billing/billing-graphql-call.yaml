@@ -3,10 +3,10 @@
 # =============================================================================
 # The single reusable primitive behind every billing workflow step. It renders a
 # one-pod Job that runs the `call-http` executor and dispatches it — via the
-# shared `executor-remote-namespace` template — into the namespace/cluster where
+# shared `step-executor-remote-namespace` template — into the namespace/cluster where
 # billing-graphql actually runs (dev-merit/billing). The Argo controller cannot
 # reach billing-graphql directly, so the request executes from inside the target
-# namespace, exactly like `data-orchestrator-runner`.
+# namespace, exactly like `step-data-orchestrator-runner`.
 #
 # billing-graphql (github.com/utilitywarehouse/billing-graphql) abstracts the
 # underlying gRPC services (bo/OrchestrateBilling, fia, fola, fido, bce, txlog),
@@ -40,7 +40,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: billing-graphql-call
+  name: step-billing-graphql-call
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
@@ -48,6 +48,7 @@ metadata:
       dispatched as a Job into the target namespace. Consumed by billing
       workflows via templateRef.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
     workflows.argoproj.io/invocation: reference-only
     data.uw.systems/system: billing
@@ -69,10 +70,8 @@ spec:
       - { name: target-namespace, value: billing }
       - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       # --- knobs --------------------------------------------------------------
-      - {
-          name: call-http-image,
-          value: "registry.uw.systems/dev-enablement/call-http:main",
-        }
+      # call-http-image is a template input only (below), pinned centrally by the
+      # image-versions ConfigMap — not a UI-settable workflow argument.
       - { name: runner-sa, value: default } # pod identity in the target ns
       - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
       - { name: log-level, value: info }
@@ -114,7 +113,7 @@ spec:
       steps:
         - - name: execute
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:

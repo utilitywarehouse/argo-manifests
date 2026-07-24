@@ -16,7 +16,7 @@
 # is the account-number entrypoint that produces the FWF and hands off here. This
 # template stays individually usable for re-running the pipeline.
 #
-#   argo submit --from workflowtemplate/bill-run \
+#   argo submit --from workflowtemplate/step-billing-bill-run \
 #     -p segment-name=UWCDATA1_D181225_T114259.052 \
 #     -p segment-ids=UWCDATA1_D181225_T114259.052 -p token=<bearer>
 #
@@ -26,7 +26,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: bill-run
+  name: step-billing-bill-run
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
@@ -34,6 +34,7 @@ metadata:
       mirroring the billing-operations-frontend flow with a state-poll gate after
       each transition.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
     workflows.argoproj.io/invocation: standalone
     data.uw.systems/system: billing
@@ -43,29 +44,13 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      # --- per run ------------------------------------------------------------
       - { name: account-number } # for labels/traceability
       - { name: segment-name } # name for create_segment; also resolves the segment id
       - { name: segment-ids } # csv of FWF-derived segment ids fed to create_segment
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
-      # attended  -> pause for human validation before the irreversible Commit
+      # attended -> pause for human validation before the irreversible Commit;
       # unattended -> run straight through (state polls still gate every stage)
       - { name: validation-mode, value: attended }
-      # Fulfil (Schedule) delivery: 0 = email, 1 = print, and the schedule entries.
-      # Default is a single same-day entry; override for multi-day/volume schedules.
-      - { name: delivery-type, value: "0" }
-      - name: schedule-entries
-        value: '[{"id":"0","total":1,"date":"{{workflow.creationTimestamp.RFC3339}}"}]'
-      # --- bo.State end-states awaited after each phase -----------------------
-      - { name: state-pending, value: STATE_PENDING }
-      - { name: state-billed, value: STATE_BILLED }
-      - { name: state-committed, value: STATE_COMMITTED }
-      - { name: state-exported, value: STATE_EXPORTED }
-      - { name: state-fulfilled, value: STATE_FULFILLED }
-      # --- where billing-graphql lives (patched per environment overlay) -------
-      - { name: cluster-name, value: dev-merit }
-      - { name: target-namespace, value: billing }
-      - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
 
   templates:
     - name: main
@@ -92,7 +77,7 @@ spec:
       steps:
         # ---- Create segment ------------------------------------------------
         - - name: create-segment
-            templateRef: { name: billing-graphql-call, template: call }
+            templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: create-segment }
@@ -117,7 +102,7 @@ spec:
 
         # ---- Resolve id + precondition: poll until the segment is PENDING ----
         - - name: resolve-segment
-            templateRef: { name: billing-graphql-call, template: call }
+            templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: resolve-segment }
@@ -145,7 +130,7 @@ spec:
 
         # ---- Bill:   PENDING -> STATE_BILLING -> await BILLED --------------
         - - name: bill
-            templateRef: { name: billing-graphql-call, template: call }
+            templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: bill }
@@ -168,7 +153,7 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-billed
-            templateRef: { name: await-segment-state, template: await }
+            templateRef: { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -202,7 +187,7 @@ spec:
 
         # ---- Commit: BILLED -> STATE_COMMITTING -> await COMMITTED ---------
         - - name: commit
-            templateRef: { name: billing-graphql-call, template: call }
+            templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: commit }
@@ -225,7 +210,7 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-committed
-            templateRef: { name: await-segment-state, template: await }
+            templateRef: { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -249,7 +234,7 @@ spec:
 
         # ---- Export: COMMITTED -> STATE_EXPORTING -> await EXPORTED --------
         - - name: export
-            templateRef: { name: billing-graphql-call, template: call }
+            templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: export }
@@ -272,7 +257,7 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-exported
-            templateRef: { name: await-segment-state, template: await }
+            templateRef: { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -303,7 +288,7 @@ spec:
         # One mutation, as the UI does it: set the delivery schedule AND move the
         # segment to STATE_FULFILLING; the scheduled dispatch drives it to FULFILLED.
         - - name: fulfil
-            templateRef: { name: billing-graphql-call, template: call }
+            templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: fulfil }
@@ -324,7 +309,7 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-fulfilled
-            templateRef: { name: await-segment-state, template: await }
+            templateRef: { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {

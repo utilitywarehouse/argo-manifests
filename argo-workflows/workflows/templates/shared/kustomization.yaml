@@ -7,17 +7,20 @@ resources:
   - healthcheck-namespace.yaml
 
 # ---------------------------------------------------------------------------
-# Single source of truth for the critical image versions. Bump a tag here and
-# it propagates to every environment (all envs pull templates/ -> shared/).
+# Image pins for the shared/ package templates. Each package (shared, billing,
+# energy, account, test) owns a <pkg>-image-versions ConfigMap + its own
+# replacements, co-located with the templates it pins — kustomize cannot share a
+# generated ConfigMap across sibling packages, so there is no single global list.
 #
-# These images can't be pinned by kustomize's `images:` transformer if they are
-# Argo *parameter* strings or job heredoc (not container image fields).
+# These are Argo template-INPUT params (never spec.arguments, so not UI-settable)
+# and can't be pinned by kustomize's `images:` transformer — they are Argo
+# `{{...}}` expressions inside a Job heredoc, not resolvable image fields (the
+# lone exception, exec-kube, IS a real container.image and is replaced as such).
 #
-# To bump a version: edit the literal below. To override per-environment: patch
-# these literals (or add replacements) in the environment overlay.
+# Bump a tag here; per-environment overrides go in the environment overlay.
 # ---------------------------------------------------------------------------
 configMapGenerator:
-  - name: image-versions
+  - name: shared-image-versions
     options:
       annotations:
         config.kubernetes.io/local-config: "true"
@@ -25,40 +28,47 @@ configMapGenerator:
       - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:5c9063aa3d12e0482d7cd37c368950e750377868
       - data-adapter=registry.uw.systems/dev-enablement/data-adapter:5c9063aa3d12e0482d7cd37c368950e750377868
       - call-grpc=registry.uw.systems/dev-enablement/call-grpc:35ab89428d1770946eb2c0e766cfd2790dbc0495
-      - call-http=registry.uw.systems/dev-enablement/call-http:35ab89428d1770946eb2c0e766cfd2790dbc0495
       - exec-kube=registry.uw.systems/dev-enablement/exec-kube:chore-redesign-wkflw-data-prop
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:80b1439b0c21d5ae40fc7c600a89f142fe2274d9
-      - select=registry.uw.systems/dev-enablement/select:chore-redesign-wkflw-data-prop
 generatorOptions:
   disableNameSuffixHash: true
 
+# Replacements pin the images used by THIS package's templates only. kustomize
+# cannot share a generated ConfigMap across sibling packages, so each package
+# owns its own pins + replacements (query-pg is likewise pinned in energy/ and
+# account/). Uniform target: `spec.templates.*.inputs.parameters.[name=<x>-image].value`.
 replacements:
   - source:
       {
         kind: ConfigMap,
-        name: image-versions,
+        name: shared-image-versions,
         fieldPath: data.data-orchestrator,
       }
     targets:
-      - select: { kind: WorkflowTemplate, name: data-orchestrator-runner }
+      - select: { kind: WorkflowTemplate, name: step-data-orchestrator-runner }
         fieldPaths:
-          - spec.arguments.parameters.[name=orchestrator-image].value
-          - spec.templates.[name=run].inputs.parameters.[name=orchestrator-image].value
+          - spec.templates.*.inputs.parameters.[name=orchestrator-image].value
   - source:
-      { kind: ConfigMap, name: image-versions, fieldPath: data.data-adapter }
+      {
+        kind: ConfigMap,
+        name: shared-image-versions,
+        fieldPath: data.data-adapter,
+      }
     targets:
-      - select: { kind: WorkflowTemplate, name: data-orchestrator-runner }
+      - select: { kind: WorkflowTemplate, name: step-data-orchestrator-runner }
         fieldPaths:
-          - spec.arguments.parameters.[name=adapter-image].value
-          - spec.templates.[name=run].inputs.parameters.[name=adapter-image].value
-  - source: { kind: ConfigMap, name: image-versions, fieldPath: data.call-grpc }
+          - spec.templates.*.inputs.parameters.[name=adapter-image].value
+  - source:
+      { kind: ConfigMap, name: shared-image-versions, fieldPath: data.call-grpc }
     targets:
-      - select: { kind: WorkflowTemplate, name: data-orchestrator-runner }
+      - select: { kind: WorkflowTemplate, name: step-data-orchestrator-runner }
         fieldPaths:
-          - spec.arguments.parameters.[name=call-grpc-image].value
-          - spec.templates.[name=run].inputs.parameters.[name=call-grpc-image].value
-  - source: { kind: ConfigMap, name: image-versions, fieldPath: data.exec-kube }
+          - spec.templates.*.inputs.parameters.[name=call-grpc-image].value
+  - source:
+      { kind: ConfigMap, name: shared-image-versions, fieldPath: data.exec-kube }
     targets:
-      - select: { kind: WorkflowTemplate, name: executor-remote-namespace }
+      - select: { kind: WorkflowTemplate, name: step-executor-remote-namespace }
         fieldPaths:
-          - spec.templates.[name=execute-job].container.image
+          - spec.templates.*.container.image
+      - select: { kind: WorkflowTemplate, name: step-healthcheck-namespace }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=kubectl-image].value

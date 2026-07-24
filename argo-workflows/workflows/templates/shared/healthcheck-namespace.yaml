@@ -1,10 +1,10 @@
 # =============================================================================
-# healthcheck-namespace — fail unless every (selected) pod in a namespace is
+# step-healthcheck-namespace — fail unless every (selected) pod in a namespace is
 # healthy. A reusable gate to decide when it is safe to run workflows/steps
 # against a namespace.
 # =============================================================================
 # Dispatches a short-lived Job into the target namespace via
-# executor-remote-namespace (exec-kube). The Job runs kubectl against the LOCAL
+# step-executor-remote-namespace (exec-kube). The Job runs kubectl against the LOCAL
 # (in-cluster) API — it inherits the argo-workflow-job-executor ServiceAccount,
 # which already has pods get/list/watch — and exits non-zero when any selected
 # pod is unhealthy, failing the caller.
@@ -35,13 +35,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: healthcheck-namespace
+  name: step-healthcheck-namespace
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Fails unless every selected pod in the target namespace is healthy
       (no CrashLoopBackOff / not-ready / pending). Consumed via templateRef.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
 spec:
@@ -55,15 +56,6 @@ spec:
       - { name: services, value: "" }
       - { name: service-label-key, value: app }
       - { name: include-job-pods, value: "false" }
-      - {
-          name: kubectl-image,
-          value: "registry.uw.systems/dev-enablement/exec-kube:main",
-        }
-      - { name: image-pull-secret, value: "" }
-      - { name: log-level, value: info }
-      - { name: timeout, value: 3m }
-      - { name: job-active-deadline, value: 4m }
-      - { name: job-ttl, value: 1h }
   templates:
     - name: check
       inputs:
@@ -86,7 +78,7 @@ spec:
       steps:
         - - name: execute
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:

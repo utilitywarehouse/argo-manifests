@@ -1,5 +1,5 @@
 # =============================================================================
-# resolve-energy-service-identifiers — customer account_id → compiled energy
+# step-energy-resolve-service-identifiers — customer account_id → compiled energy
 # service / gentrack identifier map (from energy-platform `service_snapshot`)
 # =============================================================================
 # Energy-owned, reusable leaf: given a customer account_id, return the account's
@@ -23,18 +23,19 @@
 #        docs/data-flow.md for the full data-passing standard.
 #
 # Reference-only: the energy stage of the account pipeline, consumed via
-# templateRef by the test-account-select orchestrator (piped account-id in).
+# templateRef by the flow-test-account-select orchestrator (piped account-id in).
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: resolve-energy-service-identifiers
+  name: step-energy-resolve-service-identifiers
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Do NOT submit from the UI (read-only). customer account_id → flat ndjson of the
       account's energy-service supplies from service_snapshot. Consumed via templateRef.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: energy
     workflows.argoproj.io/invocation: reference-only
     data.uw.systems/system: energy-service
@@ -60,10 +61,8 @@ spec:
       - { name: ca-profile-key, value: ca.node.profile } # → CA_PROFILE
       - { name: ca-address-key, value: ca.endpoint } # → CA_ADDRESS
       # common
-      - {
-          name: query-pg-image,
-          value: "registry.uw.systems/dev-enablement/query-pg:main",
-        }
+      # query-pg-image is a template input only (below), pinned centrally by the
+      # image-versions ConfigMap — not a UI-settable workflow argument.
       - { name: image-pull-secret, value: dockerhub-key }
       - { name: log-level, value: info }
       - { name: timeout, value: 3m }
@@ -117,7 +116,7 @@ spec:
         # energy-platform: account_id → the account's supplies as flat ndjson
         - - name: energy-platform
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:
@@ -137,7 +136,7 @@ spec:
                     apiVersion: batch/v1
                     kind: Job
                     metadata:
-                      generateName: resolve-energy-service-identifiers-
+                      generateName: step-energy-resolve-service-identifiers-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}

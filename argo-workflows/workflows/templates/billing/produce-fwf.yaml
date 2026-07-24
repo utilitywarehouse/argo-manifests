@@ -13,13 +13,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: produce-fwf
+  name: step-billing-produce-fwf
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Do NOT submit from the UI. Fabricate+upload a FWF for an account; emits the
       minted filename. Consumed by generate-bill via templateRef.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
     workflows.argoproj.io/invocation: reference-only
     data.uw.systems/system: billing
@@ -32,13 +33,11 @@ spec:
       - { name: invoice-number, value: "" } # override to skip invoice-preferences-api
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
-      # where it runs / images
+      # where it runs
       - { name: cluster-name, value: dev-merit }
       - { name: target-namespace, value: billing }
-      - {
-          name: fwf-image,
-          value: "registry.uw.systems/dev-enablement/fabricate-migrated-fwf:f684d463e3c43f17626997d7eed53b4f8f98d7bf",
-        }
+      # fwf-image is a template input only (below), pinned centrally by the
+      # image-versions ConfigMap — not a UI-settable workflow argument.
       - { name: bucket, value: billing-bill-extracts-dev }
       - {
           name: uploader-endpoint,
@@ -85,7 +84,7 @@ spec:
       steps:
         - - name: execute
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:
