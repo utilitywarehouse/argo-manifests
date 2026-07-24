@@ -73,6 +73,9 @@ spec:
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
                       ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
+                        metadata:
+                          annotations:
+                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:

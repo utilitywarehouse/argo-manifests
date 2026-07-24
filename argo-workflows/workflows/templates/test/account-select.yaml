@@ -32,7 +32,10 @@ spec:
       inputs:
         parameters:
           - { name: account-number }
-          - { name: select-image, value: "registry.uw.systems/dev-enablement/select:main" }
+          - {
+              name: select-image,
+              value: "registry.uw.systems/dev-enablement/select:main",
+            }
           - { name: account-cluster-name }
           - { name: account-namespace }
           - { name: energy-service-cluster-name }
@@ -272,14 +275,16 @@ spec:
         artifacts:
           - { name: input, path: /tmp/in.ndjson }
         parameters:
-          - { name: select-image, value: "registry.uw.systems/dev-enablement/select:main" }
+          - {
+              name: select-image,
+              value: "registry.uw.systems/dev-enablement/select:main",
+            }
           - { name: expr }
           - { name: output, value: "-" }
           - { name: format, value: ndjson }
           - { name: output-format, value: json }
       container:
         image: "{{inputs.parameters.select-image}}"
-        imagePullPolicy: Always
         env:
           - { name: INPUT, value: /tmp/in.ndjson }
           - { name: FORMAT, value: "{{inputs.parameters.format}}" }
