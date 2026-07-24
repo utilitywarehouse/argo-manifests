@@ -9,9 +9,4 @@ data:
       bucket: uw-dev-qe-argo-workflows
       endpoint: s3.amazonaws.com
       region: eu-west-1
-      accessKeySecret:
-        name: argo-s3-secret
-        key: AWS_ACCESS_KEY_ID
-      secretKeySecret:
-        name: argo-s3-secret
-        key: AWS_SECRET_ACCESS_KEY
+      useSDKCreds: true

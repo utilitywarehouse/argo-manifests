@@ -73,6 +73,7 @@ spec:
           - { name: label-selector, value: "" }
           - { name: services, value: "" }
           - { name: service-label-key, value: app }
+          - { name: include-job-pods, value: "false" }
           - {
               name: kubectl-image,
               value: "registry.uw.systems/dev-enablement/exec-kube:main",
