@@ -53,6 +53,15 @@ spec:
               none: {}
 
     - name: consume-artifact
+      podSpecPatch: |
+        initContainers:
+          - name: init
+            env:
+              - name: AWS_SHARED_CREDENTIALS_FILE
+                value: /etc/aws/credentials
+            volumeMounts:
+              - name: vault-aws-credentials
+                mountPath: /etc/aws
       inputs:
         artifacts:
           - name: message
