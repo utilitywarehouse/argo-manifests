@@ -1,7 +1,33 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+namePrefix: test-
+
 resources:
-  - test-artifact-repository.yaml
-  - test-remote-namespace-job.yaml
-  - test-account-select.yaml
+  - artifact-repository.yaml
+  - remote-namespace-job.yaml
+  - account-select.yaml
+
+# ---------------------------------------------------------------------------
+# Image pins for the test/ package templates. The `select` executor is pinned
+# here. NOTE: replacements run BEFORE this kustomization's namePrefix, so the
+# target selects the UNPREFIXED name (flow-account-select); the `test-` prefix is
+# applied afterwards. See shared/kustomization.yaml for the per-package rationale.
+# ---------------------------------------------------------------------------
+configMapGenerator:
+  - name: test-image-versions
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - select=registry.uw.systems/dev-enablement/select:chore-redesign-wkflw-data-prop
+generatorOptions:
+  disableNameSuffixHash: true
+
+replacements:
+  - source:
+      { kind: ConfigMap, name: test-image-versions, fieldPath: data.select }
+    targets:
+      - select: { kind: WorkflowTemplate, name: flow-account-select }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=select-image].value

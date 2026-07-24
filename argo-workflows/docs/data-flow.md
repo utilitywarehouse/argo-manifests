@@ -1,85 +1,79 @@
-# Data flow: capturing query results and selecting fields between steps
+# Passing data between workflow steps
 
-How workflow steps produce structured data, capture it, and let later steps pick out the
-full / partial / specific properties they need — without assembling JSON in SQL and without
-`jq` in any image.
+How a step produces structured data, the next step captures it, and later steps pull the
+fields they need — without building JSON in SQL or shipping `jq`.
 
 ## The principle
 
-Do the plainest, fastest thing at each stage:
-
-1. **Query flat.** A producer (e.g. `query-pg`) runs a plain `SELECT` and streams the rows to
-   a file — no `json_build_object` / `json_agg`, no CSV-quoting. Shaping output _inside_ the
-   query pushes serialization and aggregation onto the DB and is a real bottleneck at scale.
-2. **Capture the file as an artifact.** The result becomes an Argo artifact (any size) plus a
-   small parameter mirror.
-3. **Select downstream.** Any later step that needs specific fields runs the **`select`**
-   executor — parse → expr → emit — over the captured artifact.
-
 ```
-query (flat)  ──▶  file/artifact  ──▶  select (expr)  ──▶  fields a step needs
- ndjson rows        the "model"         full/partial/          json array (withParam),
- no SQL JSON        (any size)          specific               a list, a scalar, …
+query (flat)  →  file / artifact  →  select (expr)  →  the fields a step needs
+ ndjson rows       the "model"         full / partial /    json array (withParam),
+ no SQL JSON        (any size)          specific            a list, or a scalar
 ```
 
-Format is the contract; transport stops leaking into the query.
+1. **Query flat.** A producer (`query-pg`) runs a plain `SELECT` and streams rows to a
+   file — no `json_build_object` / `json_agg`, no CSV quoting. Shaping inside the query
+   pushes serialisation and aggregation onto the DB and does not scale.
+2. **Capture the file** as an Argo artifact (any size), plus a small parameter mirror.
+3. **Select downstream.** A later step runs the `select` executor — parse, apply an expr,
+   emit — over the captured file.
 
-## Capturing a result from a remote Job (`exec-kube`)
+Format is the contract; the query just streams rows.
 
-Queriers that must reach a DB in another namespace run as **Kubernetes Jobs** dispatched by
-`exec-kube` (the `executor-remote-namespace` template). Argo does not manage those Jobs, so
-the only channel back is the Job's **log stream**, which `exec-kube` turns into two artifacts
-on its own (Argo-managed) pod:
+## Capturing a result from a remote Job
 
-- `result` → `/tmp/result.txt` (also mirrored as a `result` **parameter**)
+Queriers reaching a DB in another namespace run as Kubernetes Jobs dispatched by
+`exec-kube` (`step-executor-remote-namespace`). Argo does not manage those Jobs, so the
+only channel back is the Job's **log stream**, which `exec-kube` turns into two artifacts
+on its own pod:
+
+- `result` → `/tmp/result.txt` (also mirrored as a `result` parameter)
 - `logs` → `/tmp/logs.txt`
 
 ### The capture contract
 
-Bracket the result between two marker lines. Send diagnostics to **stderr**; print the
-payload between the markers:
+Bracket the payload between two markers; send diagnostics to stderr:
 
 ```sh
-query-pg                 # logs -> stderr; rows -> /tmp/out.ndjson
+query-pg                 # logs → stderr; rows → /tmp/out.ndjson
 echo ARGO_RESULT_BEGIN
-cat /tmp/out.ndjson      # the result payload
+cat /tmp/out.ndjson      # the payload
 echo ARGO_RESULT_END
 ```
 
-`exec-kube` captures the content **between** the markers (last complete block) as `result`,
-and removes those lines from `logs` — so the result is never duplicated into the logs.
+`exec-kube` captures the content between the markers (the last complete block) as
+`result` and strips those lines from `logs`, so the result is never duplicated into the
+logs.
 
-**Why `END` matters.** `kubectl logs` merges stdout and stderr, and the two streams interleave
-by arrival at the kubelet, _not_ by program order — a diagnostic flushed late can appear
-_after_ the payload. The `END` marker bounds the capture so such a line is excluded. A
-`BEGIN` with no `END` yields an empty result and a warning; capture-to-EOF is deliberately not
+**Why `END` matters.** `kubectl logs` merges stdout and stderr by arrival at the kubelet,
+not by program order, so a late diagnostic can land after the payload. `END` bounds the
+capture. `BEGIN` with no `END` yields an empty result and a warning; capture-to-EOF is not
 supported.
 
-**Tiny scalars (back-compat).** For a single value, print one line instead:
+**Single scalars.** For one value, print one line instead of bracketing:
 
 ```sh
 echo "ARGO_RESULT_OUTPUT=$account_id"
 ```
 
-Only `<value>` is written to `result`. If neither marker is present, `result` is **empty**
-(the full logs are never dumped into it).
+Only `<value>` is written to `result`. With no marker, `result` is empty.
 
-### Small vs large — where the result rides back
+### Where the result rides back
 
-Output **parameters** live in the Workflow object (etcd) — keep them small. Artifacts live in
-the S3 artifact repository — any size.
+Parameters live in the Workflow object (etcd) — keep them small. Artifacts live in S3 and
+can be any size.
 
-| Result size                      | How it comes back          | How to consume                                                                      |
-| -------------------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
-| **Small** (id maps, short lists) | the `result` **parameter** | controller expr `{{= jsonpath(...) }}` / `{{= fromJson(...) }}`, or a `select` step |
-| **Large** (bulk rows)            | the `result` **artifact**  | a `select` step that mounts the artifact                                            |
+| Result size                  | Comes back as              | Consumed by                                                                           |
+| ---------------------------- | -------------------------- | ------------------------------------------------------------------------------------- |
+| Small (id maps, short lists) | the `result` **parameter** | a controller expr `{{= jsonpath(...) }}` / `{{= fromJson(...) }}`, or a `select` step |
+| Large (bulk rows)            | the `result` **artifact**  | a `select` step that mounts the artifact                                              |
 
-## Selecting fields (`select`)
+## Selecting fields with `select`
 
-Argo's controller expression engine (`{{= ... }}`) only ever sees **parameters** — never
-artifact **files**. So selecting fields out of an artifact file **must run in a step**. That
-step is the `select` executor: it reads an input file/artifact, evaluates an
-[expr-lang](https://expr-lang.org) expression against `rows`, and emits the result.
+The controller expression engine (`{{= ... }}`) only sees **parameters**, never artifact
+**files**. Pulling fields from a file has to run in a step: the `select` executor reads an
+input file, evaluates an [expr-lang](https://expr-lang.org) expression over `rows`, and
+emits.
 
 | Env var         | Default  | Meaning                                     |
 | --------------- | -------- | ------------------------------------------- |
@@ -89,15 +83,14 @@ step is the `select` executor: it reads an input file/artifact, evaluates an
 | `OUTPUT`        | `-`      | Output file (`-` = stdout)                  |
 | `OUTPUT_FORMAT` | `json`   | Output format: `json`, `ndjson`, `lines`    |
 
-The input is parsed into `rows` (a list of objects). `json` output is a **bare** array
-(`["J…","K…"]`, not `[{"value":…}]`) so it drops straight into `withParam`; `lines` emits
-scalars bare, one per line (readable, shell- and SQL-friendly).
+Input parses into `rows` (a list of objects). `json` output is a **bare** array
+(`["J…","K…"]`, not `[{"value":…}]`) so it drops into `withParam`; `lines` emits scalars
+bare, one per line (shell- and SQL-friendly).
 
 ### expr cookbook
 
-`select` and the `call-*` asserts share the same expr engine (expr-lang), whose builtins
-include `map, filter, uniq, join, sort, sortBy, concat, flatten, reduce, groupBy, keys,
-values`.
+`select` and the `call-*` asserts share the expr engine; builtins include `map, filter,
+uniq, join, sort, sortBy, concat, flatten, reduce, groupBy, keys, values`.
 
 | Need                         | `SELECT`                                                                             | `OUTPUT_FORMAT`         |
 | ---------------------------- | ------------------------------------------------------------------------------------ | ----------------------- |
@@ -109,102 +102,76 @@ values`.
 | filter, then project         | `map(filter(rows, .gentrack_account_number == "K12345"), .mpxn)`                     | `json`                  |
 | partial objects              | `map(rows, {mpxn: .mpxn, agr: .gentrack_agreement_id})`                              | `json` / `ndjson`       |
 
-### expr does not flow across steps
+### expr does not flow between steps
 
-expr-lang runs _inside a step_, over parsed values (hence it is format-agnostic). It does
-**not** flow between steps on its own:
+expr-lang runs **inside a step**, over already-parsed values:
 
 - **Inside a step** (a `select` container, or a `call-*` assert): expr over a file or a
   response.
-- **Between steps** (the controller): `{{= jsonpath(param, ...) }}` / `{{= fromJson(param) }}`
-  — over **parameters only**, never artifact files.
+- **Between steps** (the controller): `{{= jsonpath(param, ...) }}` /
+  `{{= fromJson(param) }}`, over **parameters only**, never artifact files.
 
-So an artifact from one workflow consumed by another is just an input-artifact **file** to a
-step that runs `select`. It translates across steps and workflows — but always _through a step
-that does the selection_, never as free-floating controller magic.
-
-## Worked example: resolve → bill an account
-
-**Producer — `resolve-service-identifiers`** (`templates/energy/`). A flat query streamed as
-ndjson, bracketed by the markers:
-
-```yaml
-env:
-  - name: QUERY
-    value: >-
-      SELECT s.supply_type, s.mpxn, s.gentrack_account_number,
-             s.gentrack_account_id, s.gentrack_agreement_id, s.gentrack_customer_id
-      FROM service_snapshot s
-      WHERE s.customer_account_id = '{{inputs.parameters.account-id}}'
-        AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
-  - { name: FORMAT, value: ndjson }
-  - { name: OUTPUT, value: /tmp/out.ndjson }
-args:
-  - |
-    set -eu
-    /bin/executor
-    echo ARGO_RESULT_BEGIN
-    cat /tmp/out.ndjson
-    echo ARGO_RESULT_END
-```
-
-The `identifiers` output (artifact + parameter mirror) is now the account's **flat supply
-rows** — the account model, unshaped. `account_id` is the input, not repeated per row.
-
-**Composer — `resolve-account`** (`templates/account/`) passes the `identifiers` artifact
-through and adds the `account-id` and `account-number` parameters. One artifact + two scalars
-_are_ the model, queried selectively downstream.
-
-**Consumer — `bill-account`** (to build) needs different fields at different stages:
-
-```yaml
-# Stage 1 — distinct gentrack numbers, as a JSON array, to fan out:
-- - name: gentrack-numbers
-    template: select-step # a container running the `select` image
-    arguments:
-      artifacts:
-        [
-          {
-            name: input,
-            from: "{{steps.resolve.outputs.artifacts.identifiers}}",
-          },
-        ]
-      parameters:
-        - { name: format, value: ndjson }
-        - {
-            name: select,
-            value: "uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))",
-          }
-        - { name: output-format, value: json }
-- - name: bill-each
-    withParam: "{{steps.gentrack-numbers.outputs.parameters.result}}" # ["J20000032681", …]
-    template: bill-one
-    arguments:
-      parameters: [{ name: gentrack-account-number, value: "{{item}}" }]
-# Inside bill-one — Stage 2: the supplies for THIS gentrack number, to drive a query/step:
-#   SELECT='filter(rows, .gentrack_account_number == "{{inputs.parameters.gentrack-account-number}}")'
-# Stage 3, later — account_id / account_number / mpxns, individually or together:
-#   SELECT='rows[0].gentrack_customer_id'                         # specific scalar
-#   SELECT='map(rows, .mpxn)'   OUTPUT_FORMAT=lines               # a list
-#   SELECT='map(rows, {mpxn: .mpxn, agr: .gentrack_agreement_id})' # partial objects
-# account_id / account_number come straight from resolve-account's parameters.
-```
-
-One query → one flat artifact → many `select` steps, each pulling exactly what it needs.
+So an artifact produced by one workflow and consumed by another is just an input-artifact
+**file** to a `select` step — it carries across steps and workflows, but always through a
+step that does the selection.
 
 ## Formats
 
-`select` (and `pkg/dataset`) ship `json`, `ndjson`, `lines`. `csv` and `values` are
-deliberately deferred — a comma list for SQL `IN(...)` is a one-line expr
-(`join(map(rows, .id), ",")`) emitted as `lines`, so they earn no separate format yet. They
-remain a small, local add if a real need appears.
+`select` ships `json`, `ndjson`, `lines`. `csv`/`values` are deferred: a comma list for
+SQL `IN (...)` is a one-line expr (`join(map(rows, .id), ",")`) emitted as `lines`. Add
+locally if a real need appears.
+
+## Worked example: resolve → model → select
+
+`flow-account-select` (`templates/test/account-select.yaml`) is the pattern end to end.
+
+**1. Producers.** `resolve-account` turns an account number into `account_id`;
+`resolve-service-identifiers` pipes that in and streams the account's supplies as flat
+ndjson (the `identifiers` artifact). This is the workflow-to-workflow data pipe.
+
+**2. Build the model.** A `select` step joins the flat rows into one nested account object
+(account scalars with supplies nested under `supplies`), emitted as an ndjson artifact:
+
+```yaml
+- - name: build-model
+    template: select
+    arguments:
+      artifacts:
+        - { name: input, from: "{{steps.resolve-service-identifiers.outputs.artifacts.identifiers}}" }
+      parameters:
+        - name: expr
+          value: >-
+            [{
+              account_number: "{{inputs.parameters.account-number}}",
+              account_id: "{{steps.resolve-account-id.outputs.parameters.account-id}}",
+              supplies: map(rows, ({supply_type: .supply_type, mpxn: .mpxn,
+                gentrack_account_number: .gentrack_account_number}))
+            }]
+        - { name: output, value: /tmp/out }          # emit the model as an artifact
+        - { name: output-format, value: ndjson }      # one account object per line
+```
+
+**3. Select over the model** at any precision. The account is `rows[0]`; supplies are
+always mapped/filtered (never `.supplies[0]`), so a dual-fuel account keeps both fuels:
+
+```yaml
+expr: "rows[0]"                                                          output-format: json    # full object
+expr: "map(rows[0].supplies, {supply_type: .supply_type, mpxn: .mpxn})" output-format: json    # partial, per supply
+expr: "map(rows[0].supplies, .mpxn)"                                    output-format: lines   # flat list for fan-out / SQL IN
+expr: "rows[0].account_id"                                              output-format: json    # single scalar
+```
+
+One query → one flat artifact → one model → many `select` steps. To fan out, feed a `json`
+array straight into `withParam`:
+
+```yaml
+- - name: bill-each
+    withParam: "{{steps.select-gentrack.outputs.parameters.result}}"   # ["J20000032681", …]
+    arguments:
+      parameters: [{ name: gentrack-account-number, value: "{{item}}" }]
+```
 
 ## Pinning executor images
 
-Executor image versions are pinned in one place —
-`templates/shared/kustomization.yaml`, the `image-versions` configMap — and injected into the
-templates by kustomize `replacements`. Bump a tag there and it propagates to every
-environment. `exec-kube` feeds `executor-remote-namespace`; `select` is pinned for when a
-template adds a select step (wire a `replacement` at that point). Prefer a commit SHA for
-promoted versions; a branch tag (e.g. `chore-redesign-wkflw-data-prop`) is fine while
-validating in dev.
+Executor image versions (`query-pg`, `select`, `exec-kube`, ...) are pinned per package by
+kustomize `replacements`, not per workflow. See [image-pinning.md](image-pinning.md).

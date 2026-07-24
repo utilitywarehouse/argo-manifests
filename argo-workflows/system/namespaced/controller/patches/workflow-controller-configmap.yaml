@@ -9,7 +9,7 @@ data:
       serviceAccountName: workflow-step-executor
       podMetadata:
         annotations:
-          uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+          uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
       ttlStrategy:
         secondsAfterCompletion: 3600
         secondsAfterSuccess: 3600
@@ -50,6 +50,12 @@ data:
   # executor controls how the init and wait container should be customized
   executor: |
     imagePullPolicy: IfNotPresent
+    env:
+      - name: AWS_SHARED_CREDENTIALS_FILE
+        value: /etc/aws/credentials
+    volumeMounts:
+      - name: vault-aws-credentials
+        mountPath: /etc/aws
     resources:
       requests:
         cpu: 0.1

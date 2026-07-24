@@ -17,13 +17,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: await-segment-state
+  name: step-billing-await-segment-state
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Do NOT submit from the UI. Polls read_segments until a segment reaches a
       target bo.State (with optional stats predicate). Consumed via templateRef.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
     workflows.argoproj.io/invocation: reference-only
     data.uw.systems/system: billing
@@ -55,7 +56,7 @@ spec:
       steps:
         - - name: poll
             templateRef:
-              name: billing-graphql-call
+              name: step-billing-graphql-call
               template: call
             arguments:
               parameters:

@@ -4,3 +4,34 @@ kind: Kustomization
 resources:
   - assert-bills-processed.yaml
   - resolve-energy-service-identifiers.yaml
+
+# ---------------------------------------------------------------------------
+# Image pins for the energy/ package templates. query-pg is a dev-enablement
+# executor used by both energy/ and account/; since kustomize can't share a
+# generated ConfigMap across sibling packages, it is pinned in each (keep the
+# two in sync). See shared/kustomization.yaml for the per-package rationale.
+# ---------------------------------------------------------------------------
+configMapGenerator:
+  - name: energy-image-versions
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:80b1439b0c21d5ae40fc7c600a89f142fe2274d9
+generatorOptions:
+  disableNameSuffixHash: true
+
+replacements:
+  - source:
+      { kind: ConfigMap, name: energy-image-versions, fieldPath: data.query-pg }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-energy-assert-bills-processed }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+      - select:
+          {
+            kind: WorkflowTemplate,
+            name: step-energy-resolve-service-identifiers,
+          }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-pg-image].value

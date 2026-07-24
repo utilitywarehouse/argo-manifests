@@ -14,13 +14,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: generate-bill
+  name: flow-billing-generate-bill
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       One-click bill generation from an account number: produce the FWF, then run
       the segment pipeline (Create → Bill → Commit → Export → Fulfil) to completion.
   labels:
+    app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: billing
     workflows.argoproj.io/invocation: standalone
     data.uw.systems/system: billing
@@ -33,14 +34,8 @@ spec:
       - { name: account-number }
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       - { name: validation-mode, value: attended } # attended pauses before Commit
-      # FWF options (forwarded to produce-fwf)
-      - { name: invoice-number, value: "" } # override to skip invoice-preferences-api
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
-      # where billing-graphql / billing services live (patched per environment)
-      - { name: cluster-name, value: dev-merit }
-      - { name: target-namespace, value: billing }
-      - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
   templates:
     - name: main
       inputs:
@@ -56,7 +51,7 @@ spec:
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       steps:
         - - name: produce-fwf
-            templateRef: { name: produce-fwf, template: produce }
+            templateRef: { name: step-billing-produce-fwf, template: produce }
             arguments:
               parameters:
                 - {
@@ -85,7 +80,7 @@ spec:
                   }
 
         - - name: run-pipeline
-            templateRef: { name: bill-run, template: main }
+            templateRef: { name: step-billing-bill-run, template: main }
             arguments:
               parameters:
                 - {

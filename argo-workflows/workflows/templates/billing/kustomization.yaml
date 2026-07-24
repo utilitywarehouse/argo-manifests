@@ -6,3 +6,34 @@ resources:
   - await-segment-state.yaml
   - produce-fwf.yaml
   - bill-run.yaml
+
+# ---------------------------------------------------------------------------
+# Image pins for the billing/ package templates. call-http is a dev-enablement
+# executor; fabricate-migrated-fwf is a billing business image — both are used
+# only by billing templates, so both are pinned here. See shared/kustomization.yaml
+# for the per-package layout rationale.
+# ---------------------------------------------------------------------------
+configMapGenerator:
+  - name: billing-image-versions
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - call-http=registry.uw.systems/dev-enablement/call-http:35ab89428d1770946eb2c0e766cfd2790dbc0495
+      - fwf=registry.uw.systems/dev-enablement/fabricate-migrated-fwf:chore-mono-script-classification
+generatorOptions:
+  disableNameSuffixHash: true
+
+replacements:
+  - source:
+      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.call-http }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-billing-graphql-call }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=call-http-image].value
+  - source:
+      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.fwf }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-billing-produce-fwf }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=fwf-image].value

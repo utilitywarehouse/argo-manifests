@@ -1,12 +1,13 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: test-remote-namespace-job
+  name: flow-remote-namespace-job
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Smoke test remote-namespace dispatch.
   labels:
+    app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
 spec:
@@ -52,7 +53,7 @@ spec:
       steps:
         - - name: execute
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:

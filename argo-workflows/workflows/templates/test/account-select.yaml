@@ -1,84 +1,38 @@
-# =============================================================================
-# test-account-select — orchestrator for the account → energy → gentrack pipeline
-# =============================================================================
-# A thin orchestrator that pipes data through single-responsibility leaf
-# WorkflowTemplates, one per platform, applying pre/post-processing at each hop.
-# Given an account-number:
-#
-#   1. resolve-account-id           account# -> account_id       (ACCOUNT platform)
-#        └─ account-platform leaf: point lookup on `number`; the leaf does light
-#           in-Job processing (extract the id row from CSV, guard no-match).
-#   2. resolve-service-identifiers  account_id -> supplies       (ENERGY platform)
-#        └─ energy-platform leaf: plainest flat query, streamed as ndjson (no SQL
-#           JSON assembly). ── the account_id piped from step 1 crosses here ──
-#   3. build-model        JOIN: `select` assembles a NESTED account model —
-#                         { account_number, account_id, supplies: [ {…per supply…} ] } —
-#                         from the flat energy rows, as one ndjson artifact. This is
-#                         the "model" the post-processing selects over.
-#
-#   Post-processing — the same `select` executor proving precise selection at every
-#   granularity, AND that multiples survive (steps 4-8, each a DAG node named for what
-#   it proves). Dual-fuel worked example: 2 supplies sharing gentrack J20000032681 but
-#   with different mpxns (2474511605, 1410756580005):
-#   4. select-full          FULL       the whole account object, both nested supplies (`rows[0]`) -> logs
-#   5. select-supply-pairs  PARTIAL    supply_type+mpxn per supply — both fuels survive         -> logs
-#   6. select-mpxns         SINGLE/×N  just the mpxns, flat list — both mpxns, no [0] index      -> logs
-#   7. select-account-id    SINGLE/DIRECT  one top-level scalar (`rows[0].account_id`)           -> logs
-#   8. select-gentrack      SINGLE/NESTED+DEDUP  gentrack# through the nested supplies, uniq'd
-#                                      -> the shared J20000032681 collapses to one, as a PARAM.
-#   9. summary            echo the assembled map (account-number / account-id /
-#                         gentrack) to the logs.
-#
-# Purpose: demonstrate piping data between workflows AND that `select` can pull data out
-# of a captured model at any precision — full / partial / single, nested or direct — while
-# handling MULTIPLES without fixed indexes (never `.supplies[0]`), with no jq and no JSON
-# assembled in SQL. Each stage is its own top-level DAG node, named for the stage; the
-# inner leaf node names its platform. See docs/data-flow.md.
-# =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: test-account-select
+  name: flow-account-select
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       Orchestrates the account pipeline: account-number -> resolve-account (account_id)
-      -> resolve-energy-service-identifiers (flat supplies) -> build a nested account
+      -> step-energy-resolve-service-identifiers (flat supplies) -> build a nested account
       model -> `select` pulls it at every precision (full / partial / single, nested or
       direct), capturing the distinct gentrack_account_numbers as a param. Submittable.
   labels:
+    app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
     data.uw.systems/system: account
 spec:
   entrypoint: main
   serviceAccountName: workflow-step-executor
-  podMetadata:
-    annotations:
-      uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
   arguments:
     parameters:
       - { name: account-number }
-      - {
-          name: select-image,
-          value: "registry.uw.systems/dev-enablement/select:chore-redesign-wkflw-data-prop",
-        }
-      # This pipeline spans two clusters/namespaces: the account lookup and the
-      # energy service-identifier lookup. Hardcoded here for the test; for
-      # cross-env use these are the knobs an invocation surface overrides per
-      # environment (namespaces stay the same, clusters differ).
+      # select-image is a template input only (below), pinned centrally by the
+      # image-versions ConfigMap — not a UI-settable workflow argument.
       - { name: account-cluster-name, value: dev-aws }
       - { name: account-namespace, value: account-platform }
       - { name: energy-service-cluster-name, value: dev-merit }
       - { name: energy-service-namespace, value: energy-platform }
-      # Set false on a debug submit to keep the remote resolve Jobs for inspection.
       - { name: teardown, value: "true" }
   templates:
     - name: main
       inputs:
         parameters:
           - { name: account-number }
-          - { name: select-image }
+          - { name: select-image, value: "registry.uw.systems/dev-enablement/select:main" }
           - { name: account-cluster-name }
           - { name: account-namespace }
           - { name: energy-service-cluster-name }
@@ -88,7 +42,7 @@ spec:
         # 1) ACCOUNT platform: account-number -> account_id (param)
         - - name: resolve-account-id
             templateRef:
-              name: resolve-account
+              name: step-account-resolve-account
               template: resolve
             arguments:
               parameters:
@@ -110,7 +64,7 @@ spec:
         #    ndjson artifact (`identifiers`). This is the workflow->workflow data pipe.
         - - name: resolve-service-identifiers
             templateRef:
-              name: resolve-energy-service-identifiers
+              name: step-energy-resolve-service-identifiers
               template: resolve
             arguments:
               parameters:
@@ -314,20 +268,11 @@ spec:
     # `result` parameter. With the default output=- there is no file, so both are absent (the
     # artifact is optional, the param defaults to "").
     - name: select
-      podSpecPatch: |
-        initContainers:
-          - name: init
-            env:
-              - name: AWS_SHARED_CREDENTIALS_FILE
-                value: /etc/aws/credentials
-            volumeMounts:
-              - name: vault-aws-credentials
-                mountPath: /etc/aws
       inputs:
         artifacts:
           - { name: input, path: /tmp/in.ndjson }
         parameters:
-          - { name: select-image }
+          - { name: select-image, value: "registry.uw.systems/dev-enablement/select:main" }
           - { name: expr }
           - { name: output, value: "-" }
           - { name: format, value: ndjson }

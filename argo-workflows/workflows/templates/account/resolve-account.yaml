@@ -9,7 +9,7 @@
 #   out: account-id  (customer_account_id, uuid) — the leaf's `result` parameter
 #
 # This is ONE stage of the account pipeline. The orchestrator
-# (test-account-select) pipes account-id on into resolve-energy-service-identifiers
+# (flow-test-account-select) pipes account-id on into step-energy-resolve-service-identifiers
 # to get the account's energy supplies / gentrack identifiers. Kept submittable
 # standalone (a bare account# → account_id lookup is useful on its own) and also
 # consumed via templateRef. See docs/data-flow.md.
@@ -17,13 +17,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: resolve-account
+  name: step-account-resolve-account
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
       account-platform lookup: account-number → account_id (the `account-id` param).
       Submittable, and consumed via templateRef by the account pipeline.
   labels:
+    app.kubernetes.io/component: step
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
     data.uw.systems/system: account
@@ -33,29 +34,6 @@ spec:
   arguments:
     parameters:
       - { name: account-number }
-
-      - { name: account-cluster-name, value: dev-aws }
-      - { name: account-namespace, value: account-platform }
-      - {
-          name: account-connection-string,
-          value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
-        }
-      - { name: account-runner-sa, value: default }
-      - { name: account-ca-secret, value: ca-auth-key } # → CA_AUTH_KEY
-      - { name: account-ca-auth-key, value: auth.key } # key within account-ca-secret
-      - { name: account-ca-address, value: "certificate-authority:8080" } # → CA_ADDRESS
-      - { name: account-ca-profile, value: client } # → CA_PROFILE (client cert)
-      - {
-          name: query-pg-image,
-          value: "registry.uw.systems/dev-enablement/query-pg:main",
-        }
-      - { name: image-pull-secret, value: dockerhub-key }
-      - { name: log-level, value: info }
-      - { name: timeout, value: 3m }
-      - { name: job-active-deadline, value: 5m }
-      - { name: job-ttl, value: 24h }
-      # Debug knob: set false to keep the remote lookup Job for inspection.
-      - { name: teardown, value: "true" }
   templates:
     - name: resolve
       inputs:
@@ -91,7 +69,7 @@ spec:
         # account-platform: account-number → account_id (point lookup on `number`)
         - - name: account-platform
             templateRef:
-              name: executor-remote-namespace
+              name: step-executor-remote-namespace
               template: execute-job
             arguments:
               parameters:
