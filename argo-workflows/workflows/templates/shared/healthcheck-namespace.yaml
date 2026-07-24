@@ -3,11 +3,11 @@
 # healthy. A reusable gate to decide when it is safe to run workflows/steps
 # against a namespace.
 # =============================================================================
-# Dispatches a short-lived Job into the target namespace via
-# step-executor-remote-namespace (exec-kube). The Job runs kubectl against the LOCAL
-# (in-cluster) API — it inherits the argo-workflow-job-executor ServiceAccount,
-# which already has pods get/list/watch — and exits non-zero when any selected
-# pod is unhealthy, failing the caller.
+# Runs exec-kube in `healthcheck` mode. exec-kube connects to the TARGET cluster
+# via cluster-name (token from job-executor-tokens/<cluster>-<namespace> + CA from
+# cluster-ca-certs) — the same connection it uses to dispatch remote Jobs — and
+# lists pods directly. No remote Job is dispatched and no kubectl binary is
+# involved; the health rules run natively in the executor.
 #
 # A pod is UNHEALTHY when:
 #   - phase is not Running/Succeeded (Pending, Failed, Unknown — catches
@@ -28,6 +28,8 @@
 #                      to "<service-label-key> in (...)"
 #   - (both empty)   : every pod in the namespace
 #
+# exec-kube authenticates to the target cluster as argo-workflow-job-executor,
+# which already has pods get/list/watch there.
 #
 # Reference-only: consumed via templateRef (also submittable standalone for a
 # manual check).
@@ -66,122 +68,66 @@ spec:
           - { name: services, value: "" }
           - { name: service-label-key, value: app }
           - { name: include-job-pods, value: "false" }
-          - {
-              name: kubectl-image,
-              value: "registry.uw.systems/dev-enablement/exec-kube:main",
-            }
-          - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
           - { name: log-level, value: info }
           - { name: timeout, value: 3m }
-          - { name: job-active-deadline, value: 4m }
-          - { name: job-ttl, value: 1h }
-      steps:
-        - - name: execute
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
-            arguments:
-              parameters:
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.target-namespace}}",
-                  }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    metadata:
-                      generateName: healthcheck-{{inputs.parameters.target-namespace}}-
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        spec:
-                          serviceAccountName: argo-workflow-job-executor
-                          restartPolicy: Never
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          containers:
-                            - name: healthcheck
-                              image: {{inputs.parameters.kubectl-image}}
-                              imagePullPolicy: IfNotPresent
-                              command: [sh, -c]
-                              env:
-                                - { name: NS, value: "{{inputs.parameters.target-namespace}}" }
-                                - { name: LABEL_SELECTOR, value: "{{inputs.parameters.label-selector}}" }
-                                - { name: SERVICES, value: "{{inputs.parameters.services}}" }
-                                - { name: SERVICE_LABEL_KEY, value: "{{inputs.parameters.service-label-key}}" }
-                                - { name: INCLUDE_JOB_PODS, value: "{{inputs.parameters.include-job-pods}}" }
-                              args:
-                                - |
-                                  set -eu
-
-                                  if [ -n "$LABEL_SELECTOR" ]; then
-                                    SEL="$LABEL_SELECTOR"
-                                  elif [ -n "$SERVICES" ]; then
-                                    SEL="$SERVICE_LABEL_KEY in ($SERVICES)"
-                                  else
-                                    SEL=""
-                                  fi
-                                  echo "== healthcheck namespace=$NS selector=[${SEL:-<all>}] =="
-
-                                  COLS='POD:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,WAITING:.status.containerStatuses[*].state.waiting.reason,RESTARTS:.status.containerStatuses[*].restartCount,OWNER:.metadata.ownerReferences[*].kind'
-                                  if [ -n "$SEL" ]; then
-                                    OUT=$(kubectl get pods -n "$NS" -l "$SEL" --no-headers -o custom-columns="$COLS")
-                                  else
-                                    OUT=$(kubectl get pods -n "$NS" --no-headers -o custom-columns="$COLS")
-                                  fi
-
-                                  if [ -z "$OUT" ]; then
-                                    echo "no pods matched selector — treating as UNHEALTHY (nothing to gate on)"
-                                    echo "ARGO_RESULT_OUTPUT=no-pods"
-                                    exit 1
-                                  fi
-
-                                  total=0
-                                  unhealthy=0
-                                  echo "$OUT" | while IFS= read -r line; do
-                                    [ -z "$line" ] && continue
-                                    pod=$(echo "$line" | awk '{print $1}')
-                                    phase=$(echo "$line" | awk '{print $2}')
-                                    ready=$(echo "$line" | awk '{print $3}')
-                                    waiting=$(echo "$line" | awk '{print $4}')
-                                    restarts=$(echo "$line" | awk '{print $5}')
-                                    owner=$(echo "$line" | awk '{print $6}')
-                                    # Skip one-shot Job/CronJob-owned pods (backups, db-init, create-index,
-                                    # es-curator, ...) unless explicitly told to gate on them. Their owner
-                                    # kind is "Job" (CronJob -> Job -> Pod); Deployments -> ReplicaSet.
-                                    case "$INCLUDE_JOB_PODS" in
-                                      true|True|TRUE|1|yes) ;;
-                                      *) case "$owner" in *Job*) echo "skip       $pod  (owner=$owner)"; continue ;; esac ;;
-                                    esac
-                                    total=$((total+1))
-                                    bad=""
-                                    case "$phase" in
-                                      Succeeded) ;;                                   # completed Job pod — ignore
-                                      Running) case "$ready" in *false*) bad="not-ready" ;; esac ;;
-                                      *) bad="phase=$phase" ;;
-                                    esac
-                                    if [ -n "$bad" ]; then
-                                      unhealthy=$((unhealthy+1))
-                                      echo "UNHEALTHY  $pod  phase=$phase ready=$ready waiting=$waiting restarts=$restarts  ($bad)"
-                                    else
-                                      echo "ok         $pod  phase=$phase ready=$ready"
-                                    fi
-                                    echo "$total $unhealthy" > /tmp/tally     # subshell-safe running tally
-                                  done
-
-                                  read total unhealthy < /tmp/tally 2>/dev/null || { total=0; unhealthy=0; }
-                                  echo "summary: $unhealthy/$total unhealthy"
-                                  if [ "$unhealthy" -gt 0 ]; then
-                                    echo "ARGO_RESULT_OUTPUT=unhealthy:$unhealthy"
-                                    exit 1
-                                  fi
-                                  echo "ARGO_RESULT_OUTPUT=healthy"
+      outputs:
+        artifacts:
+          - name: result
+            path: /tmp/result.txt
+            archive:
+              none: {}
+          - name: logs
+            path: /tmp/logs.txt
+            archive:
+              none: {}
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/result.txt
+      volumes:
+        - name: job-executor-tokens
+          secret:
+            secretName: job-executor-tokens
+        - name: cluster-ca-certs
+          configMap:
+            name: cluster-ca-certs
+      container:
+        image: registry.uw.systems/dev-enablement/exec-kube:main
+        args: [healthcheck]
+        env:
+          - name: CLUSTER_NAME
+            value: "{{inputs.parameters.cluster-name}}"
+          # Resolved from the per-environment cluster-servers ConfigMap by cluster-name;
+          # Argo substitutes {{inputs.parameters.cluster-name}} into the key before submit.
+          - name: CLUSTER_SERVER
+            valueFrom:
+              configMapKeyRef:
+                name: cluster-servers
+                key: "{{inputs.parameters.cluster-name}}"
+          - name: NAMESPACE
+            value: "{{inputs.parameters.target-namespace}}"
+          - name: LABEL_SELECTOR
+            value: "{{inputs.parameters.label-selector}}"
+          - name: SERVICES
+            value: "{{inputs.parameters.services}}"
+          - name: SERVICE_LABEL_KEY
+            value: "{{inputs.parameters.service-label-key}}"
+          - name: INCLUDE_JOB_PODS
+            value: "{{inputs.parameters.include-job-pods}}"
+          - name: LOG_LEVEL
+            value: "{{inputs.parameters.log-level}}"
+          - name: TIMEOUT
+            value: "{{inputs.parameters.timeout}}"
+          - name: TOKENS_PATH
+            value: /secrets/tokens
+          - name: CERTS_PATH
+            value: /certs
+          - name: RESULT_PATH
+            value: /tmp/result.txt
+          - name: LOGS_PATH
+            value: /tmp/logs.txt
+        volumeMounts:
+          - name: job-executor-tokens
+            mountPath: /secrets/tokens
+          - name: cluster-ca-certs
+            mountPath: /certs

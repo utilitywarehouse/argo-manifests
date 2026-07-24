@@ -71,4 +71,4 @@ replacements:
           - spec.templates.*.container.image
       - select: { kind: WorkflowTemplate, name: step-healthcheck-namespace }
         fieldPaths:
-          - spec.templates.*.inputs.parameters.[name=kubectl-image].value
+          - spec.templates.*.container.image

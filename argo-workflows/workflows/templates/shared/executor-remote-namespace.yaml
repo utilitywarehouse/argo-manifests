@@ -50,6 +50,7 @@ spec:
             name: cluster-ca-certs
       container:
         image: registry.uw.systems/dev-enablement/exec-kube:main
+        args: [run]
         env:
           - name: CLUSTER_NAME
             value: "{{inputs.parameters.cluster-name}}"
