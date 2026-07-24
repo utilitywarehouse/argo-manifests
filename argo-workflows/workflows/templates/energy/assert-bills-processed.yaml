@@ -24,6 +24,7 @@ spec:
       - { name: dsn-secret, value: "" } # alt: Secret in target ns holding the DSN
       - { name: dsn-key, value: DB_DSN } # key within dsn-secret
       - { name: db-type, value: postgres } # postgres | cockroachdb
+      - { name: cluster-name }
       - { name: target-namespace }
       - {
           name: query-pg-image,
