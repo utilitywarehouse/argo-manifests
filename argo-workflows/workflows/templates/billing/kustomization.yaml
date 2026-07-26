@@ -22,7 +22,7 @@ configMapGenerator:
         config.kubernetes.io/local-config: "true"
     literals:
       - call-http=registry.uw.systems/dev-enablement/call-http:35ab89428d1770946eb2c0e766cfd2790dbc0495
-      - fwf=registry.uw.systems/dev-enablement/fabricate-migrated-fwf:chore-mono-script-classification
+      - fwf=registry.uw.systems/billing/fabricate-migrated-fwf:chore-mono-script-classification
       - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
       - select=registry.uw.systems/dev-enablement/select:main
 generatorOptions:
@@ -30,7 +30,11 @@ generatorOptions:
 
 replacements:
   - source:
-      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.call-http }
+      {
+        kind: ConfigMap,
+        name: billing-image-versions,
+        fieldPath: data.call-http,
+      }
     targets:
       - select: { kind: WorkflowTemplate, name: step-billing-graphql-call }
         fieldPaths:
@@ -42,7 +46,11 @@ replacements:
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=fwf-image].value
   - source:
-      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.upload-s3 }
+      {
+        kind: ConfigMap,
+        name: billing-image-versions,
+        fieldPath: data.upload-s3,
+      }
     targets:
       - select: { kind: WorkflowTemplate, name: step-billing-produce-fwf }
         fieldPaths:
