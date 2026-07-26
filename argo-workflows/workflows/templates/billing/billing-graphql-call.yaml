@@ -109,9 +109,9 @@ spec:
         parameters:
           - name: result
             valueFrom:
-              parameter: "{{steps.execute.outputs.parameters.result}}"
+              parameter: "{{steps.billing.outputs.parameters.result}}"
       steps:
-        - - name: execute
+        - - name: billing
             templateRef:
               name: step-executor-remote-namespace
               template: execute-job

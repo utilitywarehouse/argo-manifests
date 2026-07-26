@@ -1,0 +1,289 @@
+# =============================================================================
+# bill-account - by uw account number
+# =============================================================================
+# Given a customer account number (+ a short-lived token), derive everything and
+# run the pipeline to completion:
+#
+#   resolve-account              account-number → account_id
+#        │
+#   resolve-service-identifiers  account_id → the account's energy supplies (ndjson)
+#        │
+#   select-gentrack              → ALL the account's gentrack_account_numbers (deduped, comma-joined)
+#        │
+#   assert-bills-processed       every billing_period_accounts row processed across ALL
+#        │                       those gentrack numbers (SQL IN)? else FAIL
+#   produce-fwf                  fabricate the FWF → (upload unless dry-run) → segment name
+#        │  segment name  (minted by the fabricate tool)
+#   register                     POST the uploaded file to billing-bill-extracts-s3-uploader
+#        │
+#   bill-run                     Create → Bill → Commit → Export → Fulfil
+#
+# The gentrack numbers gate the assert ONLY. produce-fwf / register / bill-run key on
+# the submitted UW customer account number (one account can map to several gentrack
+# numbers; the FWF and its segment are per UW account, not per gentrack number).
+#
+# Reference-only: wrapped by the flow-billing-bill-account.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-bill-account
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI (use the flow-billing-bill-account artefact). Bill
+      one account from its account number: resolve → assert → produce-fwf →
+      register → bill-run, with a dry-run that stops after fabricate.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-numbers } # UW customer account number(s), comma-separated; the same logic bills one or many
+      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
+      - { name: validation-mode, value: attended } # attended pauses before Commit
+      - { name: dry-run, value: "false" } # true => fabricate only; no upload, register or bill-run
+      - { name: invoice-number, value: "" } # see produce-fwf: effectively required until the lookup lands
+      - { name: bill-period, value: "" } # YYYY-MM; empty => current month
+      - { name: engineer-visit, value: "false" }
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: token, value: "" }
+          - { name: validation-mode, value: attended }
+          - { name: dry-run, value: "false" }
+          - { name: invoice-number, value: "" }
+          - { name: bill-period, value: "" }
+          - { name: engineer-visit, value: "false" }
+          - { name: account-cluster-name, value: dev-aws }
+          - { name: account-namespace, value: account-platform }
+          - { name: energy-service-cluster-name, value: dev-merit }
+          - { name: energy-service-namespace, value: energy-platform }
+          - { name: assert-cluster-name, value: dev-merit }
+          - { name: assert-namespace, value: energy-billing }
+          - { name: billing-cluster-name, value: dev-merit }
+          - { name: billing-namespace, value: billing }
+          - {
+              name: billing-graphql-endpoint,
+              value: "http://billing-graphql:8080/graphql",
+            }
+          - {
+              name: uploader-endpoint,
+              value: "http://billing-bill-extracts-s3-uploader:8080/api/2.0/fwf",
+            }
+          - { name: teardown, value: "true" }
+      steps:
+        # 1) ACCOUNT: account-number → account_id
+        - - name: resolve-account
+            templateRef:
+              { name: step-account-resolve-account, template: resolve }
+            arguments:
+              parameters:
+                - {
+                    name: account-number,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: account-cluster-name,
+                    value: "{{inputs.parameters.account-cluster-name}}",
+                  }
+                - {
+                    name: account-namespace,
+                    value: "{{inputs.parameters.account-namespace}}",
+                  }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+
+        # 2) ENERGY: account_id → the account's supplies as a flat ndjson artifact
+        - - name: resolve-service-identifiers
+            templateRef:
+              {
+                name: step-energy-resolve-service-identifiers,
+                template: resolve,
+              }
+            arguments:
+              parameters:
+                - {
+                    name: account-id,
+                    value: "{{steps.resolve-account.outputs.parameters.account-id}}",
+                  }
+                - {
+                    name: energy-service-cluster-name,
+                    value: "{{inputs.parameters.energy-service-cluster-name}}",
+                  }
+                - {
+                    name: energy-service-namespace,
+                    value: "{{inputs.parameters.energy-service-namespace}}",
+                  }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+
+        # 3) SELECT: ALL the account's distinct gentrack_account_numbers, comma-joined
+        #    into one scalar (e.g. "J20000032681,J20000041234") — consumed only by the
+        #    assert below as a SQL IN list (produce-fwf keys on the UW account, not these).
+        - - name: select-gentrack
+            template: select
+            arguments:
+              artifacts:
+                - {
+                    name: input,
+                    from: "{{steps.resolve-service-identifiers.outputs.artifacts.identifiers}}",
+                  }
+              parameters:
+                - name: expr
+                  value: 'join(uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number)), ",")'
+                - { name: output-format, value: lines } # emit the comma-joined scalar
+
+        # 4) ASSERT: every available bill for that gentrack account is processed, else FAIL
+        - - name: assert-bills-processed
+            templateRef:
+              { name: step-energy-assert-bills-processed, template: assert }
+            arguments:
+              parameters:
+                - {
+                    name: external-account-number,
+                    value: "{{steps.select-gentrack.outputs.parameters.result}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.assert-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.assert-namespace}}",
+                  }
+
+        # 5) PRODUCE-FWF: fabricate for the submitted UW customer account (NOT the
+        #    gentrack number — that's only for the assert above); upload unless dry-run
+        - - name: produce-fwf
+            templateRef: { name: step-billing-produce-fwf, template: produce }
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: invoice-number,
+                    value: "{{inputs.parameters.invoice-number}}",
+                  }
+                - {
+                    name: bill-period,
+                    value: "{{inputs.parameters.bill-period}}",
+                  }
+                - {
+                    name: engineer-visit,
+                    value: "{{inputs.parameters.engineer-visit}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
+        # ── DRY RUN STOPS HERE: register + bill-run only run for a real bill ──
+
+        # 6) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
+        - - name: register
+            when: "{{inputs.parameters.dry-run}} != true"
+            templateRef: { name: step-billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: register-fwf }
+                - name: payload
+                  value: '{"file":"{{steps.produce-fwf.outputs.parameters.filename}}.snappy"}'
+                - { name: assert, value: "response.ok == true" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+                - {
+                    name: endpoint,
+                    value: "{{inputs.parameters.uploader-endpoint}}",
+                  }
+
+        # 7) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
+        - - name: bill-run
+            when: "{{inputs.parameters.dry-run}} != true"
+            templateRef: { name: step-billing-bill-run, template: main }
+            arguments:
+              parameters:
+                - {
+                    name: account-number,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: segment-name,
+                    value: "{{steps.produce-fwf.outputs.parameters.filename}}",
+                  }
+                - {
+                    name: segment-ids,
+                    value: "{{steps.produce-fwf.outputs.parameters.filename}}",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: validation-mode,
+                    value: "{{inputs.parameters.validation-mode}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+                - {
+                    name: endpoint,
+                    value: "{{inputs.parameters.billing-graphql-endpoint}}",
+                  }
+
+    # -------------------------------------------------------------------------
+    # select — mount an ndjson artifact at /tmp/in.ndjson, run an expr over `rows`,
+    # emit the result to stdout and to /tmp/out (captured as the `result` param).
+    # Same executor + pattern as flow-account-select. select-image is pinned.
+    # -------------------------------------------------------------------------
+    - name: select
+      inputs:
+        artifacts:
+          - { name: input, path: /tmp/in.ndjson }
+        parameters:
+          - {
+              name: select-image,
+              value: "registry.uw.systems/dev-enablement/select:main",
+            }
+          - { name: expr }
+          - { name: format, value: ndjson }
+          - { name: output-format, value: json }
+      container:
+        image: "{{inputs.parameters.select-image}}"
+        env:
+          - { name: INPUT, value: /tmp/in.ndjson }
+          - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+          - { name: SELECT, value: "{{inputs.parameters.expr}}" }
+          - { name: OUTPUT, value: /tmp/out }
+          - {
+              name: OUTPUT_FORMAT,
+              value: "{{inputs.parameters.output-format}}",
+            }
+          - { name: LOG_LEVEL, value: debug }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/out
+              default: ""

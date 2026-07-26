@@ -44,7 +44,7 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: account-id } # customer_account_id (uuid)
+      - { name: account-id } # customer_account_id (uuid); one, or comma-separated many (IN (...))
       # Filter to a billing platform; empty selects all platforms.
       - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
       # dispatch + connection (CockroachDB cert auth)
@@ -166,7 +166,7 @@ spec:
                                            s.gentrack_account_id, s.gentrack_agreement_id,
                                            s.gentrack_customer_id
                                     FROM service_snapshot s
-                                    WHERE s.customer_account_id = '{{inputs.parameters.account-id}}'
+                                    WHERE s.customer_account_id IN (SELECT unnest(string_to_array('{{inputs.parameters.account-id}}', ',')))
                                       AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
                                 - { name: FORMAT, value: ndjson }
                                 - { name: OUTPUT, value: /tmp/out.ndjson }
