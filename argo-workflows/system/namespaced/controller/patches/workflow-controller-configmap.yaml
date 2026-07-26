@@ -16,6 +16,7 @@ data:
         secondsAfterFailure: 86400
       podGC:
         strategy: OnWorkflowCompletion
+        deleteDelayDuration: 1h
       volumes:
         - name: tmp
           emptyDir: {}

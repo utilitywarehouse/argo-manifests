@@ -68,7 +68,7 @@ spec:
           - { name: target-namespace, value: billing }
           - {
               name: fwf-image,
-              value: "registry.uw.systems/dev-enablement/fabricate-migrated-fwf:chore-mono-script-classification",
+              value: "registry.uw.systems/billing/fabricate-migrated-fwf:chore-mono-script-classification",
             }
           - {
               name: upload-s3-image,
