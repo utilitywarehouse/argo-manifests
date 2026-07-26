@@ -21,13 +21,6 @@ data:
         - name: tmp
           emptyDir: {}
       templateDefaults:
-        retryStrategy:
-          limit: "2"
-          retryPolicy: OnError
-          backoff:
-            duration: "10s"
-            factor: "2"
-            maxDuration: "2m"
         container:
           volumeMounts:
             - name: tmp
