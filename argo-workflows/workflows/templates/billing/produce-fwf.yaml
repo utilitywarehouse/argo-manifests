@@ -1,14 +1,34 @@
 # =============================================================================
 # produce-fwf — fabricate a FWF for an account, upload it, emit its filename
 # =============================================================================
-# The atomic upstream step: given an account number, generate the fixed-width
-# file (fabricate-migrated-fwf), upload it to the bill-extracts bucket, register
-# it with the uploader — and emit the ONE authoritative output: the minted
-# filename. The filename is set by the fabricate script, never by us, and flows
-# downstream as both the segment name and the segment id.
+# One dispatched Job in the billing namespace does two things in sequence:
 #
-##
-# Reference-only: consumed by generate-bill via templateRef.
+#   initContainer  fabricate   fabricate-migrated-fwf (/svc) writes ONE
+#                              UWCDATA1_D…_T….NNN.snappy into a shared emptyDir.
+#                              The name is minted by the tool, never by us.
+#   container      upload      upload-s3 pushes that .snappy to the bill-extracts
+#                              bucket (SSE=AES256, mandatory), then emits the
+#                              minted segment name as the step result.
+#
+# WHY ONE JOB (fused). upload-s3 reads the `billing-bill-extracts` Secret, which
+# only exists in the billing namespace, so the upload must run there. exec-kube
+# dispatches a Job and captures only its OUTPUT — it cannot inject a file INTO a
+# separately-dispatched Job — so fabricate and upload share one pod's emptyDir
+# rather than trying to hand a file between two Jobs.
+#
+# DRY RUN. `dry-run=true` fabricates the FWF for real but SKIPS the S3 upload
+# (the segment name is still emitted). This is the safe "produce the FWF without
+# uploading" path — nothing lands in the bucket, so no segment is ever created.
+#
+# OUTPUT. `filename` — the minted segment name WITHOUT the `.snappy` suffix (the
+# authoritative segment name/id for bill-run). The uploaded object key and the
+# s3-uploader register call use `<filename>.snappy`.
+#
+# INVOICE NUMBER. `invoice-number` is effectively required here: with it unset,
+# /svc calls invoice-preferences-api (localhost:8090), which is not reachable
+# from this Job — supply a free number (see PLAN.md open item #2).
+#
+# Reference-only: consumed by step-billing-bill-account via templateRef.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -17,8 +37,9 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Do NOT submit from the UI. Fabricate+upload a FWF for an account; emits the
-      minted filename. Consumed by generate-bill via templateRef.
+      Do NOT submit from the UI. Fabricate a FWF for accounts and upload it
+      (skipped when dry-run=true); emits the segment name. Consumed by
+      step-billing-bill-account via templateRef.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
@@ -29,46 +50,33 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: account-number }
-      - { name: invoice-number, value: "" } # override to skip invoice-preferences-api
+      - { name: account-numbers } # UW customer account number(s), comma-separated; all fabricated into ONE FWF
+      - { name: invoice-number, value: "" } # see INVOICE NUMBER note — effectively required
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
-      # where it runs
-      - { name: cluster-name, value: dev-merit }
-      - { name: target-namespace, value: billing }
-      # fwf-image is a template input only (below), pinned centrally by the
-      # image-versions ConfigMap — not a UI-settable workflow argument.
-      - { name: bucket, value: billing-bill-extracts-dev }
-      - {
-          name: uploader-endpoint,
-          value: "http://billing-bill-extracts-s3-uploader:8080/api/2.0/fwf",
-        }
-      - { name: runner-sa, value: default }
-      - { name: image-pull-secret, value: dockerhub-key }
-      - { name: aws-region, value: eu-west-1 }
-      - { name: log-level, value: info }
-      - { name: timeout, value: 10m }
-      - { name: job-active-deadline, value: 12m }
-      - { name: job-ttl, value: 24h }
+      - { name: dry-run, value: "false" } # true => fabricate only, skip the S3 upload
   templates:
     - name: produce
       inputs:
         parameters:
-          - { name: account-number }
+          - { name: account-numbers }
           - { name: invoice-number, value: "" }
           - { name: bill-period, value: "" }
           - { name: engineer-visit, value: "false" }
+          - { name: dry-run, value: "false" }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
           - {
               name: fwf-image,
-              value: "registry.uw.systems/dev-enablement/fabricate-migrated-fwf:f684d463e3c43f17626997d7eed53b4f8f98d7bf",
+              value: "registry.uw.systems/dev-enablement/fabricate-migrated-fwf:chore-mono-script-classification",
+            }
+          - {
+              name: upload-s3-image,
+              value: "registry.uw.systems/dev-enablement/upload-s3:main",
             }
           - { name: bucket, value: billing-bill-extracts-dev }
-          - {
-              name: uploader-endpoint,
-              value: "http://billing-bill-extracts-s3-uploader:8080/api/2.0/fwf",
-            }
+          - { name: s3-secret, value: billing-bill-extracts }
+          - { name: sse, value: AES256 }
           - { name: runner-sa, value: default }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: aws-region, value: eu-west-1 }
@@ -78,11 +86,11 @@ spec:
           - { name: job-ttl, value: 24h }
       outputs:
         parameters:
-          - name: filename # the authoritative minted FWF filename
+          - name: filename # segment name, WITHOUT the .snappy suffix
             valueFrom:
-              parameter: "{{steps.execute.outputs.parameters.result}}"
+              parameter: "{{steps.billing.outputs.parameters.result}}"
       steps:
-        - - name: execute
+        - - name: billing
             templateRef:
               name: step-executor-remote-namespace
               template: execute-job
@@ -103,40 +111,79 @@ spec:
                     apiVersion: batch/v1
                     kind: Job
                     metadata:
-                      generateName: produce-fwf-{{inputs.parameters.account-number}}-
+                      generateName: produce-fwf-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
                       ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
-                        metadata:
-                          annotations:
-                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
-                          containers:
-                            - name: fwf
+                          volumes:
+                            - name: work
+                              emptyDir: {}
+                          # fabricate runs to completion first, leaving the minted
+                          # .snappy (and its name) in the shared /work volume.
+                          initContainers:
+                            - name: fabricate
                               image: {{inputs.parameters.fwf-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
                               args:
                                 - |
                                   set -eu
-                                  until nc -w 1 127.0.0.1 8098; do
-                                    echo "waiting for vault AWS creds on :8098"; sleep 1
-                                  done
+                                  # one account per line; /svc writes a section per line into ONE FWF
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /work/accounts.txt
+                                  cd /work
                                   /svc
-                                  echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result)"
+                                  # capture the single minted filename for the upload container
+                                  basename "$(ls -1 /work/*.snappy | head -n 1)" > /work/name
+                                  echo "fabricated $(cat /work/name)"
                               env:
-                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: INPUT, value: /work/accounts.txt }
                                 - { name: INVOICE_NUMBER, value: "{{inputs.parameters.invoice-number}}" }
                                 - { name: BILL_PERIOD, value: "{{inputs.parameters.bill-period}}" }
                                 - { name: ENGINEER_VISIT, value: "{{inputs.parameters.engineer-visit}}" }
-                                - { name: BUCKET, value: "{{inputs.parameters.bucket}}" }
-                                - { name: UPLOADER_ENDPOINT, value: "{{inputs.parameters.uploader-endpoint}}" }
-                                - { name: RESULT_PATH, value: /tmp/result }
-                                - { name: AWS_REGION, value: "{{inputs.parameters.aws-region}}" }
                                 - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                              volumeMounts:
+                                - { name: work, mountPath: /work }
+                          containers:
+                            - name: upload
+                              image: {{inputs.parameters.upload-s3-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  name=$(cat /work/name)
+                                  segment=${name%.snappy}
+                                  if [ "{{inputs.parameters.dry-run}}" = "true" ]; then
+                                    echo "dry-run: fabricated $name, skipping S3 upload"
+                                  else
+                                    FILE="/work/$name" KEY="$name" /app/executor
+                                  fi
+                                  # emit the segment name (no .snappy) as the step result
+                                  echo "ARGO_RESULT_OUTPUT=$segment"
+                              env:
+                                - { name: BUCKET, value: "{{inputs.parameters.bucket}}" }
+                                - { name: SSE, value: "{{inputs.parameters.sse}}" }
+                                - { name: AWS_REGION, value: "{{inputs.parameters.aws-region}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                # billing-bill-extracts stores the pair under aws.accessKey /
+                                # aws.secretKey — remap to the SDK's standard names.
+                                - name: AWS_ACCESS_KEY_ID
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.s3-secret}}
+                                      key: aws.accessKey
+                                - name: AWS_SECRET_ACCESS_KEY
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.s3-secret}}
+                                      key: aws.secretKey
+                              volumeMounts:
+                                - { name: work, mountPath: /work }

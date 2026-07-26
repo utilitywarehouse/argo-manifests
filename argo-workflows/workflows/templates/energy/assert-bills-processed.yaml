@@ -17,7 +17,7 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: external-account-number } # the gentrack account number (e.g. J20000032681)
+      - { name: external-account-number } # gentrack account number(s), comma-separated (e.g. J20000032681,J20000041234)
       - { name: cluster-name } # which cluster the energy RDS is reachable from
       - { name: target-namespace }
   templates:
@@ -46,7 +46,7 @@ spec:
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
       steps:
-        - - name: execute
+        - - name: energy-billing
             templateRef:
               name: step-executor-remote-namespace
               template: execute-job
@@ -67,7 +67,7 @@ spec:
                     apiVersion: batch/v1
                     kind: Job
                     metadata:
-                      generateName: assert-bills-processed-{{inputs.parameters.external-account-number}}-
+                      generateName: assert-bills-processed-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
@@ -111,7 +111,9 @@ spec:
                                     SELECT concat(count(*), ':',
                                                   (count(*) FILTER (WHERE processed_at IS NULL))) AS tally
                                     FROM public.billing_period_accounts
-                                    WHERE external_account_number = '{{inputs.parameters.external-account-number}}'
+                                    WHERE external_account_number IN (
+                                      SELECT unnest(string_to_array('{{inputs.parameters.external-account-number}}', ','))
+                                    )
                                 - { name: FORMAT, value: csv }
                                 - { name: OUTPUT, value: /tmp/out.csv }
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }

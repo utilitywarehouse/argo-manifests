@@ -6,12 +6,14 @@ resources:
   - await-segment-state.yaml
   - produce-fwf.yaml
   - bill-run.yaml
+  - bill-account.yaml
 
 # ---------------------------------------------------------------------------
-# Image pins for the billing/ package templates. call-http is a dev-enablement
-# executor; fabricate-migrated-fwf is a billing business image — both are used
-# only by billing templates, so both are pinned here. See shared/kustomization.yaml
-# for the per-package layout rationale.
+# Image pins for the billing/ package templates. call-http and upload-s3 are
+# dev-enablement executors; select is the dev-enablement `select` executor used
+# by bill-account to pull the gentrack number; fabricate-migrated-fwf is a
+# billing business image — all are used only by billing templates, so all are
+# pinned here. See shared/kustomization.yaml for the per-package layout rationale.
 # ---------------------------------------------------------------------------
 configMapGenerator:
   - name: billing-image-versions
@@ -21,6 +23,8 @@ configMapGenerator:
     literals:
       - call-http=registry.uw.systems/dev-enablement/call-http:35ab89428d1770946eb2c0e766cfd2790dbc0495
       - fwf=registry.uw.systems/dev-enablement/fabricate-migrated-fwf:chore-mono-script-classification
+      - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
+      - select=registry.uw.systems/dev-enablement/select:main
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -37,3 +41,15 @@ replacements:
       - select: { kind: WorkflowTemplate, name: step-billing-produce-fwf }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=fwf-image].value
+  - source:
+      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.upload-s3 }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-billing-produce-fwf }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=upload-s3-image].value
+  - source:
+      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.select }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-billing-bill-account }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=select-image].value

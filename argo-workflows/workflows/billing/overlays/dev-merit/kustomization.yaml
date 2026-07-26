@@ -7,5 +7,5 @@ resources:
 patches:
   - target:
       kind: WorkflowTemplate
-      name: flow-billing-generate-bill
+      name: flow-billing-bill-account
     path: labels.yaml

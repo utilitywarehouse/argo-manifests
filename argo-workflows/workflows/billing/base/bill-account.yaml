@@ -1,0 +1,64 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: flow-billing-bill-account
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Bill one or more accounts by input
+  labels:
+    app.kubernetes.io/component: flow
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-numbers } # UW customer account number(s), comma-separated — one or many
+      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
+      - { name: dry-run, value: "true" } # default safe: fabricate only, no upload/register/bill-run
+      - { name: validation-mode, value: attended } # attended pauses before Commit
+      - { name: invoice-number, value: "" } # effectively required until the lookup lands (PLAN item #2)
+      - { name: bill-period, value: "" } # YYYY-MM; empty => current month
+      - { name: engineer-visit, value: "false" }
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: token, value: "" }
+          - { name: dry-run, value: "true" }
+          - { name: validation-mode, value: attended }
+          - { name: invoice-number, value: "" }
+          - { name: bill-period, value: "" }
+          - { name: engineer-visit, value: "false" }
+      steps:
+        - - name: bill-account
+            templateRef: { name: step-billing-bill-account, template: main }
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: validation-mode,
+                    value: "{{inputs.parameters.validation-mode}}",
+                  }
+                - {
+                    name: invoice-number,
+                    value: "{{inputs.parameters.invoice-number}}",
+                  }
+                - {
+                    name: bill-period,
+                    value: "{{inputs.parameters.bill-period}}",
+                  }
+                - {
+                    name: engineer-visit,
+                    value: "{{inputs.parameters.engineer-visit}}",
+                  }
