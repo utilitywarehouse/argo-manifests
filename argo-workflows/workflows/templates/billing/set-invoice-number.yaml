@@ -84,7 +84,10 @@ spec:
             template: apply-invoice-id
             arguments:
               parameters:
-                - { name: plan, value: "{{steps.plan.outputs.parameters.plan}}" }
+                - {
+                    name: plan,
+                    value: "{{steps.plan.outputs.parameters.plan}}",
+                  }
                 - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
                 - {
                     name: cluster-name,
@@ -99,7 +102,10 @@ spec:
             template: apply-etag
             arguments:
               parameters:
-                - { name: plan, value: "{{steps.plan.outputs.parameters.plan}}" }
+                - {
+                    name: plan,
+                    value: "{{steps.plan.outputs.parameters.plan}}",
+                  }
                 - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
                 - {
                     name: cluster-name,
@@ -120,8 +126,8 @@ spec:
           - { name: cluster-name, value: dev-aws }
           - { name: target-namespace, value: customer-billing }
           - {
-              name: image,
-              value: "registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification",
+              name: set-invoice-number-image,
+              value: "registry.uw.systems/billing/set-invoice-number:main",
             }
           - {
               name: preferences-mongo-address,
@@ -182,7 +188,7 @@ spec:
                           restartPolicy: Never
                           containers:
                             - name: plan
-                              image: {{inputs.parameters.image}}
+                              image: {{inputs.parameters.set-invoice-number-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
                               args:
@@ -226,8 +232,8 @@ spec:
           - { name: cluster-name, value: dev-aws }
           - { name: target-namespace, value: customer-billing }
           - {
-              name: image,
-              value: "registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification",
+              name: set-invoice-number-image,
+              value: "registry.uw.systems/billing/set-invoice-number:main",
             }
           - {
               name: preferences-mongo-address,
@@ -278,7 +284,7 @@ spec:
                           restartPolicy: Never
                           containers:
                             - name: apply-invoice-id
-                              image: {{inputs.parameters.image}}
+                              image: {{inputs.parameters.set-invoice-number-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
                               args:
@@ -311,8 +317,8 @@ spec:
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
           - {
-              name: image,
-              value: "registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification",
+              name: set-invoice-number-image,
+              value: "registry.uw.systems/billing/set-invoice-number:main",
             }
           - {
               name: account-mongo-address,
@@ -363,7 +369,7 @@ spec:
                           restartPolicy: Never
                           containers:
                             - name: apply-etag
-                              image: {{inputs.parameters.image}}
+                              image: {{inputs.parameters.set-invoice-number-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
                               args:

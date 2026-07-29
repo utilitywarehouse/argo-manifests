@@ -20,7 +20,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - select=registry.uw.systems/dev-enablement/select:chore-redesign-wkflw-data-prop
+      - select=registry.uw.systems/dev-enablement/select:main
 generatorOptions:
   disableNameSuffixHash: true
 
