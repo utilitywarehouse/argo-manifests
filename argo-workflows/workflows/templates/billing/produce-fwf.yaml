@@ -51,7 +51,8 @@ spec:
   arguments:
     parameters:
       - { name: account-numbers } # UW customer account number(s), comma-separated; all fabricated into ONE FWF
-      - { name: invoice-number, value: "" } # see INVOICE NUMBER note — effectively required
+      - { name: invoice-number, value: "" } # see INVOICE NUMBER note — used only when invoice-map is empty
+      - { name: invoice-map, value: "" } # 'accountNumber<TAB>invoiceNumber' line(s) from set-invoice-number; when set, used verbatim as fabricate's input (per-account numbers) and takes precedence over account-numbers/invoice-number
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
       - { name: dry-run, value: "false" } # true => fabricate only, skip the S3 upload
@@ -61,6 +62,7 @@ spec:
         parameters:
           - { name: account-numbers }
           - { name: invoice-number, value: "" }
+          - { name: invoice-map, value: "" }
           - { name: bill-period, value: "" }
           - { name: engineer-visit, value: "false" }
           - { name: dry-run, value: "false" }
@@ -135,8 +137,16 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  # one account per line; /svc writes a section per line into ONE FWF
-                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /work/accounts.txt
+                                  # Prefer the per-account map from set-invoice-number (accountNumber<TAB>invoiceNumber,
+                                  # extra columns ignored); else one bare account per line + INVOICE_NUMBER/API.
+                                  # FIXME: invoice-map is inlined as a parameter, so it holds ONE account —
+                                  # a multi-line map breaks this manifest's YAML. Wants an input artifact
+                                  # mounted as a file; see the FIXME in step-executor-remote-namespace.
+                                  if [ -n "{{inputs.parameters.invoice-map}}" ]; then
+                                    printf '%s\n' "{{inputs.parameters.invoice-map}}" > /work/accounts.txt
+                                  else
+                                    printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /work/accounts.txt
+                                  fi
                                   cd /work
                                   /svc
                                   # capture the single minted filename for the upload container

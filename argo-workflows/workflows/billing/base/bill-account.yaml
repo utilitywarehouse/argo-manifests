@@ -19,9 +19,8 @@ spec:
     parameters:
       - { name: account-numbers } # UW customer account number(s), comma-separated — one or many
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
-      - { name: dry-run, value: "true" } # default safe: fabricate only, no upload/register/bill-run
+      - { name: dry-run, value: "true" } # default safe: plan + fabricate only, no mongo writes/upload/register/bill-run
       - { name: validation-mode, value: attended } # attended pauses before Commit
-      - { name: invoice-number, value: "" } # effectively required until the lookup lands (PLAN item #2)
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
   templates:
@@ -32,7 +31,6 @@ spec:
           - { name: token, value: "" }
           - { name: dry-run, value: "true" }
           - { name: validation-mode, value: attended }
-          - { name: invoice-number, value: "" }
           - { name: bill-period, value: "" }
           - { name: engineer-visit, value: "false" }
       steps:
@@ -49,10 +47,6 @@ spec:
                 - {
                     name: validation-mode,
                     value: "{{inputs.parameters.validation-mode}}",
-                  }
-                - {
-                    name: invoice-number,
-                    value: "{{inputs.parameters.invoice-number}}",
                   }
                 - {
                     name: bill-period,

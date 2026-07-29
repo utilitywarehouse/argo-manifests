@@ -12,7 +12,12 @@
 #        │
 #   assert-bills-processed       every billing_period_accounts row processed across ALL
 #        │                       those gentrack numbers (SQL IN)? else FAIL
-#   produce-fwf                  fabricate the FWF → (upload unless dry-run) → segment name
+#   set-invoice-number           plan the number, then apply it to both stores:
+#        │                         plan             read-only, the lowest unused number
+#        │                         apply-invoice-id preferences.lastinvoiceid (dev-aws)
+#        │                         apply-etag       account.eTag              (dev-merit)
+#        │  the plan  'accountNumber<TAB>invoiceNumber<TAB>state'
+#   produce-fwf                  fabricate the FWF from the plan → (upload unless dry-run) → segment name
 #        │  segment name  (minted by the fabricate tool)
 #   register                     POST the uploaded file to billing-bill-extracts-s3-uploader
 #        │
@@ -21,6 +26,9 @@
 # The gentrack numbers gate the assert ONLY. produce-fwf / register / bill-run key on
 # the submitted UW customer account number (one account can map to several gentrack
 # numbers; the FWF and its segment are per UW account, not per gentrack number).
+#
+# INVOICE NUMBER produced BEFORE produce-fwf consumes it.
+# dry-run gates the two writes exactly as it gates the upload, register and bill-run.
 #
 # Reference-only: wrapped by the flow-billing-bill-account.
 # =============================================================================
@@ -48,8 +56,7 @@ spec:
       - { name: account-numbers } # UW customer account number(s), comma-separated; the same logic bills one or many
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       - { name: validation-mode, value: attended } # attended pauses before Commit
-      - { name: dry-run, value: "false" } # true => fabricate only; no upload, register or bill-run
-      - { name: invoice-number, value: "" } # see produce-fwf: effectively required until the lookup lands
+      - { name: dry-run, value: "true" } # true => plan + fabricate only; no mongo writes, upload, register or bill-run
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
   templates:
@@ -60,7 +67,6 @@ spec:
           - { name: token, value: "" }
           - { name: validation-mode, value: attended }
           - { name: dry-run, value: "false" }
-          - { name: invoice-number, value: "" }
           - { name: bill-period, value: "" }
           - { name: engineer-visit, value: "false" }
           - { name: account-cluster-name, value: dev-aws }
@@ -69,6 +75,10 @@ spec:
           - { name: energy-service-namespace, value: energy-platform }
           - { name: assert-cluster-name, value: dev-merit }
           - { name: assert-namespace, value: energy-billing }
+          # invoice-preferences + bills mongos (the plan, and the lastinvoiceid write)
+          - { name: customer-billing-cluster-name, value: dev-aws }
+          - { name: customer-billing-namespace, value: customer-billing }
+          # the FWF, the eTag write, register and bill-run
           - { name: billing-cluster-name, value: dev-merit }
           - { name: billing-namespace, value: billing }
           - {
@@ -159,8 +169,38 @@ spec:
                     value: "{{inputs.parameters.assert-namespace}}",
                   }
 
-        # 5) PRODUCE-FWF: fabricate for the submitted UW customer account (NOT the
-        #    gentrack number — that's only for the assert above); upload unless dry-run
+        # 5) SET-INVOICE-NUMBER: plan the number, then write it to both mongos (skipped
+        #    by dry-run). Emits the plan — applied everywhere before the FWF is built.
+        - - name: set-invoice-number
+            templateRef:
+              { name: step-billing-set-invoice-number, template: set }
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: customer-billing-cluster-name,
+                    value: "{{inputs.parameters.customer-billing-cluster-name}}",
+                  }
+                - {
+                    name: customer-billing-namespace,
+                    value: "{{inputs.parameters.customer-billing-namespace}}",
+                  }
+                - {
+                    name: billing-cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: billing-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
+        # 6) PRODUCE-FWF: fabricate for the submitted UW customer account (NOT the
+        #    gentrack number — that's only for the assert above); upload unless dry-run.
+        #    invoice-map is the plan, used verbatim as fabricate's input.
         - - name: produce-fwf
             templateRef: { name: step-billing-produce-fwf, template: produce }
             arguments:
@@ -170,8 +210,8 @@ spec:
                     value: "{{inputs.parameters.account-numbers}}",
                   }
                 - {
-                    name: invoice-number,
-                    value: "{{inputs.parameters.invoice-number}}",
+                    name: invoice-map,
+                    value: "{{steps.set-invoice-number.outputs.parameters.plan}}",
                   }
                 - {
                     name: bill-period,
@@ -193,7 +233,7 @@ spec:
 
         # ── DRY RUN STOPS HERE: register + bill-run only run for a real bill ──
 
-        # 6) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
+        # 7) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
         - - name: register
             when: "{{inputs.parameters.dry-run}} != true"
             templateRef: { name: step-billing-graphql-call, template: call }
@@ -216,7 +256,7 @@ spec:
                     value: "{{inputs.parameters.uploader-endpoint}}",
                   }
 
-        # 7) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
+        # 8) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
         - - name: bill-run
             when: "{{inputs.parameters.dry-run}} != true"
             templateRef: { name: step-billing-bill-run, template: main }

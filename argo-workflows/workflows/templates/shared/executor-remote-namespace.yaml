@@ -11,6 +11,15 @@ metadata:
     workflows.argoproj.io/invocation: reference-only
 spec:
   templates:
+    # FIXME: data only travels IN as values substituted into job-template, never as a
+    # file — Argo mounts artifacts onto THIS pod, while the Job runs in another cluster
+    # with no Argo executor or artifact-repo creds. So multi-line data has to be inlined
+    # and breaks the Job manifest's YAML, capping callers at one row (see the FIXMEs in
+    # step-billing-set-invoice-number / step-billing-produce-fwf). Fix in exec-kube:
+    # take an input artifact here, project it as a ConfigMap in the target namespace and
+    # volumeMount it into the Job's containers, owner-referenced to the Job for GC. Also
+    # needs configmaps create/delete on the job-executor Role
+    # (system/namespaced/workflow/modules/job-executor/sa.yaml), and is ~1MiB-capped.
     - name: execute-job
       inputs:
         parameters:
