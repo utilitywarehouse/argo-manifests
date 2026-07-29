@@ -324,10 +324,8 @@ spec:
               name: account-mongo-address,
               value: "mongodb://finance-customer-account-mongo-cluster.billing.svc.cluster.local:27017",
             }
-          - {
-              name: account-mongo-secret,
-              value: finance-customer-account-mongo-cluster,
-            }
+          - { name: account-mongo-secret, value: finance-customer-account-api }
+          - { name: account-mongo-secret-key, value: mongo.password }
           - { name: runner-sa, value: default }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
@@ -386,5 +384,5 @@ spec:
                                   valueFrom:
                                     secretKeyRef:
                                       name: {{inputs.parameters.account-mongo-secret}}
-                                      key: app.password
+                                      key: {{inputs.parameters.account-mongo-secret-key}}
                                 - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
