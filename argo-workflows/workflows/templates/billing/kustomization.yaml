@@ -7,13 +7,10 @@ resources:
   - produce-fwf.yaml
   - bill-run.yaml
   - bill-account.yaml
+  - set-invoice-number.yaml
 
 # ---------------------------------------------------------------------------
-# Image pins for the billing/ package templates. call-http and upload-s3 are
-# dev-enablement executors; select is the dev-enablement `select` executor used
-# by bill-account to pull the gentrack number; fabricate-migrated-fwf is a
-# billing business image — all are used only by billing templates, so all are
-# pinned here. See shared/kustomization.yaml for the per-package layout rationale.
+# Image pins for the billing/ package templates.
 # ---------------------------------------------------------------------------
 configMapGenerator:
   - name: billing-image-versions
@@ -23,6 +20,7 @@ configMapGenerator:
     literals:
       - call-http=registry.uw.systems/dev-enablement/call-http:35ab89428d1770946eb2c0e766cfd2790dbc0495
       - fwf=registry.uw.systems/billing/fabricate-migrated-fwf:chore-mono-script-classification
+      - set-invoice-number=registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification
       - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
       - select=registry.uw.systems/dev-enablement/select:main
 generatorOptions:
@@ -61,3 +59,14 @@ replacements:
       - select: { kind: WorkflowTemplate, name: step-billing-bill-account }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=select-image].value
+  - source:
+      {
+        kind: ConfigMap,
+        name: billing-image-versions,
+        fieldPath: data.set-invoice-number,
+      }
+    targets:
+      - select:
+          { kind: WorkflowTemplate, name: step-billing-set-invoice-number }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=image].value

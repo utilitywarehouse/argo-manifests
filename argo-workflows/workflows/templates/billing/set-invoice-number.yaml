@@ -1,0 +1,384 @@
+# =============================================================================
+# set-invoice-number — plan / apply the invoice number for billing
+# =============================================================================
+# Fills the "invoice-number" gap in produce-fwf/bill-account: instead of a
+# hand-supplied number which might be already claimed by another account or past/future bill
+#
+#   plan             (dev-aws)   read-only: account-numbers -> a plan, one line
+#                                per account: "accountNumber<TAB>invoiceNumber<TAB>state"
+#                                (state = changed|unchanged). Keeps the account's
+#                                current lastinvoiceid when it has no bill yet;
+#                                else hands out the lowest unused 9-digit number.
+#   apply-invoice-id (dev-aws)   write preferences.lastinvoiceid for the plan's
+#                                changed rows (invoice-preferences-api-mongo).
+#   apply-etag       (dev-merit) write account.eTag for the plan's changed rows
+#                                (finance-customer-account-mongo).
+#
+# WHY SPLIT. The two writes live in different mongos in different clusters, so
+# each is its own cluster/namespace-bound Job (exec-kube), fed the plan produced
+# by the read-only step. Fabricate consumes the plan only AFTER both applies
+#
+# MONGO CONNECTION. The tool takes address + db + username + password per store;
+# the password is applied via SetAuth, never in a URI, so no URL-encoding.
+# Here the password comes from each cluster's `<cluster>` Secret (key app.password) via
+# secretKeyRef; address is the in-cluster service DNS (a parameter); db/username
+# default in the tool to each store's known values.
+#
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-set-invoice-number
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. plan/apply an account's invoice number for
+      re-billing; consumed by the billing flows via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+spec:
+  serviceAccountName: workflow-step-executor
+  templates:
+    # -------------------------------------------------------------------------
+    # set — plan, then both applies, emitting the plan. The template callers want;
+    # the three below are its parts, and still render as their own nodes in the UI.
+    # -------------------------------------------------------------------------
+    - name: set
+      inputs:
+        parameters:
+          - { name: account-numbers } # UW customer account number(s), comma-separated
+          - { name: dry-run, value: "true" } # true => plan only; neither mongo is written
+          # invoice-preferences + bills mongos (plan, and the lastinvoiceid write)
+          - { name: customer-billing-cluster-name, value: dev-aws }
+          - { name: customer-billing-namespace, value: customer-billing }
+          # finance-customer-account mongo (the eTag write)
+          - { name: billing-cluster-name, value: dev-merit }
+          - { name: billing-namespace, value: billing }
+      outputs:
+        parameters:
+          - name: plan # 'accountNumber<TAB>invoiceNumber<TAB>state', applied to both stores
+            valueFrom:
+              parameter: "{{steps.plan.outputs.parameters.plan}}"
+      steps:
+        - - name: plan
+            template: plan
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.customer-billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.customer-billing-namespace}}",
+                  }
+
+        - - name: apply-invoice-id
+            template: apply-invoice-id
+            arguments:
+              parameters:
+                - { name: plan, value: "{{steps.plan.outputs.parameters.plan}}" }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.customer-billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.customer-billing-namespace}}",
+                  }
+
+        - - name: apply-etag
+            template: apply-etag
+            arguments:
+              parameters:
+                - { name: plan, value: "{{steps.plan.outputs.parameters.plan}}" }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
+    # -------------------------------------------------------------------------
+    # plan — read-only (dev-aws): reads preferences + bills, prints the plan.
+    # -------------------------------------------------------------------------
+    - name: plan
+      inputs:
+        parameters:
+          - { name: account-numbers } # UW customer account number(s), comma-separated
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: customer-billing }
+          - {
+              name: image,
+              value: "registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification",
+            }
+          - {
+              name: preferences-mongo-address,
+              value: "mongodb://invoice-preferences-api-mongo-cluster.customer-billing.svc.cluster.local:27017",
+            }
+          - {
+              name: preferences-mongo-secret,
+              value: invoice-preferences-api-mongo-cluster,
+            }
+          - {
+              name: bills-mongo-address,
+              value: "mongodb://bills-total-api-mongo-cluster.customer-billing.svc.cluster.local:27017",
+            }
+          - { name: bills-mongo-secret, value: bills-total-api-mongo-cluster }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 6m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: plan # the plan: 'accountNumber<TAB>invoiceNumber<TAB>state' line(s)
+            valueFrom:
+              parameter: "{{steps.customer-billing.outputs.parameters.result}}"
+      steps:
+        - - name: customer-billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: set-invoice-number-plan-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: plan
+                              image: {{inputs.parameters.image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /tmp/accounts.txt
+                                  /svc plan --input /tmp/accounts.txt > /tmp/plan.tsv
+                                  cat /tmp/plan.tsv
+                                  # FIXME: ONE ACCOUNT AT A TIME. ARGO_RESULT_OUTPUT= captures a
+                                  # single line, so a 2+ row plan is silently truncated here — and
+                                  # even captured whole (ARGO_RESULT_BEGIN/END + the `result`
+                                  # artifact) it could not be used: the consumers below take the
+                                  # plan inlined into their job-template, where raw newlines break
+                                  # the manifest YAML. Unblocked by exec-kube input-file
+                                  # projection — see the FIXME in step-executor-remote-namespace.
+                                  echo "ARGO_RESULT_OUTPUT=$(cat /tmp/plan.tsv)"
+                              env:
+                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: PREFERENCES_MONGO_ADDRESS, value: "{{inputs.parameters.preferences-mongo-address}}" }
+                                - name: PREFERENCES_MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.preferences-mongo-secret}}
+                                      key: app.password
+                                - { name: BILLS_MONGO_ADDRESS, value: "{{inputs.parameters.bills-mongo-address}}" }
+                                - name: BILLS_MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.bills-mongo-secret}}
+                                      key: app.password
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+
+    # -------------------------------------------------------------------------
+    # apply-invoice-id — write dev-aws/customer-billing: preferences.lastinvoiceid for changed rows.
+    # -------------------------------------------------------------------------
+    - name: apply-invoice-id
+      inputs:
+        parameters:
+          - { name: plan } # output of `plan`
+          - { name: dry-run, value: "true" }
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: customer-billing }
+          - {
+              name: image,
+              value: "registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification",
+            }
+          - {
+              name: preferences-mongo-address,
+              value: "mongodb://invoice-preferences-api-mongo-cluster.customer-billing.svc.cluster.local:27017",
+            }
+          - {
+              name: preferences-mongo-secret,
+              value: invoice-preferences-api-mongo-cluster,
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 6m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: customer-billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: set-invoice-id-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: apply-invoice-id
+                              image: {{inputs.parameters.image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # FIXME: the plan arrives INLINE as a parameter, so a multi-line
+                                  # plan breaks this manifest's YAML ("could not find expected ':'"
+                                  # out of exec-kube). Should be an input artifact mounted as a
+                                  # file — see the FIXME in step-executor-remote-namespace.
+                                  printf '%s\n' "{{inputs.parameters.plan}}" > /tmp/plan.tsv
+                                  /svc apply --domain customer-billing --input /tmp/plan.tsv --dry-run={{inputs.parameters.dry-run}}
+                              env:
+                                - { name: INPUT, value: /tmp/plan.tsv }
+                                - { name: PREFERENCES_MONGO_ADDRESS, value: "{{inputs.parameters.preferences-mongo-address}}" }
+                                - name: PREFERENCES_MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.preferences-mongo-secret}}
+                                      key: app.password
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+
+    # -------------------------------------------------------------------------
+    # apply-etag - write dev-merit/billing - account.eTag for changed rows.
+    # -------------------------------------------------------------------------
+    - name: apply-etag
+      inputs:
+        parameters:
+          - { name: plan } # output of `plan`
+          - { name: dry-run, value: "true" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: image,
+              value: "registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification",
+            }
+          - {
+              name: account-mongo-address,
+              value: "mongodb://finance-customer-account-mongo-cluster.billing.svc.cluster.local:27017",
+            }
+          - {
+              name: account-mongo-secret,
+              value: finance-customer-account-mongo-cluster,
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 6m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: set-etag-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: apply-etag
+                              image: {{inputs.parameters.image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # FIXME: inlined plan, same limit as apply-invoice-id — multi-line
+                                  # breaks this manifest's YAML. Wants a mounted input file.
+                                  printf '%s\n' "{{inputs.parameters.plan}}" > /tmp/plan.tsv
+                                  /svc apply --domain billing --input /tmp/plan.tsv --dry-run={{inputs.parameters.dry-run}}
+                              env:
+                                - { name: INPUT, value: /tmp/plan.tsv }
+                                - { name: ACCOUNT_MONGO_ADDRESS, value: "{{inputs.parameters.account-mongo-address}}" }
+                                - name: ACCOUNT_MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.account-mongo-secret}}
+                                      key: app.password
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
