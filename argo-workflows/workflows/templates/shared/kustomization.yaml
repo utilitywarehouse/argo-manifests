@@ -28,7 +28,7 @@ configMapGenerator:
       - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:5c9063aa3d12e0482d7cd37c368950e750377868
       - data-adapter=registry.uw.systems/dev-enablement/data-adapter:5c9063aa3d12e0482d7cd37c368950e750377868
       - call-grpc=registry.uw.systems/dev-enablement/call-grpc:35ab89428d1770946eb2c0e766cfd2790dbc0495
-      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:chore-redesign-wkflw-data-prop
+      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:main
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -58,13 +58,21 @@ replacements:
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=adapter-image].value
   - source:
-      { kind: ConfigMap, name: shared-image-versions, fieldPath: data.call-grpc }
+      {
+        kind: ConfigMap,
+        name: shared-image-versions,
+        fieldPath: data.call-grpc,
+      }
     targets:
       - select: { kind: WorkflowTemplate, name: step-data-orchestrator-runner }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=call-grpc-image].value
   - source:
-      { kind: ConfigMap, name: shared-image-versions, fieldPath: data.exec-kube }
+      {
+        kind: ConfigMap,
+        name: shared-image-versions,
+        fieldPath: data.exec-kube,
+      }
     targets:
       - select: { kind: WorkflowTemplate, name: step-executor-remote-namespace }
         fieldPaths:

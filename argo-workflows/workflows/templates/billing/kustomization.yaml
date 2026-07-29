@@ -69,4 +69,4 @@ replacements:
       - select:
           { kind: WorkflowTemplate, name: step-billing-set-invoice-number }
         fieldPaths:
-          - spec.templates.*.inputs.parameters.[name=image].value
+          - spec.templates.*.inputs.parameters.[name=set-invoice-number-image].value
