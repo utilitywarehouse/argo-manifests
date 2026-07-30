@@ -21,6 +21,15 @@ data:
         - name: tmp
           emptyDir: {}
       templateDefaults:
+        retryStrategy:
+          limit: "3"
+          retryPolicy: Always
+          backoff:
+            duration: 20s
+            factor: "2"
+          expression: >-
+            lastRetry.message matches "vault-credentials" &&
+            lastRetry.exitCode == "-1"
         container:
           volumeMounts:
             - name: tmp
