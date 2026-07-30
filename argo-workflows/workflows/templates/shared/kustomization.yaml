@@ -5,6 +5,7 @@ resources:
   - executor-remote-namespace.yaml
   - data-orchestrator-runner.yaml
   - healthcheck-namespace.yaml
+  - pause.yaml
 
 # ---------------------------------------------------------------------------
 # Image pins for the shared/ package templates. Each package (shared, billing,

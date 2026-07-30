@@ -181,9 +181,18 @@ spec:
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
 
         # ---- Human validation gate (attended only) -------------------------
-        - - name: validate
-            template: pause
+        - - name: pause-before-commit
+            templateRef: { name: step-pause, template: pause }
             when: "{{inputs.parameters.validation-mode}} == attended"
+            arguments:
+              parameters:
+                - name: message
+                  value: >-
+                    BEFORE COMMIT — the segment is BILLED and Commit is
+                    irreversible. Validate the bill totals and VAT against
+                    Gentrack, and check the bill-adapter pod logs in
+                    dev-merit/billing for the success signals. Resuming moves the
+                    segment to STATE_COMMITTING and on through Export and Fulfil.
 
         # ---- Commit: BILLED -> STATE_COMMITTING -> await COMMITTED ---------
         - - name: commit
@@ -332,9 +341,3 @@ spec:
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
                 - { name: timeout, value: 15m } # scheduled dispatch can lag; poll longer
 
-    # -------------------------------------------------------------------------
-    # pause — human validation checkpoint (attended mode). Resume from the Argo
-    # UI/CLI once totals/VAT are validated against Gentrack.
-    # -------------------------------------------------------------------------
-    - name: pause
-      suspend: {}
