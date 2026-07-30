@@ -192,8 +192,9 @@ spec:
         #
         #    Unconditional by design: reset is a no-op on accounts with nothing to
         #    clear.
-        - - name: reset
-            templateRef: { name: step-billing-reset, template: reset }
+        - - name: reset-bills-for-account
+            templateRef:
+              { name: step-billing-reset, template: reset-bills-for-account }
             arguments:
               parameters:
                 - {
