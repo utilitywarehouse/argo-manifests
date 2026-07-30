@@ -1,14 +1,15 @@
 # =============================================================================
-# reset — clear billing's records for accounts so they can be billed again
+# reset-bills-for-account — clear billing's records so accounts can be re-billed
 # =============================================================================
 # An account can only be billed once per period. To re-bill one, the records the
 # previous run left behind have to go first — then set-invoice-number hands out a
 # fresh number and the pipeline runs as if for the first time.
 #
-#   bills     billing-rds (postgres): bills, bill numbers, summaries,
+#   ...-rds   billing-rds (postgres): bills, bill numbers, summaries,
 #             transactions, energy-platform services + their rows
-#   segments  billing crdb (pg wire): accounts, segments, segment_group_history,
+#   ...-crdb  billing crdb (pg wire): accounts, segments, segment_group_history,
 #             segment_groups
+#
 #
 # BOTH RUN IN dev-merit/billing. billing-rds is an RDS endpoint dialled over the
 # network, not an in-cluster service, so reaching it has nothing to do with where
@@ -56,10 +57,11 @@ spec:
   serviceAccountName: workflow-step-executor
   templates:
     # -------------------------------------------------------------------------
-    # reset — both stores, in parallel. The template callers want; the two below
-    # are its parts, and still render as their own nodes in the UI.
+    # reset-bills-for-account — both stores, in parallel. The template callers
+    # want; the two below are its parts, and still render as their own nodes in
+    # the UI.
     # -------------------------------------------------------------------------
-    - name: reset
+    - name: reset-bills-for-account
       inputs:
         parameters:
           - { name: account-numbers } # UW customer account number(s), comma-separated
@@ -72,11 +74,11 @@ spec:
             }
           - {
               name: crdb-dsn,
-              value: "postgresql://root@cockroachdb-public.billing.svc:26257/bo?sslmode=verify-full&application_name=reset-segments",
+              value: "postgresql://root@cockroachdb-proxy:26257/bo?sslmode=verify-full",
             }
       steps:
-        - - name: bills
-            template: bills
+        - - name: reset-bills-for-account-rds
+            template: reset-bills-for-account-rds
             arguments:
               parameters:
                 - {
@@ -94,8 +96,9 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
 
-          - name: segments # parallel with bills: same namespace, different store
-            template: segments
+          # parallel with the rds child: same namespace, different store
+          - name: reset-bills-for-account-crdb
+            template: reset-bills-for-account-crdb
             arguments:
               parameters:
                 - {
@@ -114,7 +117,8 @@ spec:
                   }
 
     # -------------------------------------------------------------------------
-    # bills — delete the accounts' rows in billing-rds, from dev-merit/billing.
+    # reset-bills-for-account-rds — delete the accounts' rows in billing-rds,
+    # from dev-merit/billing.
     #
     # The two tables guarded by a delete trigger (bills, bill_number) go last,
     # each inside a transaction that disables the trigger, deletes and re-enables
@@ -129,7 +133,7 @@ spec:
     # characters (@ : / ? # [ ] %) the DSN silently misparses — percent-encode it
     # in the Secret, or set `pg-url` whole.
     # -------------------------------------------------------------------------
-    - name: bills
+    - name: reset-bills-for-account-rds
       inputs:
         parameters:
           - { name: account-numbers }
@@ -160,7 +164,7 @@ spec:
           - { name: job-active-deadline, value: 12m }
           - { name: job-ttl, value: 24h }
       steps:
-        - - name: billing
+        - - name: billing-rds
             templateRef:
               name: step-executor-remote-namespace
               template: execute-job
@@ -181,7 +185,7 @@ spec:
                     apiVersion: batch/v1
                     kind: Job
                     metadata:
-                      generateName: reset-bills-
+                      generateName: reset-bills-for-account-rds-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
@@ -193,7 +197,8 @@ spec:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
                           containers:
-                            - name: billing
+                            # The Job's name comes from this container, not from generateName.
+                            - name: reset-bills-for-account-rds
                               image: {{inputs.parameters.reset-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
@@ -227,7 +232,8 @@ spec:
                                 - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
 
     # -------------------------------------------------------------------------
-    # segments — dev-merit/billing: delete the accounts' segments in billing crdb.
+    # reset-bills-for-account-crdb — dev-merit/billing: delete the accounts'
+    # segments in billing crdb.
     #
     # CONNECTION. Cockroach cert auth is the same three-variable contract as the
     # other crdb queriers (step-account-resolve-account,
@@ -246,14 +252,14 @@ spec:
     # `root` is what the other dev crdb queriers use; confirm it against
     # dev-merit/billing before a real run.
     # -------------------------------------------------------------------------
-    - name: segments
+    - name: reset-bills-for-account-crdb
       inputs:
         parameters:
           - { name: account-numbers }
           - { name: dry-run, value: "true" }
           - {
               name: crdb-dsn,
-              value: "postgresql://root@cockroachdb-public.billing.svc:26257/bo?sslmode=verify-full&application_name=reset-segments",
+              value: "postgresql://root@cockroachdb-proxy:26257/bo?sslmode=verify-full",
             }
           - { name: ca-secret, value: ca-auth-key } # → CA_AUTH_KEY
           - { name: ca-auth-key, value: auth.key } # key within ca-secret
@@ -273,7 +279,7 @@ spec:
           - { name: job-active-deadline, value: 12m }
           - { name: job-ttl, value: 24h }
       steps:
-        - - name: billing
+        - - name: billing-crdb # dispatches into billing; -crdb keeps it distinct from its rds sibling
             templateRef:
               name: step-executor-remote-namespace
               template: execute-job
@@ -294,7 +300,7 @@ spec:
                     apiVersion: batch/v1
                     kind: Job
                     metadata:
-                      generateName: reset-segments-
+                      generateName: reset-bills-for-account-crdb-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
@@ -306,7 +312,8 @@ spec:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
                           containers:
-                            - name: billing
+                            # The Job's name comes from this container, not from generateName.
+                            - name: reset-bills-for-account-crdb
                               image: {{inputs.parameters.reset-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
