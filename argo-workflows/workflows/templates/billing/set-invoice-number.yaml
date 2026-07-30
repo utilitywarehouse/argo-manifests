@@ -98,7 +98,7 @@ spec:
                     value: "{{inputs.parameters.customer-billing-namespace}}",
                   }
 
-        - - name: apply-etag
+          - name: apply-etag # parallel with apply-invoice-id: different mongo, different cluster
             template: apply-etag
             arguments:
               parameters:

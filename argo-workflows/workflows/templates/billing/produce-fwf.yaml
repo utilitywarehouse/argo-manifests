@@ -1,14 +1,25 @@
 # =============================================================================
 # produce-fwf — fabricate a FWF for an account, upload it, emit its filename
 # =============================================================================
-# One dispatched Job in the billing namespace does two things in sequence:
+# One dispatched Job in the billing namespace does a few things in sequence:
 #
-#   initContainer  fabricate   fabricate-migrated-fwf (/svc) writes ONE
-#                              UWCDATA1_D…_T….NNN.snappy into a shared emptyDir.
-#                              The name is minted by the tool, never by us.
+#   initContainer  fabricate   `fwf fabricate` writes ONE UWCDATA1_D…_T….NNN.snappy
+#                              into a shared emptyDir. The name is minted by the
+#                              tool, never by us.
+#   initContainer  validate    `fwf validate` checks the file carries exactly the
+#                              account/invoice pairs set-invoice-number applied.
+#                              A non-zero exit fails the Job HERE — before the
+#                              upload container starts, so bad data never reaches
+#                              the bucket. The diff goes to stdout, so it comes
+#                              back through the log stream.
 #   container      upload      upload-s3 pushes that .snappy to the bill-extracts
 #                              bucket (SSE=AES256, mandatory), then emits the
 #                              minted segment name as the step result.
+#
+# WHY BOTH CHECKS. fabricate validates against the numbers IT resolved; validate
+# against the map set-invoice-number wrote. They coincide only when that map was
+# the accounts file — which it is here, so validate is the independent reader
+# rather than a second opinion from the same source.
 #
 # WHY ONE JOB (fused). upload-s3 reads the `billing-bill-extracts` Secret, which
 # only exists in the billing namespace, so the upload must run there. exec-kube
@@ -16,17 +27,18 @@
 # separately-dispatched Job — so fabricate and upload share one pod's emptyDir
 # rather than trying to hand a file between two Jobs.
 #
-# DRY RUN. `dry-run=true` fabricates the FWF for real but SKIPS the S3 upload
-# (the segment name is still emitted). This is the safe "produce the FWF without
-# uploading" path — nothing lands in the bucket, so no segment is ever created.
+# DRY RUN. `dry-run=true` fabricates AND validates the FWF for real but SKIPS the
+# S3 upload (the segment name is still emitted). This is the safe "produce the FWF
+# without uploading" path — nothing lands in the bucket, so no segment is ever
+# created, and the validation still runs.
 #
 # OUTPUT. `filename` — the minted segment name WITHOUT the `.snappy` suffix (the
 # authoritative segment name/id for bill-run). The uploaded object key and the
 # s3-uploader register call use `<filename>.snappy`.
 #
-# INVOICE NUMBER. `invoice-number` is effectively required here: with it unset,
-# /svc calls invoice-preferences-api (localhost:8090), which is not reachable
-# from this Job — supply a free number (see PLAN.md open item #2).
+# INVOICE NUMBER. Per-account, from `invoice-map` — the plan set-invoice-number
+# applied. The map is the only input: it carries both the accounts to bill and
+# the number each was assigned
 #
 # Reference-only: consumed by step-billing-bill-account via templateRef.
 # =============================================================================
@@ -50,9 +62,7 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: account-numbers } # UW customer account number(s), comma-separated; all fabricated into ONE FWF
-      - { name: invoice-number, value: "" } # see INVOICE NUMBER note — used only when invoice-map is empty
-      - { name: invoice-map, value: "" } # 'accountNumber<TAB>invoiceNumber' line(s) from set-invoice-number; when set, used verbatim as fabricate's input (per-account numbers) and takes precedence over account-numbers/invoice-number
+      - { name: invoice-map } # 'accountNumber<TAB>invoiceNumber' line(s) from set-invoice-number, used verbatim as fabricate's input; all fabricated into ONE FWF
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
       - { name: dry-run, value: "false" } # true => fabricate only, skip the S3 upload
@@ -60,18 +70,13 @@ spec:
     - name: produce
       inputs:
         parameters:
-          - { name: account-numbers }
-          - { name: invoice-number, value: "" }
-          - { name: invoice-map, value: "" }
+          - { name: invoice-map }
           - { name: bill-period, value: "" }
           - { name: engineer-visit, value: "false" }
           - { name: dry-run, value: "false" }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
-          - {
-              name: fwf-image,
-              value: "registry.uw.systems/billing/fabricate-migrated-fwf:main",
-            }
+          - { name: fwf-image, value: "registry.uw.systems/billing/fwf:main" }
           - {
               name: upload-s3-image,
               value: "registry.uw.systems/dev-enablement/upload-s3:main",
@@ -127,8 +132,9 @@ spec:
                           volumes:
                             - name: work
                               emptyDir: {}
-                          # fabricate runs to completion first, leaving the minted
-                          # .snappy (and its name) in the shared /work volume.
+                          # initContainers run in sequence and both complete before
+                          # the upload container starts, so a failure in either one
+                          # fails the Job with nothing uploaded.
                           initContainers:
                             - name: fabricate
                               image: {{inputs.parameters.fwf-image}}
@@ -137,26 +143,38 @@ spec:
                               args:
                                 - |
                                   set -eu
-                                  # Prefer the per-account map from set-invoice-number (accountNumber<TAB>invoiceNumber,
-                                  # extra columns ignored); else one bare account per line + INVOICE_NUMBER/API.
+                                  # The map is fabricate's input verbatim: accountNumber<TAB>invoiceNumber,
+                                  # further columns (a plan's state) ignored.
                                   # FIXME: invoice-map is inlined as a parameter, so it holds ONE account —
                                   # a multi-line map breaks this manifest's YAML. Wants an input artifact
                                   # mounted as a file; see the FIXME in step-executor-remote-namespace.
-                                  if [ -n "{{inputs.parameters.invoice-map}}" ]; then
-                                    printf '%s\n' "{{inputs.parameters.invoice-map}}" > /work/accounts.txt
-                                  else
-                                    printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /work/accounts.txt
-                                  fi
+                                  printf '%s\n' "{{inputs.parameters.invoice-map}}" > /work/accounts.txt
                                   cd /work
-                                  /svc
-                                  # capture the single minted filename for the upload container
+                                  /svc fabricate --input /work/accounts.txt
+                                  # capture the single minted filename for the steps after this one
                                   basename "$(ls -1 /work/*.snappy | head -n 1)" > /work/name
                                   echo "fabricated $(cat /work/name)"
                               env:
                                 - { name: INPUT, value: /work/accounts.txt }
-                                - { name: INVOICE_NUMBER, value: "{{inputs.parameters.invoice-number}}" }
                                 - { name: BILL_PERIOD, value: "{{inputs.parameters.bill-period}}" }
                                 - { name: ENGINEER_VISIT, value: "{{inputs.parameters.engineer-visit}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                              volumeMounts:
+                                - { name: work, mountPath: /work }
+                            # THE GATE. Checks the fabricated file against the pairs
+                            # set-invoice-number applied; every difference is printed
+                            # (MISMATCH / MISSING / UNEXPECTED / DUPLICATE) and the
+                            # non-zero exit stops the Job before upload.
+                            - name: validate
+                              image: {{inputs.parameters.fwf-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  /svc validate --input "/work/$(cat /work/name)" --expect /work/accounts.txt
+                                  echo "validated $(cat /work/name) against the applied plan" >&2
+                              env:
                                 - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
                               volumeMounts:
                                 - { name: work, mountPath: /work }

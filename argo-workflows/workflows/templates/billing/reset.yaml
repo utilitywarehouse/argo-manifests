@@ -1,0 +1,336 @@
+# =============================================================================
+# reset — clear billing's records for accounts so they can be billed again
+# =============================================================================
+# An account can only be billed once per period. To re-bill one, the records the
+# previous run left behind have to go first — then set-invoice-number hands out a
+# fresh number and the pipeline runs as if for the first time.
+#
+#   bills     billing-rds (postgres): bills, bill numbers, summaries,
+#             transactions, energy-platform services + their rows
+#   segments  billing crdb (pg wire): accounts, segments, segment_group_history,
+#             segment_groups
+#
+# BOTH RUN IN dev-merit/billing. billing-rds is an RDS endpoint dialled over the
+# network, not an in-cluster service, so reaching it has nothing to do with where
+# the bills are served from. Two Jobs rather than one only because they are two
+# subcommands against two stores; they share no data, so they run in parallel.
+#
+# INPUT. Account NUMBERS only, comma-separated. Both commands derive the id each
+# store keys its rows by from the number (the frozen UUIDv5 account-platform
+# mints), so no id list is passed around and the two cannot drift apart.
+#
+# IDEMPOTENT. Ids that resolve to nothing skip their tables, so a run against
+# already-clean accounts deletes nothing and exits 0. There is deliberately no
+# "should we reset?" branch — running it unconditionally is cheaper and has fewer
+# failure modes than deciding first. See RESET IS NOT PERIOD-AWARE below.
+#
+# DRY RUN. `dry-run=true` (the default) reports the row count each delete WOULD
+# affect and deletes nothing. This is a safety gate, not a decision point: the
+# counts go to stderr as log lines, there is no aggregate, and the exit code is 0
+# either way, so nothing downstream can branch on them.
+#
+# ⚠️ RESET IS NOT PERIOD-AWARE. `bills` resolves invoice numbers from
+# public.bill_number by account_number with NO period filter, so it deletes EVERY
+# bill the account has, not just the current period's. That is what you want for
+# a test account being re-billed; it is not what you want for an account whose
+# earlier periods matter.
+#
+# Reference-only: consumed by step-billing-bill-account via templateRef.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-reset
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. DESTRUCTIVE — delete the accounts' bills
+      (billing-rds) and segments (billing crdb) so they can be billed again.
+      Defaults to dry-run. Consumed by step-billing-bill-account via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+spec:
+  serviceAccountName: workflow-step-executor
+  templates:
+    # -------------------------------------------------------------------------
+    # reset — both stores, in parallel. The template callers want; the two below
+    # are its parts, and still render as their own nodes in the UI.
+    # -------------------------------------------------------------------------
+    - name: reset
+      inputs:
+        parameters:
+          - { name: account-numbers } # UW customer account number(s), comma-separated
+          - { name: dry-run, value: "true" } # true => report row counts, delete nothing
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: pg-host,
+              value: "billing-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com",
+            }
+          - {
+              name: crdb-dsn,
+              value: "postgresql://root@cockroachdb-public.billing.svc:26257/bo?sslmode=verify-full&application_name=reset-segments",
+            }
+      steps:
+        - - name: bills
+            template: bills
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - { name: pg-host, value: "{{inputs.parameters.pg-host}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+          - name: segments # parallel with bills: same namespace, different store
+            template: segments
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - { name: crdb-dsn, value: "{{inputs.parameters.crdb-dsn}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+    # -------------------------------------------------------------------------
+    # bills — delete the accounts' rows in billing-rds, from dev-merit/billing.
+    #
+    # The two tables guarded by a delete trigger (bills, bill_number) go last,
+    # each inside a transaction that disables the trigger, deletes and re-enables
+    # it, so a failure leaves the guard in place.
+    #
+    # CONNECTION. The tool takes one DSN (PG_URL), so it is composed in the
+    # container from its parts — the password never appears in a parameter, only
+    # in the Secret it is read from. RDS_USE_PASSWORD_AUTH=true selects that
+    # password over RDS IAM auth. Set `pg-url` to bypass composition entirely.
+    #
+    # ⚠️ The password is interpolated into a URL. If it ever contains reserved
+    # characters (@ : / ? # [ ] %) the DSN silently misparses — percent-encode it
+    # in the Secret, or set `pg-url` whole.
+    # -------------------------------------------------------------------------
+    - name: bills
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: dry-run, value: "true" }
+          # Composed into PG_URL unless pg-url is set, which wins outright.
+          - { name: pg-url, value: "" }
+          - {
+              name: pg-host,
+              value: "billing-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com",
+            }
+          - { name: pg-port, value: "5432" }
+          - { name: pg-database, value: billing }
+          - { name: pg-user, value: uw_admin }
+          - { name: pg-sslmode, value: require }
+          - { name: pg-secret, value: uw-billing-secrets }
+          - { name: pg-password-key, value: postgres.password }
+          - { name: rds-use-password-auth, value: "true" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: reset-image,
+              value: "registry.uw.systems/billing/reset:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 12m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: reset-bills-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: billing
+                              image: {{inputs.parameters.reset-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # Compose the DSN unless one was supplied whole. Built here, not in a
+                                  # parameter, so PG_PASSWORD stays in the env it came from.
+                                  if [ -z "$PG_URL" ]; then
+                                    : "${PG_HOST:?PG_HOST is empty - set the pg-host parameter to the billing-rds endpoint}"
+                                    PG_URL="postgres://${PG_USER}:${PG_PASSWORD}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?sslmode=${PG_SSLMODE}"
+                                    export PG_URL
+                                  fi
+                                  # Account numbers only; reset derives every id it needs from them.
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /tmp/accounts.txt
+                                  /svc bills --input /tmp/accounts.txt --dry-run={{inputs.parameters.dry-run}}
+                              env:
+                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: PG_URL, value: "{{inputs.parameters.pg-url}}" }
+                                - { name: PG_HOST, value: "{{inputs.parameters.pg-host}}" }
+                                - { name: PG_PORT, value: "{{inputs.parameters.pg-port}}" }
+                                - { name: PG_DATABASE, value: "{{inputs.parameters.pg-database}}" }
+                                - { name: PG_USER, value: "{{inputs.parameters.pg-user}}" }
+                                - { name: PG_SSLMODE, value: "{{inputs.parameters.pg-sslmode}}" }
+                                - name: PG_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.pg-secret}}
+                                      key: {{inputs.parameters.pg-password-key}}
+                                - { name: RDS_USE_PASSWORD_AUTH, value: "{{inputs.parameters.rds-use-password-auth}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+
+    # -------------------------------------------------------------------------
+    # segments — dev-merit/billing: delete the accounts' segments in billing crdb.
+    #
+    # CONNECTION. Cockroach cert auth is the same three-variable contract as the
+    # other crdb queriers (step-account-resolve-account,
+    # step-energy-resolve-service-identifiers): CA_AUTH_KEY from a Secret,
+    # CA_PROFILE + CA_ADDRESS naming the CA to fetch a client cert from. uwos-go's
+    # pgx wrapper does the fetch at startup when the DSN says sslmode=verify-full,
+    # so there are no cert files and no volume mounts to wire.
+    #
+    # billing follows account-platform's naming (Secret `ca-auth-key` / `auth.key`)
+    # with the profile and endpoint read from the `ca.config` ConfigMap. The
+    # CLIENT profile is the right one here — this is a SQL client connection, not a
+    # node joining the cluster. (energy-platform passes ca.node.profile; node certs
+    # usually carry client auth too, which is why it works there.)
+    #
+    # ⚠️ The DSN's username has to be one the CA will issue a client cert for.
+    # `root` is what the other dev crdb queriers use; confirm it against
+    # dev-merit/billing before a real run.
+    # -------------------------------------------------------------------------
+    - name: segments
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: dry-run, value: "true" }
+          - {
+              name: crdb-dsn,
+              value: "postgresql://root@cockroachdb-public.billing.svc:26257/bo?sslmode=verify-full&application_name=reset-segments",
+            }
+          - { name: ca-secret, value: ca-auth-key } # → CA_AUTH_KEY
+          - { name: ca-auth-key, value: auth.key } # key within ca-secret
+          - { name: ca-config, value: ca.config } # CA profile + endpoint
+          - { name: ca-profile-key, value: ca.client.profile } # → CA_PROFILE
+          - { name: ca-address-key, value: ca.endpoint } # → CA_ADDRESS
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: reset-image,
+              value: "registry.uw.systems/billing/reset:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 12m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      generateName: reset-segments-
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: billing
+                              image: {{inputs.parameters.reset-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /tmp/accounts.txt
+                                  /svc segments --input /tmp/accounts.txt --dry-run={{inputs.parameters.dry-run}}
+                              env:
+                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: CRDB_DSN, value: "{{inputs.parameters.crdb-dsn}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                - name: CA_AUTH_KEY
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.ca-secret}}
+                                      key: {{inputs.parameters.ca-auth-key}}
+                                - name: CA_PROFILE
+                                  valueFrom:
+                                    configMapKeyRef:
+                                      name: {{inputs.parameters.ca-config}}
+                                      key: {{inputs.parameters.ca-profile-key}}
+                                - name: CA_ADDRESS
+                                  valueFrom:
+                                    configMapKeyRef:
+                                      name: {{inputs.parameters.ca-config}}
+                                      key: {{inputs.parameters.ca-address-key}}

@@ -1,0 +1,55 @@
+# =============================================================================
+# pause — a human checkpoint any workflow can drop between two steps
+# =============================================================================
+# Argo suspends the workflow until someone resumes it from the UI or CLI. What
+# makes this more than a bare `suspend: {}` is that the node says what it is
+# waiting for:
+#
+#   message   REQUIRED. What to verify before resuming, in the caller's words.
+#             Shows on the node's INPUTS panel, so the operator reads it on the
+#             node they are about to resume rather than in the template source.
+#   approve   Supplied at resume. The resume dialog renders its description and
+#             its yes/no enum, so a decision is recorded rather than a button
+#             clicked, and it lands in the workflow's outputs for the archive.
+#
+# ⚠️ `approve` is RECORDED, NOT ENFORCED — nothing reads it, so answering "no"
+# still lets the workflow continue. To make "no" actually stop the next step:
+#
+#   when: "{{steps.<pause-step>.outputs.parameters.approve}} == yes"
+#
+# GATING THE PAUSE ITSELF is the caller's business: leave it unconditional for a
+# checkpoint that always fires, or add `when:` for one that only fires in some
+# modes (step-billing-bill-run gates its pre-Commit pause on validation-mode).
+#
+# Reference-only: consumed via templateRef.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-pause
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Suspend until a human resumes, showing what to
+      verify and prompting for a yes/no decision. Consumed via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
+spec:
+  templates:
+    - name: pause
+      inputs:
+        parameters:
+          - name: message
+            description: What to verify before resuming this workflow
+      suspend: {}
+      outputs:
+        parameters:
+          - name: approve
+            description: >-
+              Resume only once the checks in this node's `message` input pass.
+              Pick no to record that they did not.
+            valueFrom:
+              supplied: {}
+            default: "yes"
+            enum: ["yes", "no"]

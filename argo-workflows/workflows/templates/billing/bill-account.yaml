@@ -12,16 +12,32 @@
 #        │
 #   assert-bills-processed       every billing_period_accounts row processed across ALL
 #        │                       those gentrack numbers (SQL IN)? else FAIL
+#   reset                        DESTRUCTIVE: clear what a previous bill run left, so
+#        │                       these accounts can be billed again — bills (billing-rds)
+#        │                       and segments (crdb), in parallel from dev-merit/billing.
+#        │                       Idempotent, so it runs unconditionally; gated by dry-run.
 #   set-invoice-number           plan the number, then apply it to both stores:
 #        │                         plan             read-only, the lowest unused number
 #        │                         apply-invoice-id preferences.lastinvoiceid (dev-aws)
 #        │                         apply-etag       account.eTag              (dev-merit)
 #        │  the plan  'accountNumber<TAB>invoiceNumber<TAB>state'
-#   produce-fwf                  fabricate the FWF from the plan → (upload unless dry-run) → segment name
+#   PAUSE                        last boundary before anything reaches the bucket
+#        │
+#   produce-fwf                  fabricate the FWF from the plan → VALIDATE it against
+#        │                       that plan → (upload unless dry-run) → segment name.
+#        │                       A failed validation stops here, nothing is uploaded.
 #        │  segment name  (minted by the fabricate tool)
+#   PAUSE                        uploaded, not yet registered — no segment exists
+#        │
 #   register                     POST the uploaded file to billing-bill-extracts-s3-uploader
 #        │
-#   bill-run                     Create → Bill → Commit → Export → Fulfil
+#   PAUSE                        segment exists, nothing billed yet
+#        │
+#   bill-run                     Create → Bill → [PAUSE] → Commit → Export → Fulfil
+#
+# PAUSES. All four are step-pause. The three here are unconditional — they suspend on
+# dry runs too, so a rehearsal walks the same gates as a real bill. The fourth is
+# bill-run's own, before the irreversible Commit, gated on validation-mode.
 #
 # The gentrack numbers gate the assert ONLY. produce-fwf / register / bill-run key on
 # the submitted UW customer account number (one account can map to several gentrack
@@ -56,7 +72,7 @@ spec:
       - { name: account-numbers } # UW customer account number(s), comma-separated; the same logic bills one or many
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       - { name: validation-mode, value: attended } # attended pauses before Commit
-      - { name: dry-run, value: "true" } # true => plan + fabricate only; no mongo writes, upload, register or bill-run
+      - { name: dry-run, value: "true" } # true => plan + fabricate + validate only; no deletes, mongo writes, upload, register or bill-run
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
       - { name: engineer-visit, value: "false" }
   templates:
@@ -169,7 +185,32 @@ spec:
                     value: "{{inputs.parameters.assert-namespace}}",
                   }
 
-        # 5) SET-INVOICE-NUMBER: plan the number, then write it to both mongos (skipped
+        # 5) RESET: clear what a previous bill run left for these accounts, so they can
+        #    be billed again — an account can only be billed once per period. Both
+        #    stores in parallel from dev-merit/billing; dry-run reports row counts
+        #    instead of deleting.
+        #
+        #    Unconditional by design: reset is a no-op on accounts with nothing to
+        #    clear.
+        - - name: reset
+            templateRef: { name: step-billing-reset, template: reset }
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
+        # 6) SET-INVOICE-NUMBER: plan the number, then write it to both mongos (skipped
         #    by dry-run). Emits the plan — applied everywhere before the FWF is built.
         - - name: set-invoice-number
             templateRef:
@@ -198,17 +239,29 @@ spec:
                     value: "{{inputs.parameters.billing-namespace}}",
                   }
 
-        # 6) PRODUCE-FWF: fabricate for the submitted UW customer account (NOT the
-        #    gentrack number — that's only for the assert above); upload unless dry-run.
-        #    invoice-map is the plan, used verbatim as fabricate's input.
+        - - name: pause-before-produce-fwf
+            templateRef: { name: step-pause, template: pause }
+            arguments:
+              parameters:
+                - name: message
+                  value: >-
+                    BEFORE FABRICATE + UPLOAD — nothing has been written to the
+                    bill-extracts bucket yet. Check the plan on the
+                    set-invoice-number node: one line per account, each invoice
+                    number free and 9 digits, state changed|unchanged as expected.
+                    Resuming fabricates the FWF and, unless dry-run, uploads it.
+                    This is the last step boundary before the bucket — fabricate,
+                    validate and upload are containers in one Job, so there is no
+                    boundary between validate and upload to suspend at.
+
+        # 7) PRODUCE-FWF: fabricate + validate, then upload unless dry-run. The plan is
+        #    the only input — it names the UW customer accounts (NOT the gentrack
+        #    numbers, which are only for the assert above) and the number each was
+        #    assigned, and is used verbatim as fabricate's input.
         - - name: produce-fwf
             templateRef: { name: step-billing-produce-fwf, template: produce }
             arguments:
               parameters:
-                - {
-                    name: account-numbers,
-                    value: "{{inputs.parameters.account-numbers}}",
-                  }
                 - {
                     name: invoice-map,
                     value: "{{steps.set-invoice-number.outputs.parameters.plan}}",
@@ -231,9 +284,24 @@ spec:
                     value: "{{inputs.parameters.billing-namespace}}",
                   }
 
+        - - name: pause-before-register
+            templateRef: { name: step-pause, template: pause }
+            arguments:
+              parameters:
+                - name: message
+                  value: >-
+                    AFTER UPLOAD, BEFORE REGISTER — the FWF is in the bucket but
+                    the s3-uploader has not been told about it, so no segment
+                    exists yet. Check the produce-fwf node: `filename` is the
+                    minted segment name, and its validate container passed with no
+                    MISMATCH / MISSING / UNEXPECTED / DUPLICATE lines. Then check
+                    the billing-bill-extracts-s3-uploader pod logs in
+                    dev-merit/billing for the upload success signal. Resuming
+                    registers the file, which is what makes it real to billing.
+
         # ── DRY RUN STOPS HERE: register + bill-run only run for a real bill ──
 
-        # 7) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
+        # 8) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
         - - name: register
             when: "{{inputs.parameters.dry-run}} != true"
             templateRef: { name: step-billing-graphql-call, template: call }
@@ -256,7 +324,20 @@ spec:
                     value: "{{inputs.parameters.uploader-endpoint}}",
                   }
 
-        # 8) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
+        - - name: pause-before-bill-run
+            templateRef: { name: step-pause, template: pause }
+            arguments:
+              parameters:
+                - name: message
+                  value: >-
+                    AFTER REGISTER, BEFORE BILL-RUN — the segment now exists and is
+                    known to billing, but nothing has been billed. Check the
+                    register node returned ok, then check the bill-adapter pod logs
+                    in dev-merit/billing for the success signals. Resuming starts
+                    Create → Bill → Commit → Export → Fulfil; bill-run pauses again
+                    before the irreversible Commit when validation-mode is attended.
+
+        # 9) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
         - - name: bill-run
             when: "{{inputs.parameters.dry-run}} != true"
             templateRef: { name: step-billing-bill-run, template: main }
