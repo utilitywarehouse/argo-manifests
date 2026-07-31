@@ -113,12 +113,11 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: produce-fwf }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: produce-fwf-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}

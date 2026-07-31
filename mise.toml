@@ -1,0 +1,13 @@
+[tools]
+# MUST match VERSION in argo-workflows/system/Makefile — linting against a
+# different version than the cluster runs defeats the point. `make tools` checks it.
+argo = "4.0.1"
+
+kustomize = "5.8.1"
+conftest = "0.68.2"
+
+# system/Makefile's get-upstream target splits the upstream release with yq.
+yq = "4.45.1"
+
+node = "22"
+"npm:prettier" = "3.9.6"

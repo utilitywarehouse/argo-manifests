@@ -62,12 +62,11 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: assert-bills-processed }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: assert-bills-processed-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}

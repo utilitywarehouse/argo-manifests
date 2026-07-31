@@ -174,12 +174,11 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: reset-bills-for-account-rds }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: reset-bills-for-account-rds-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
@@ -191,7 +190,6 @@ spec:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
                           containers:
-                            # The Job's name comes from this container, not from generateName.
                             - name: reset-bills-for-account-rds
                               image: {{inputs.parameters.reset-image}}
                               imagePullPolicy: Always
@@ -284,12 +282,12 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                # Runs in parallel with the rds sibling in the SAME dev-merit/billing.
+                - { name: job-name, value: reset-bills-for-account-crdb }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: reset-bills-for-account-crdb-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
@@ -301,7 +299,6 @@ spec:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
                           containers:
-                            # The Job's name comes from this container, not from generateName.
                             - name: reset-bills-for-account-crdb
                               image: {{inputs.parameters.reset-image}}
                               imagePullPolicy: Always

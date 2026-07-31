@@ -81,6 +81,30 @@ searchable and filterable when viewing workflows:
 legitimately be `invocation: standalone` **and** `component: step` — the four dual-use steps
 above are exactly that. Don't collapse them; they answer different questions.
 
+## Naming the remote Job
+
+Steps dispatch a Kubernetes Job through `step-executor-remote-namespace`. Its `job-name` parameter is the only thing that names that Job — a `metadata:` block inside `job-template` is discarded. The final name is `<job-name>-<workflow.uid[:8]>`.
+
+The uid suffix separates runs, not steps within a run. So:
+
+> `job-name` must be unique across every `execute-job` call one workflow run makes into the same cluster + namespace, including calls made by templates it composes.
+
+Reuse one and the second Job creates while the first is still being torn down, and the step fails with `object is being deleted: jobs.batch "..." already exists`.
+
+Name it after the **work**, never the target namespace — the namespace is what collides. That is the opposite of the enclosing Argo *step* name, which we do name after the namespace so the UI graph shows domain-labelled nodes. The two are independent, which is why `job-name` is passed explicitly rather than taken from the step name.
+
+A template called many times in one run cannot use a constant. Derive it from whatever already varies per call:
+
+```yaml
+- { name: job-name, value: "billing-gql-{{inputs.parameters.op-name}}" }
+```
+
+Anything feeding that discriminator has to vary too — `step-billing-await-segment-state` takes an `op-name` from its caller instead of deriving one from `target-state`.
+
+**Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. Keep `job-name` to a DNS-1123 slug of **54 characters or fewer** so `-<uid8>` always fits.
+
+`make validate` enforces all of it: `argo lint` catches a call that forgets `job-name`, and the `policy/job_names.rego` conftest policy catches duplicates, bad characters and over-long names.
+
 ## Adding a new template
 
 1. Decide: does a human launch it? → `flow-`. Is it called by other workflows? → `step-`.

@@ -204,14 +204,19 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                # system-key keeps this distinct when one workflow runs the orchestrator
+                # for more than one system into the same namespace. It is snake_case
+                # (energy_tariff_system) and a Job name must be DNS-1123, so the
+                # underscores are swapped for hyphens on the way in.
+                - name: job-name
+                  value: "data-orchestrator-run-{{=sprig.replace('_', '-', inputs.parameters['system-key'])}}"
                 # Full Job manifest, rendered as a string. Argo substitutes every
-                # {{inputs.parameters.*}} before exec-kube creates the Job in the target namespace.
+                # {{inputs.parameters.*}} before exec-kube creates the Job in the target
+                # namespace.
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: do-run-{{inputs.parameters.system-key}}-
                     spec:
                       backoffLimit: 0
                       # Bounds total lifetime: a stuck/crashlooping/infinite-loop pod is force-

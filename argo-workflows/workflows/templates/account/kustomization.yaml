@@ -22,7 +22,11 @@ generatorOptions:
 
 replacements:
   - source:
-      { kind: ConfigMap, name: account-image-versions, fieldPath: data.query-pg }
+      {
+        kind: ConfigMap,
+        name: account-image-versions,
+        fieldPath: data.query-pg,
+      }
     targets:
       - select: { kind: WorkflowTemplate, name: step-account-resolve-account }
         fieldPaths:

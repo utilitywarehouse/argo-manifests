@@ -153,7 +153,8 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-billed
-            templateRef: { name: step-billing-await-segment-state, template: await }
+            templateRef:
+              { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -164,6 +165,7 @@ spec:
                     name: target-state,
                     value: "{{inputs.parameters.state-billed}}",
                   }
+                - { name: op-name, value: await-billed }
                 # Commit is gated on full production, same as the UI
                 - {
                     name: extra-expr,
@@ -219,7 +221,8 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-committed
-            templateRef: { name: step-billing-await-segment-state, template: await }
+            templateRef:
+              { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -230,6 +233,7 @@ spec:
                     name: target-state,
                     value: "{{inputs.parameters.state-committed}}",
                   }
+                - { name: op-name, value: await-committed }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
@@ -266,7 +270,8 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-exported
-            templateRef: { name: step-billing-await-segment-state, template: await }
+            templateRef:
+              { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -277,6 +282,7 @@ spec:
                     name: target-state,
                     value: "{{inputs.parameters.state-exported}}",
                   }
+                - { name: op-name, value: await-exported }
                 # Fulfil/Schedule is gated on full production, same as the UI
                 - {
                     name: extra-expr,
@@ -318,7 +324,8 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
         - - name: await-fulfilled
-            templateRef: { name: step-billing-await-segment-state, template: await }
+            templateRef:
+              { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
                 - {
@@ -329,6 +336,7 @@ spec:
                     name: target-state,
                     value: "{{inputs.parameters.state-fulfilled}}",
                   }
+                - { name: op-name, value: await-fulfilled }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,

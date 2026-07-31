@@ -20,12 +20,12 @@ spec:
         value: "sys-k6"
       - name: log-level
         value: "info"
+      - name: job-name
+        value: "print-secret"
       - name: job-template
         value: |
           apiVersion: batch/v1
           kind: Job
-          metadata:
-            name: print-secret
           spec:
             template:
               spec:
@@ -49,6 +49,7 @@ spec:
           - name: cluster-name
           - name: target-namespace
           - name: log-level
+          - name: job-name
           - name: job-template
       steps:
         - - name: execute
@@ -63,5 +64,7 @@ spec:
                   value: "{{inputs.parameters.target-namespace}}"
                 - name: log-level
                   value: "{{inputs.parameters.log-level}}"
+                - name: job-name
+                  value: "{{inputs.parameters.job-name}}"
                 - name: job-template
                   value: "{{inputs.parameters.job-template}}"
