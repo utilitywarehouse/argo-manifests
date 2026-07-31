@@ -29,12 +29,9 @@ jobs:
         id: tools
         run: make tools
 
-      - name: Check formatting
-        run: make fmt-check
-
-      - name: Build, lint and policy-check manifests
+      - name: Validate manifests
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
-        run: make validate
+        run: make fmt-check validate
 
       - name: Upload rendered manifests
         if: ${{ failure() }}
