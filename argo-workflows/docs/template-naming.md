@@ -105,6 +105,31 @@ Anything feeding that discriminator has to vary too — `step-billing-await-segm
 
 `make validate` enforces all of it: `argo lint` catches a call that forgets `job-name`, and the `policy/job_names.rego` conftest policy catches duplicates, bad characters and over-long names.
 
+## Interpolating values into `job-template`
+
+`job-template` is a *string*. Argo substitutes `{{...}}` into it as raw text with no YAML escaping, and nothing parses the result until exec-kube hands it to the API server — so a value carrying its own syntax breaks the manifest in a remote cluster, mid-run, as `invalid job template: ... yaml: line N: did not find expected ',' or '}'`.
+
+Two things break it, and both come from ordinary values — expr predicates like `{.name == "x"}`, GraphQL payloads:
+
+> **Quotes.** Interpolate into a `|-` block scalar, never a quoted scalar. A `"` in the value closes a quoted one early.
+
+```yaml
+- name: SUCCESS_EXPR
+  value: |-
+    {{inputs.parameters.success-expr}}
+```
+
+> **Newlines.** The value has to be single-line. A `>-` scalar only folds to one line if its continuation lines are indented **the same** as the first — indent one further and YAML keeps the newline, which lands unindented inside the block scalar and ends it.
+
+```yaml
+- name: success-expr # folds to one line
+  value: >-
+    any(response.body.data.read_segments.segments,
+    {.name == "{{inputs.parameters.segment-name}}"})
+```
+
+`policy/job_templates.rego` enforces both: it substitutes the nastiest value any caller passes to each parameter and parses the Job manifest that comes out.
+
 ## Adding a new template
 
 1. Decide: does a human launch it? → `flow-`. Is it called by other workflows? → `step-`.

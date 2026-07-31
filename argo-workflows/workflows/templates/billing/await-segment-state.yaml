@@ -70,9 +70,9 @@ spec:
                 - name: success-expr
                   value: >-
                     any(response.body.data.read_segments.segments,
-                        {.id == "{{inputs.parameters.segment-id}}"
-                         && .state == "{{inputs.parameters.target-state}}"
-                         && ({{inputs.parameters.extra-expr}})})
+                    {.id == "{{inputs.parameters.segment-id}}"
+                    && .state == "{{inputs.parameters.target-state}}"
+                    && ({{inputs.parameters.extra-expr}})})
                 - { name: failure-expr, value: "response.body.errors != nil" }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
