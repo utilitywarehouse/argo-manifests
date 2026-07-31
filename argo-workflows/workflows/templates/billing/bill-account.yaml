@@ -103,7 +103,7 @@ spec:
             }
           - {
               name: uploader-endpoint,
-              value: "http://billing-bill-extracts-s3-uploader/api/2.0/fwf",
+              value: "http://billing-bill-extracts-s3-uploader:80/api/2.0/fwf",
             }
           - { name: teardown, value: "true" }
       steps:
