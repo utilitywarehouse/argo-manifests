@@ -35,6 +35,7 @@ spec:
     parameters:
       - { name: segment-id }
       - { name: target-state } # bo.State enum name, e.g. STATE_BILLED
+      - { name: op-name, value: await-segment-state }
       - { name: extra-expr, value: "true" } # extra per-segment predicate, ANDed in
       - { name: token, value: "" }
       - { name: cluster-name, value: dev-merit }
@@ -47,6 +48,7 @@ spec:
         parameters:
           - { name: segment-id }
           - { name: target-state }
+          - { name: op-name, value: await-segment-state }
           - { name: extra-expr, value: "true" }
           - { name: token, value: "" }
           - { name: cluster-name, value: dev-merit }
@@ -60,7 +62,7 @@ spec:
               template: call
             arguments:
               parameters:
-                - { name: op-name, value: "await-{{inputs.parameters.target-state}}" }
+                - { name: op-name, value: "{{inputs.parameters.op-name}}" }
                 - name: payload
                   value: '{"query":"{ read_segments { segments { id state stats { produced reported total } } } }"}'
                 - name: success-expr
@@ -71,7 +73,13 @@ spec:
                          && ({{inputs.parameters.extra-expr}})})
                 - { name: failure-expr, value: "response.body.errors != nil" }
                 - { name: token, value: "{{inputs.parameters.token}}" }
-                - { name: cluster-name, value: "{{inputs.parameters.cluster-name}}" }
-                - { name: target-namespace, value: "{{inputs.parameters.target-namespace}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }

@@ -1,1 +1,9 @@
 **/CODEOWNERS
+
+# Rendered kustomize output from `make build`.
+**/bin/
+
+# Vendored upstream, refreshed by `make get-upstream` — reformatting it would
+# produce a diff against upstream on every refresh.
+argo-workflows/system/cluster/upstream/
+argo-workflows/system/namespaced/*/upstream/

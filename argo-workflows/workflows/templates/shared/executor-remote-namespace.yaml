@@ -29,6 +29,17 @@ spec:
           # (cluster-servers/<cluster-name>, see CLUSTER_SERVER below).
           - name: cluster-name
           - name: target-namespace
+          # The ONLY thing that names the Job: exec-kube creates
+          # `<job-name>-<workflow.uid[:8]>` and rebuilds ObjectMeta from scratch, so a
+          # `metadata:` in job-template below is parsed and discarded. The uid suffix
+          # is identical for every step of one run, so job-name must be unique across
+          # EVERY execute-job call a workflow makes into the same cluster+namespace —
+          # including calls made by templates it composes. Reusing one means the second
+          # Job creates while the first is still being torn down:
+          #   failed to create job: object is being deleted: jobs.batch "x" already exists
+          # Name it after the WORK, never the namespace (the namespace is what
+          # collides). DNS-1123 slug, <= 54 chars. See docs/template-naming.md.
+          - name: job-name
           - name: job-template
           - name: timeout
             value: "5m"
@@ -78,8 +89,12 @@ spec:
             value: "{{workflow.name}}"
           - name: WORKFLOW_UID
             value: "{{workflow.uid}}"
+          # exec-kube's --workflow-step-name, which is what it prefixes the Job name
+          # with. Passed explicitly rather than taken from the calling step's name:
+          # the step name is the namespace-labelled node the UI graph wants, and
+          # several templates legitimately share one.
           - name: WORKFLOW_STEP_NAME
-            value: "{{steps.name}}"
+            value: "{{inputs.parameters.job-name}}"
           - name: TIMEOUT
             value: "{{inputs.parameters.timeout}}"
           - name: TEARDOWN

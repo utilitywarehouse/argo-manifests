@@ -58,7 +58,7 @@ spec:
   arguments:
     parameters:
       # --- what to run (supplied per call) ------------------------------------
-      - { name: op-name } # short slug for the Job name + logs, e.g. create-segment
+      - { name: op-name } # e.g. create-segment, commit, await-billed
       - { name: payload } # the GraphQL request body: {"query": "...", "variables": {...}}
       - { name: success-expr, value: "" } # poll until true; empty => fire once
       - { name: failure-expr, value: "" } # bail early when true
@@ -127,14 +127,18 @@ spec:
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: job-name,
+                    value: "billing-gql-{{inputs.parameters.op-name}}",
+                  }
                 # Full Job manifest as a string. Argo substitutes every
                 # {{inputs.parameters.*}} before exec-kube creates the Job.
+                # `metadata:` is deliberately absent — exec-kube discards it and names
+                # the Job from job-name above.
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: bgql-{{inputs.parameters.op-name}}-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}

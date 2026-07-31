@@ -25,7 +25,8 @@ replacements:
   - source:
       { kind: ConfigMap, name: energy-image-versions, fieldPath: data.query-pg }
     targets:
-      - select: { kind: WorkflowTemplate, name: step-energy-assert-bills-processed }
+      - select:
+          { kind: WorkflowTemplate, name: step-energy-assert-bills-processed }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-pg-image].value
       - select:

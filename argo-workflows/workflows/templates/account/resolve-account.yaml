@@ -84,12 +84,11 @@ spec:
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+                - { name: job-name, value: resolve-account-id }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
                     kind: Job
-                    metadata:
-                      generateName: resolve-account-id-
                     spec:
                       backoffLimit: 0
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
