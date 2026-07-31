@@ -31,9 +31,9 @@ delegates, so the same targets work from either level.
 `namespace:` transformer, without which `templateRef`s cannot resolve. Everything else
 renders and is validated there.
 
-Policies live in [policy/](policy/) and run under conftest. See
-[docs/template-naming.md](docs/template-naming.md#naming-the-remote-job) for the remote-Job
-naming rule they enforce.
+Policies live in [policy/](policy/) and run under conftest. Each enforces a convention that
+`argo lint` cannot see, and each is written up in [docs/](docs/), the policy is where the
+rule is checked, the doc is where it is explained. Add one and add its doc.
 
 Adding a package means a `kustomization.yaml` and a Makefile; the root Makefile discovers
 it by that Makefile, so nothing has to be registered:

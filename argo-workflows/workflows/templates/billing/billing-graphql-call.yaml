@@ -167,11 +167,21 @@ spec:
                               env:
                                 - { name: URL, value: "{{inputs.parameters.endpoint}}" }
                                 - { name: METHOD, value: POST }
-                                - { name: PAYLOAD, value: '{{inputs.parameters.payload}}' }
-                                - { name: SUCCESS_EXPR, value: "{{inputs.parameters.success-expr}}" }
-                                - { name: FAILURE_EXPR, value: "{{inputs.parameters.failure-expr}}" }
-                                - { name: ASSERT, value: "{{inputs.parameters.assert}}" }
-                                - { name: RESULT_EXPR, value: "{{inputs.parameters.result-expr}}" }
+                                - name: PAYLOAD
+                                  value: |-
+                                    {{inputs.parameters.payload}}
+                                - name: SUCCESS_EXPR
+                                  value: |-
+                                    {{inputs.parameters.success-expr}}
+                                - name: FAILURE_EXPR
+                                  value: |-
+                                    {{inputs.parameters.failure-expr}}
+                                - name: ASSERT
+                                  value: |-
+                                    {{inputs.parameters.assert}}
+                                - name: RESULT_EXPR
+                                  value: |-
+                                    {{inputs.parameters.result-expr}}
                                 - { name: RESULT_PATH, value: /tmp/result }
                                 - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
                                 - { name: POLL_INTERVAL, value: "{{=int(duration(inputs.parameters['poll-interval']).Seconds())}}" }
