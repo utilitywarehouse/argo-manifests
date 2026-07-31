@@ -22,6 +22,11 @@ spec:
       - { name: dry-run, value: "true" } # default safe: plan + fabricate only, no mongo writes/upload/register/bill-run
       - { name: validation-mode, value: attended } # attended pauses before Commit
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
+      # Which of the account's bills to re-open and re-send before billing. Comma-
+      # separated bill ids, matched against the blob's file name (e.g.
+      # BillJ40000000157_1). Empty re-sends each gentrack account's latest bill
+      # period, which is what re-billing an account normally means.
+      - { name: bill-ids, value: "" }
       - { name: engineer-visit, value: "false" }
   templates:
     - name: main
@@ -32,6 +37,7 @@ spec:
           - { name: dry-run, value: "true" }
           - { name: validation-mode, value: attended }
           - { name: bill-period, value: "" }
+          - { name: bill-ids, value: "" }
           - { name: engineer-visit, value: "false" }
       steps:
         - - name: bill-account
@@ -52,6 +58,7 @@ spec:
                     name: bill-period,
                     value: "{{inputs.parameters.bill-period}}",
                   }
+                - { name: bill-ids, value: "{{inputs.parameters.bill-ids}}" }
                 - {
                     name: engineer-visit,
                     value: "{{inputs.parameters.engineer-visit}}",

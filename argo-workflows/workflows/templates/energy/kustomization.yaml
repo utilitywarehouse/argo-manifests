@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - assert-bills-processed.yaml
+  - reprocess-bills.yaml
   - resolve-energy-service-identifiers.yaml
 
 # ---------------------------------------------------------------------------
@@ -17,7 +18,12 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
+      # step-energy-reprocess-bills needs the EXEC mode added in qe-toolkit
+      # 3b49015 — the un-process step is a write, and without it query-pg can
+      # only run the statement through a cursor, which Postgres refuses for an
+      # UPDATE. Bump this to the SHA CI publishes for that commit.
       - query-pg=registry.uw.systems/dev-enablement/query-pg:80b1439b0c21d5ae40fc7c600a89f142fe2274d9
+      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:main
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -36,3 +42,18 @@ replacements:
           }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+      # Only two of this one's four templates query; the wildcard passes over the
+      # composite and the gRPC trigger rather than failing on them.
+      - select: { kind: WorkflowTemplate, name: step-energy-reprocess-bills }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+  - source:
+      {
+        kind: ConfigMap,
+        name: energy-image-versions,
+        fieldPath: data.call-grpc,
+      }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-energy-reprocess-bills }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=call-grpc-image].value

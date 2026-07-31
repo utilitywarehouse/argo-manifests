@@ -10,12 +10,15 @@
 #        │
 #   select-gentrack              → ALL the account's gentrack_account_numbers (deduped, comma-joined)
 #        │
-#   assert-bills-processed       every billing_period_accounts row processed across ALL
-#        │                       those gentrack numbers (SQL IN)? else FAIL
 #   reset                        DESTRUCTIVE: clear what a previous bill run left, so
 #        │                       these accounts can be billed again — bills (billing-rds)
 #        │                       and segments (crdb), in parallel from dev-merit/billing.
 #        │                       Idempotent, so it runs unconditionally; gated by dry-run.
+#   reprocess-bills              un-process the account's billing blobs, re-send them
+#        │                       (ValidateAndSendBillingData) and wait for them to come
+#        │                       back processed. Gated by dry-run.
+#   assert-bills-processed       every billing_period_accounts row processed across ALL
+#        │                       those gentrack numbers (SQL IN)? else FAIL
 #   set-invoice-number           plan the number, then apply it to both stores:
 #        │                         plan             read-only, the lowest unused number
 #        │                         apply-invoice-id preferences.lastinvoiceid (dev-aws)
@@ -39,9 +42,19 @@
 # dry runs too, so a rehearsal walks the same gates as a real bill. The fourth is
 # bill-run's own, before the irreversible Commit, gated on validation-mode.
 #
-# The gentrack numbers gate the assert ONLY. produce-fwf / register / bill-run key on
-# the submitted UW customer account number (one account can map to several gentrack
-# numbers; the FWF and its segment are per UW account, not per gentrack number).
+# The gentrack numbers gate reprocess-bills and the assert ONLY. produce-fwf /
+# register / bill-run key on the submitted UW customer account number (one account can
+# map to several gentrack numbers; the FWF and its segment are per UW account, not per
+# gentrack number).
+#
+# WHY RESET MOVED AHEAD OF THE ASSERT. The energy data a bill is built from reaches
+# billing when the billing-adapter submits a blob and marks it processed; reset deletes
+# what that submission produced. On a re-run the blobs are still marked processed, so
+# nothing re-sends them and the next bill is fabricated with no energy lines — while
+# the assert passes, because "processed" is exactly what it checks. reprocess-bills
+# un-processes and re-sends them, and it has to run after reset (reset would delete
+# what it re-creates), so the destructive step now precedes the check that used to
+# guard it. The assert stays, as the confirmation that the re-send landed.
 #
 # INVOICE NUMBER produced BEFORE produce-fwf consumes it.
 # dry-run gates the two writes exactly as it gates the upload, register and bill-run.
@@ -74,6 +87,7 @@ spec:
       - { name: validation-mode, value: attended } # attended pauses before Commit
       - { name: dry-run, value: "true" } # true => plan + fabricate + validate only; no deletes, mongo writes, upload, register or bill-run
       - { name: bill-period, value: "" } # YYYY-MM; empty => current month
+      - { name: bill-ids, value: "" } # bill id(s) to re-send, comma-separated (e.g. BillJ40000000157_1); empty => each account's latest bill period
       - { name: engineer-visit, value: "false" }
   templates:
     - name: main
@@ -84,6 +98,7 @@ spec:
           - { name: validation-mode, value: attended }
           - { name: dry-run, value: "false" }
           - { name: bill-period, value: "" }
+          - { name: bill-ids, value: "" }
           - { name: engineer-visit, value: "false" }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
@@ -166,26 +181,7 @@ spec:
                   value: 'join(uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number)), ",")'
                 - { name: output-format, value: lines } # emit the comma-joined scalar
 
-        # 4) ASSERT: every available bill for that gentrack account is processed, else FAIL
-        - - name: assert-bills-processed
-            templateRef:
-              { name: step-energy-assert-bills-processed, template: assert }
-            arguments:
-              parameters:
-                - {
-                    name: external-account-number,
-                    value: "{{steps.select-gentrack.outputs.parameters.result}}",
-                  }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.assert-cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.assert-namespace}}",
-                  }
-
-        # 5) RESET: clear what a previous bill run left for these accounts, so they can
+        # 4) RESET: clear what a previous bill run left for these accounts, so they can
         #    be billed again — an account can only be billed once per period. Both
         #    stores in parallel from dev-merit/billing; dry-run reports row counts
         #    instead of deleting.
@@ -211,7 +207,59 @@ spec:
                     value: "{{inputs.parameters.billing-namespace}}",
                   }
 
-        # 6) SET-INVOICE-NUMBER: plan the number, then write it to both mongos (skipped
+        # 5) REPROCESS: reset has just deleted the energy data these bills were built
+        #    from, and the blobs it came from are still marked processed — so re-open
+        #    them and have the adapter send them again. Minutes, not seconds: the RPC
+        #    has no per-account form and walks every migrated account in the
+        #    environment (see step-energy-reprocess-bills).
+        #
+        #    SCOPE. bill-ids wins when given; otherwise the latest bill period held for
+        #    each gentrack account. bill-period is deliberately NOT wired from the
+        #    workflow's own bill-period: that one is the FWF's period, while the scope
+        #    wants the BLOB's bill_period_from, which is typically a month earlier.
+        - - name: reprocess-bills
+            templateRef:
+              { name: step-energy-reprocess-bills, template: reprocess }
+            arguments:
+              parameters:
+                - {
+                    name: external-account-number,
+                    value: "{{steps.select-gentrack.outputs.parameters.result}}",
+                  }
+                - { name: bill-ids, value: "{{inputs.parameters.bill-ids}}" }
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.assert-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.assert-namespace}}",
+                  }
+
+        # 6) ASSERT: every available bill for that gentrack account is processed, else
+        #    FAIL. Scoped to the whole account, so it is the wider check: reprocess
+        #    only waits on the bills it re-opened.
+        - - name: assert-bills-processed
+            templateRef:
+              { name: step-energy-assert-bills-processed, template: assert }
+            arguments:
+              parameters:
+                - {
+                    name: external-account-number,
+                    value: "{{steps.select-gentrack.outputs.parameters.result}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.assert-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.assert-namespace}}",
+                  }
+
+        # 7) SET-INVOICE-NUMBER: plan the number, then write it to both mongos (skipped
         #    by dry-run). Emits the plan — applied everywhere before the FWF is built.
         - - name: set-invoice-number
             templateRef:
@@ -257,7 +305,7 @@ spec:
                     upload share one Job, so this is the last boundary before
                     the bucket.
 
-        # 7) PRODUCE-FWF: fabricate + validate, then upload unless dry-run. The plan is
+        # 8) PRODUCE-FWF: fabricate + validate, then upload unless dry-run. The plan is
         #    the only input — it names the UW customer accounts (NOT the gentrack
         #    numbers, which are only for the assert above) and the number each was
         #    assigned, and is used verbatim as fabricate's input.
@@ -304,7 +352,7 @@ spec:
 
         # ── DRY RUN STOPS HERE: register + bill-run only run for a real bill ──
 
-        # 8) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
+        # 9) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
         - - name: register
             when: "{{inputs.parameters.dry-run}} != true"
             templateRef: { name: step-billing-graphql-call, template: call }
@@ -340,7 +388,7 @@ spec:
                     Create → Bill → Commit → Export → Fulfil; bill-run pauses again
                     before the irreversible Commit when validation-mode is attended.
 
-        # 9) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
+        # 10) BILL-RUN: Create → Bill → Commit → Export → Fulfil (segment = FWF name)
         - - name: bill-run
             when: "{{inputs.parameters.dry-run}} != true"
             templateRef: { name: step-billing-bill-run, template: main }
