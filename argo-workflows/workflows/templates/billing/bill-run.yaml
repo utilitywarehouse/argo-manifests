@@ -12,9 +12,14 @@
 #   Export   COMMITTED --update_segment(STATE_EXPORTING)--->  await EXPORTED (+produced/reported==total)
 #   Fulfil   EXPORTED  --set_segment_delivery_schedule + update_segment(STATE_FULFILLING)--> await FULFILLED
 #
-# SCOPE: starts from an uploaded FWF (its derived segment ids). `generate-bill.yaml`
-# is the account-number entrypoint that produces the FWF and hands off here. This
+# SCOPE: starts from an uploaded AND registered FWF. `generate-bill.yaml` is the
+# account-number entrypoint that produces the FWF and hands off here. This
 # template stays individually usable for re-running the pipeline.
+#
+# SEGMENT NAME vs ID. name = free text label (segment_groups.name). id = the
+# extract file's S3 object key, suffix included (segments.id). `segment-ids` is
+# the minted base name WITHOUT suffix, used as a PREFIX — the suffix is
+# data-dependent (.snappy / .migrated.snappy) and resolved at run time.
 #
 #   argo submit --from workflowtemplate/step-billing-bill-run \
 #     -p segment-name=UWCDATA1_D181225_T114259.052 \
@@ -45,8 +50,8 @@ spec:
   arguments:
     parameters:
       - { name: account-number } # for labels/traceability
-      - { name: segment-name } # name for create_segment; also resolves the segment id
-      - { name: segment-ids } # csv of FWF-derived segment ids fed to create_segment
+      - { name: segment-name } # free text label for the group; also resolves the group id
+      - { name: segment-ids } # minted FWF base name, no suffix; a PREFIX matched against list_segments
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       # attended -> pause for human validation before the irreversible Commit;
       # unattended -> run straight through (state polls still gate every stage)
@@ -75,7 +80,42 @@ spec:
           - { name: target-namespace, value: billing }
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       steps:
+        # ---- Resolve the segment FILE id -----------------------------------
+        # The id is the S3 key with a data-dependent suffix, so read it back
+        # rather than build it. list_segments returns UNGROUPED ids, so this
+        # also gates on the parser having ingested the file; `== 1` stops on
+        # ambiguity rather than grouping the wrong variant.
+        - - name: resolve-segment-file
+            templateRef: { name: step-billing-graphql-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: resolve-segment-file }
+                - {
+                    name: payload,
+                    value: '{"query":"{ list_segments { ids } }"}',
+                  }
+                - name: success-expr
+                  value: >-
+                    len(filter(response.body.data.list_segments.ids,
+                               {hasPrefix(#, "{{inputs.parameters.segment-ids}}")})) == 1
+                - { name: failure-expr, value: "response.body.errors != nil" }
+                - name: result-expr
+                  value: >-
+                    filter(response.body.data.list_segments.ids,
+                           {hasPrefix(#, "{{inputs.parameters.segment-ids}}")})[0]
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
         # ---- Create segment ------------------------------------------------
+        # create_segment returns emptypb.Empty — `success` is always null.
         - - name: create-segment
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
@@ -84,11 +124,8 @@ spec:
                 - name: payload
                   value: >-
                     {"query":"mutation($n:String,$ids:String){ create_segment(name:$n, segment_ids:$ids){ success error_message } }",
-                     "variables":{"n":"{{inputs.parameters.segment-name}}","ids":"{{inputs.parameters.segment-ids}}"}}
-                - {
-                    name: assert,
-                    value: "response.body.data.create_segment.success == true",
-                  }
+                     "variables":{"n":"{{inputs.parameters.segment-name}}","ids":"{{steps.resolve-segment-file.outputs.parameters.result}}"}}
+                - { name: assert, value: "response.body.errors == nil" }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
@@ -167,9 +204,10 @@ spec:
                   }
                 - { name: op-name, value: await-billed }
                 # Commit is gated on full production, same as the UI
+                # total > 0: an empty segment satisfies produced == total == 0
                 - {
                     name: extra-expr,
-                    value: ".stats.produced == .stats.total && .stats.reported == .stats.total",
+                    value: ".stats.total > 0 && .stats.produced == .stats.total && .stats.reported == .stats.total",
                   }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -234,6 +272,7 @@ spec:
                     value: "{{inputs.parameters.state-committed}}",
                   }
                 - { name: op-name, value: await-committed }
+                - { name: extra-expr, value: ".stats.total > 0" }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
@@ -284,9 +323,10 @@ spec:
                   }
                 - { name: op-name, value: await-exported }
                 # Fulfil/Schedule is gated on full production, same as the UI
+                # total > 0: an empty segment satisfies produced == total == 0
                 - {
                     name: extra-expr,
-                    value: ".stats.produced == .stats.total && .stats.reported == .stats.total",
+                    value: ".stats.total > 0 && .stats.produced == .stats.total && .stats.reported == .stats.total",
                   }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
@@ -337,6 +377,7 @@ spec:
                     value: "{{inputs.parameters.state-fulfilled}}",
                   }
                 - { name: op-name, value: await-fulfilled }
+                - { name: extra-expr, value: ".stats.total > 0" }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
