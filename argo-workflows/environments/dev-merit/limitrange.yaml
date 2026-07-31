@@ -5,13 +5,13 @@ metadata:
 spec:
   limits:
     - default:
-        cpu: 1000m
+        cpu: 2
         ephemeral-storage: 1Gi
-        memory: 64Mi
+        memory: 1Gi
       defaultRequest:
         cpu: 0m
         ephemeral-storage: 0
         memory: 0Mi
       max:
-        cpu: 6000m
+        cpu: 4
       type: Container
