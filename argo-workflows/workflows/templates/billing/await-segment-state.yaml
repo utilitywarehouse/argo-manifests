@@ -42,6 +42,7 @@ spec:
       - { name: target-namespace, value: billing }
       - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       - { name: timeout, value: 10m }
+      - { name: poll-interval, value: 5s }
   templates:
     - name: await
       inputs:
@@ -55,6 +56,7 @@ spec:
           - { name: target-namespace, value: billing }
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
           - { name: timeout, value: 10m }
+          - { name: poll-interval, value: 5s }
       steps:
         - - name: poll
             templateRef:
@@ -83,3 +85,7 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: poll-interval,
+                    value: "{{inputs.parameters.poll-interval}}",
+                  }

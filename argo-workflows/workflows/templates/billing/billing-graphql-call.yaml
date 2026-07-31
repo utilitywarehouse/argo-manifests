@@ -28,6 +28,11 @@
 # `response.body.errors != nil`. See qe-toolkit/executors pkg/expect for the
 # operators (any/all/filter/len/matches/in).
 #
+# POLLING. `timeout` is the deadline for the whole poll; `poll-interval` is the
+# gap between attempts (fixed, no backoff). activeDeadlineSeconds is derived from
+# `timeout` — keep it that way, or raising `timeout` leaves a stale deadline that
+# kills the pod mid-poll.
+#
 # AUTH: the bearer token is a short-lived token the submitter supplies (any
 # engineer can generate one) — passed as the `token` parameter, injected into the
 # Job as $TOKEN, and assembled into the Authorization header at runtime. It is
@@ -76,7 +81,7 @@ spec:
       - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
       - { name: log-level, value: info }
       - { name: timeout, value: 5m } # per-call deadline (covers the whole poll)
-      - { name: job-active-deadline, value: 7m } # backstop just beyond `timeout`
+      - { name: poll-interval, value: 5s } # gap between polls; poll mode only
       - { name: job-ttl, value: 24h } # keep finished Job for debug, then GC
 
   templates:
@@ -101,7 +106,7 @@ spec:
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 5m }
-          - { name: job-active-deadline, value: 7m }
+          - { name: poll-interval, value: 5s }
           - { name: job-ttl, value: 24h }
       outputs:
         # Surface the dispatched Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT)
@@ -141,7 +146,7 @@ spec:
                     kind: Job
                     spec:
                       backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['timeout']).Seconds()) + 120}}
                       ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
                         spec:
@@ -169,6 +174,7 @@ spec:
                                 - { name: RESULT_EXPR, value: "{{inputs.parameters.result-expr}}" }
                                 - { name: RESULT_PATH, value: /tmp/result }
                                 - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: POLL_INTERVAL, value: "{{=int(duration(inputs.parameters['poll-interval']).Seconds())}}" }
                                 - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
                                 # Short-lived, submitter-supplied bearer token (not a Secret).
                                 - { name: TOKEN, value: "{{inputs.parameters.token}}" }
