@@ -162,6 +162,7 @@ spec:
                               args:
                                 - |
                                   set -eu
+                                  export HEADERS="Authorization: Bearer ${TOKEN},Content-Type: application/json"
                                   /app/executor
                                   echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result 2>/dev/null || true)"
                               env:
