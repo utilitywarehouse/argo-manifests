@@ -8,9 +8,10 @@
 #   message   REQUIRED. What to verify before resuming, in the caller's words.
 #             Shows on the node's INPUTS panel, so the operator reads it on the
 #             node they are about to resume rather than in the template source.
-#   approve   Supplied at resume. The resume dialog renders its description and
-#             its yes/no enum, so a decision is recorded rather than a button
-#             clicked, and it lands in the workflow's outputs for the archive.
+#   approve   Defaulted to yes, supplied at resume. The resume dialog renders its
+#             description and its yes/no enum, so a decision is recorded rather
+#             than a button clicked, and it lands in the node's outputs for the
+#             archive. Callers do not pass it.
 #
 # ⚠️ `approve` is RECORDED, NOT ENFORCED — nothing reads it, so answering "no"
 # still lets the workflow continue. To make "no" actually stop the next step:
@@ -42,13 +43,20 @@ spec:
         parameters:
           - name: message
             description: What to verify before resuming this workflow
-      suspend: {}
-      outputs:
-        parameters:
           - name: approve
             description: >-
               Resume only once the checks in this node's `message` input pass.
               Pick no to record that they did not.
+            default: "yes"
+            enum: ["yes", "no"]
+      suspend: {}
+      outputs:
+        parameters:
+          - name: message
+            valueFrom:
+              supplied: {}
+            default: "{{inputs.parameters.message}}"
+          - name: approve
             valueFrom:
               supplied: {}
             default: "yes"

@@ -246,14 +246,16 @@ spec:
               parameters:
                 - name: message
                   value: >-
-                    BEFORE FABRICATE + UPLOAD — nothing has been written to the
-                    bill-extracts bucket yet. Check the plan on the
-                    set-invoice-number node: one line per account, each invoice
-                    number free and 9 digits, state changed|unchanged as expected.
-                    Resuming fabricates the FWF and, unless dry-run, uploads it.
-                    This is the last step boundary before the bucket — fabricate,
-                    validate and upload are containers in one Job, so there is no
-                    boundary between validate and upload to suspend at.
+                    BEFORE FABRICATE + UPLOAD — nothing is in the bill-extracts
+                    bucket yet, so the number below is still reusable.
+                    APPLIED PLAN (account / invoice number / state):
+                    {{steps.set-invoice-number.outputs.parameters.plan}}
+                    — `changed` = a new number was claimed, `unchanged` = the
+                    account's existing one was kept. Re-running from here reuses
+                    this number while no bill exists for it. Resuming fabricates
+                    the FWF and, unless dry-run, uploads it; fabricate/validate/
+                    upload share one Job, so this is the last boundary before
+                    the bucket.
 
         # 7) PRODUCE-FWF: fabricate + validate, then upload unless dry-run. The plan is
         #    the only input — it names the UW customer accounts (NOT the gentrack
