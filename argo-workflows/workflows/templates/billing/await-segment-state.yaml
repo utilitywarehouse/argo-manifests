@@ -91,7 +91,4 @@ spec:
                     name: poll-interval,
                     value: "{{inputs.parameters.poll-interval}}",
                   }
-                - {
-                    name: log-level,
-                    value: "{{inputs.parameters.log-level}}",
-                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
