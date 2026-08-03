@@ -43,6 +43,7 @@ spec:
       - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       - { name: timeout, value: 10m }
       - { name: poll-interval, value: 5s }
+      - { name: log-level, value: info }
   templates:
     - name: await
       inputs:
@@ -57,6 +58,7 @@ spec:
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
           - { name: timeout, value: 10m }
           - { name: poll-interval, value: 5s }
+          - { name: log-level, value: info }
       steps:
         - - name: poll
             templateRef:
@@ -89,3 +91,4 @@ spec:
                     name: poll-interval,
                     value: "{{inputs.parameters.poll-interval}}",
                   }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }

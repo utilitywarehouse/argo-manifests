@@ -57,6 +57,7 @@ spec:
           # finance-customer-account mongo (the eTag write)
           - { name: billing-cluster-name, value: dev-merit }
           - { name: billing-namespace, value: billing }
+          - { name: log-level, value: info }
       outputs:
         parameters:
           - name: plan # 'accountNumber<TAB>invoiceNumber<TAB>state', applied to both stores
@@ -67,6 +68,7 @@ spec:
             template: plan
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-numbers,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -84,6 +86,7 @@ spec:
             template: apply-invoice-id
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: plan,
                     value: "{{steps.plan.outputs.parameters.plan}}",
@@ -102,6 +105,7 @@ spec:
             template: apply-etag
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: plan,
                     value: "{{steps.plan.outputs.parameters.plan}}",

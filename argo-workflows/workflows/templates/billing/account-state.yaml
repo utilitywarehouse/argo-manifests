@@ -237,27 +237,35 @@ spec:
                                       FROM p, a, public.energy_platform_services s
                                       WHERE s.account_id = ANY(a.ids)
                                     )
-                                    SELECT CASE WHEN n.committed > 0 THEN 'true' ELSE 'false' END AS do_reset,
-                                           CASE WHEN n.committed > 0 OR e.eps_accounts < a.accounts
-                                                THEN 'true' ELSE 'false' END                     AS do_reprocess,
-                                           to_char(p.bill_run, 'YYYY-MM')                        AS bill_period,
-                                           to_char(p.bill_run - interval '1 month', 'YYYY-MM')   AS blob_period,
-                                           CASE WHEN e.eps_accounts < a.accounts THEN 'true' ELSE 'false' END AS energy_gap,
-                                           n.committed, n.existing, e.eps_accounts, e.eps_any, a.accounts
+                                    SELECT concat(
+                                             CASE WHEN n.committed > 0 THEN 'true' ELSE 'false' END, ':',
+                                             CASE WHEN n.committed > 0 OR e.eps_accounts < a.accounts
+                                                  THEN 'true' ELSE 'false' END, ':',
+                                             to_char(p.bill_run, 'YYYY-MM'), ':',
+                                             to_char(p.bill_run - interval '1 month', 'YYYY-MM'), ':',
+                                             CASE WHEN e.eps_accounts < a.accounts THEN 'true' ELSE 'false' END, ':',
+                                             n.committed, ':', n.existing, ':',
+                                             e.eps_accounts, ':', e.eps_any, ':', a.accounts
+                                           ) AS state
                                     FROM p, a, n, e"
                                   cat /tmp/out.csv
 
                                   row=$(tail -n 1 /tmp/out.csv)
-                                  do_reset=$(echo "$row"     | cut -d, -f1)
-                                  do_reprocess=$(echo "$row" | cut -d, -f2)
-                                  bill_period=$(echo "$row"  | cut -d, -f3)
-                                  blob_period=$(echo "$row"  | cut -d, -f4)
-                                  energy_gap=$(echo "$row"   | cut -d, -f5)
-                                  committed=$(echo "$row"    | cut -d, -f6)
-                                  existing=$(echo "$row"     | cut -d, -f7)
-                                  eps_accounts=$(echo "$row" | cut -d, -f8)
-                                  eps_any=$(echo "$row"      | cut -d, -f9)
-                                  accounts=$(echo "$row"     | cut -d, -f10)
+                                  do_reset=$(echo "$row"     | cut -d: -f1)
+                                  do_reprocess=$(echo "$row" | cut -d: -f2)
+                                  bill_period=$(echo "$row"  | cut -d: -f3)
+                                  blob_period=$(echo "$row"  | cut -d: -f4)
+                                  energy_gap=$(echo "$row"   | cut -d: -f5)
+                                  committed=$(echo "$row"    | cut -d: -f6)
+                                  existing=$(echo "$row"     | cut -d: -f7)
+                                  eps_accounts=$(echo "$row" | cut -d: -f8)
+                                  eps_any=$(echo "$row"      | cut -d: -f9)
+                                  accounts=$(echo "$row"     | cut -d: -f10)
+
+                                  case "$do_reset,$do_reprocess" in
+                                    true,true|true,false|false,true|false,false) ;;
+                                    *) echo "could not read the decision row from the query above (got [$row]) — refusing to guess at reset/reprocess"; exit 1 ;;
+                                  esac
 
                                   echo "accounts [$ACCTS]: bill run $bill_period, billing the period $blob_period"
                                   echo "bill_number for $blob_period: $existing row(s), $committed committed"
