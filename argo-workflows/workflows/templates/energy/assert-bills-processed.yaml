@@ -1,3 +1,32 @@
+# =============================================================================
+# assert-bills-processed — did the energy data for these bills reach billing?
+# =============================================================================
+# Both templates read public.billing_period_accounts in billing_adapter_db and
+# build the same scope; `assert` judges it, `snapshot` reads it out.
+#
+# SCOPE IS A PRECEDENCE — first one set wins, not a combination and not a range.
+# It must stay identical to reprocess-bills', or an assert judges rows the
+# re-send never touched, and a run that re-opened one bill fails because a
+# sibling in the same period is still unprocessed:
+#
+#   gentrack-bill-numbers  no such column; the number sits inside file_name
+#                          (BillJ40000010621_1.json), so `position(num in
+#                          file_name) > 0` — not equality, not LIKE (`_` is a
+#                          wildcard)
+#   bill-period            one month of the BLOB's bill_period_from, which runs a
+#                          month behind the bill-run month
+#   neither                every period the account has — the wider check, but
+#                          one unprocessable old blob then blocks a period that
+#                          is fine
+#
+# Naming numbers narrows what is judged as well as what is re-sent. That is the
+# point when re-billing one bill in isolation, and it is why it has to be an
+# explicit choice: nothing is then asserted about the rest of the period.
+#
+# `assert` only reads processed_at. It cannot see a reset that deleted billing's
+# energy rows and left these blobs marked processed — step-billing-account-state
+# checks for that, against the destination.
+# =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -6,9 +35,10 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       `assert` fails unless the account has at least one billing_period_accounts row
-      and every one is processed. `snapshot` is the same scope read out rather than
-      judged, for the state before a run. Both narrow to one bill period when
-      bill-period is given.
+      in scope and every one is processed. `snapshot` is the same scope read out
+      rather than judged, for the state before a run. Scope is a precedence, the
+      same one reprocess-bills uses: named gentrack bill numbers, else one bill
+      period, else every period the account has.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: energy
@@ -20,6 +50,7 @@ spec:
   arguments:
     parameters:
       - { name: external-account-number } # gentrack account number(s), comma-separated (e.g. J20000032681,J20000041234)
+      - { name: gentrack-bill-numbers, value: "" } # gentrack bill number(s), comma-separated (e.g. J40000010621); wins over bill-period
       - { name: bill-period, value: "" } # YYYY-MM of the BLOB's bill_period_from; empty => every period the account has
       - { name: cluster-name } # which cluster the energy RDS is reachable from
       - { name: target-namespace }
@@ -28,6 +59,7 @@ spec:
       inputs:
         parameters:
           - { name: external-account-number }
+          - { name: gentrack-bill-numbers, value: "" }
           - { name: bill-period, value: "" }
           - {
               name: connection-string,
@@ -92,16 +124,20 @@ spec:
                                 - |
                                   set -eu
                                   ACCTS="{{inputs.parameters.external-account-number}}"
+                                  BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
                                   PERIOD="{{inputs.parameters.bill-period}}"
 
-                                  # A period narrows this to the blobs one bill is built from. Empty
-                                  # asks about every period the account has — the wider check, but
-                                  # one unprocessable old blob then blocks a period that is fine.
-                                  SCOPE="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-                                  WHAT="every bill period"
-                                  if [ -n "$PERIOD" ]; then
-                                    SCOPE="$SCOPE AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
+                                  # ---- scope (keep identical to reprocess-bills and to `snapshot`) ----
+                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
+                                  if [ -n "$BILL_NUMBERS" ]; then
+                                    WHAT="gentrack bill numbers [$BILL_NUMBERS]"
+                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
+                                  elif [ -n "$PERIOD" ]; then
                                     WHAT="bill period $PERIOD"
+                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
+                                  else
+                                    WHAT="every bill period"
+                                    SCOPE="$ACCT_IN"
                                   fi
                                   echo "scope: accounts [$ACCTS], $WHAT"
 
@@ -133,6 +169,7 @@ spec:
       inputs:
         parameters:
           - { name: external-account-number }
+          - { name: gentrack-bill-numbers, value: "" }
           - { name: bill-period, value: "" }
           - {
               name: connection-string,
@@ -205,15 +242,21 @@ spec:
                                 - |
                                   set -eu
                                   ACCTS="{{inputs.parameters.external-account-number}}"
+                                  BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
                                   PERIOD="{{inputs.parameters.bill-period}}"
 
                                   # Scope kept identical to `assert` above, so this and the
                                   # verdict it later reaches are about the same set of rows.
-                                  SCOPE="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-                                  WHAT="every bill period"
-                                  if [ -n "$PERIOD" ]; then
-                                    SCOPE="$SCOPE AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
+                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
+                                  if [ -n "$BILL_NUMBERS" ]; then
+                                    WHAT="gentrack bill numbers [$BILL_NUMBERS]"
+                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
+                                  elif [ -n "$PERIOD" ]; then
                                     WHAT="bill period $PERIOD"
+                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
+                                  else
+                                    WHAT="every bill period"
+                                    SCOPE="$ACCT_IN"
                                   fi
                                   echo "adapter blobs snapshot: accounts [$ACCTS], $WHAT"
 
