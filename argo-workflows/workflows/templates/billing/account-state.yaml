@@ -313,11 +313,11 @@ spec:
                                   echo "energy services snapshot for [$ACCTS]"
 
                                   # One query for all accounts, split per account when printed.
-                                  # `= '<the whole list>'` on a uuid column errors, it does not
+                                  # `= '<the whole list>'` on a uuid text column errors, it does not
                                   # return nothing.
                                   /app/executor --format ndjson --output /tmp/snap/eps.ndjson --query "
                                     SELECT * FROM public.energy_platform_services
-                                    WHERE account_id IN (SELECT btrim(x)::uuid FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))
+                                    WHERE account_id IN (SELECT btrim(x)::uuid::text FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))
                                     ORDER BY account_id"
 
                                   for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
