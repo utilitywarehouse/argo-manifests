@@ -10,9 +10,9 @@
 #        │
 #   select-gentrack              → gentrack_account_numbers, comma-joined
 #        │
-#   check-rebill                 read-only: does this need a reset first?
+#   check-rebill                 read-only: reset needed? energy data missing?
 #        │
-#   snapshot                     verify only: what the other stores hold first
+#   snapshot                     verify only: what the adapter holds first
 #        │
 #   reset                        destructive: clear the last bill run
 #        │
@@ -42,44 +42,50 @@
 # `verify` is which, and it is false by default — the bill is identical either
 # way, so seven extra remote Jobs and a wait on the ledger are a choice.
 #
-# On, it snapshots the adapter's blobs and billing's energy services before
-# anything is deleted or re-sent, then (inside bill-run) the ledger and
-# BigQuery's transaction log either side of Commit and the finance one-liner
-# export after it. Every one is a snapshot, not a check: none can fail on what
-# it finds, so leaving verify on cannot turn a run red over the bill.
+# On, it snapshots the adapter's blobs before anything is re-sent, then (inside
+# bill-run) the ledger and BigQuery's transaction log either side of Commit and
+# the finance one-liner export after it. Every one is a snapshot, not a check:
+# none can fail on what it finds, so leaving verify on cannot turn a run red over
+# the bill. Billing's own energy rows need no verify gate — check-rebill logs them
+# on every run.
 #
-# There is no "this account should be untouched" mode. check-rebill knows whether
-# the account has been billed, but that is a fact about billing-rds and the
-# snapshots read other stores it does not imply — blobs and energy services both
-# exist without a bill ever having been produced.
+# There is no "this account should be untouched" mode. check-rebill knows what
+# billing holds, but that is a fact about billing-rds and the adapter's blobs are
+# another store it does not imply — a blob exists without a bill ever having been
+# produced.
 #
 # Pauses. All four are step-pause. The three above are unconditional — they
 # suspend on dry runs too, so a rehearsal walks the same gates as a real bill.
 # The fourth is bill-run's own, before the irreversible Commit, gated on
 # validation-mode.
 #
-# The gentrack numbers gate reprocess-bills and the assert only. produce-fwf,
+# The gentrack numbers scope reprocess-bills and the assert. produce-fwf,
 # register and bill-run key on the submitted UW account number: one account
 # maps to several gentrack numbers, and the FWF and its segment are per UW
 # account.
 #
-# Rebill. Reset and reprocess are one decision, taken from the account's state.
+# Rebill. Two decisions, taken at check-rebill from the account's own state:
 #
-#   auto (default)  run both only when a committed bill is holding the period
-#                   being billed — a committed bill number can be neither
-#                   reused nor deleted, which is the only thing that makes a
-#                   reset necessary
-#   force           run them regardless
-#   off             fail at check-rebill if they were needed
+#   committed bill for the period?  energy rows for it?  reset  reprocess
+#   no                              yes                  no     no
+#   no                              no                   no     YES
+#   yes                             either               YES    YES
 #
-# They share a gate because each is wrong without the other. Reset deletes the
-# energy data the bills were built from and leaves its blobs marked processed,
-# so nothing re-sends them: the next bill is fabricated with no energy lines
-# while the assert passes, "processed" being exactly what it checks.
-# reprocess-bills repairs that, and must run after reset, which would delete
-# what it re-creates. The other way round: without a reset the data is still in
-# billing-rds, so reprocess is a slow no-op over an RPC that walks every
-# migrated account.
+# Only a committed bill number earns a reset: it can be neither reused nor
+# deleted, and reset is destructive and NOT period-aware, so it deletes every
+# bill the account has. Reprocess only re-sends, so it also runs when billing
+# holds no energy data for the period — which is what a reset leaves behind (the
+# energy rows deleted, the blobs still marked processed, so nothing re-sends
+# them) and what a half-finished earlier run leaves behind. Nothing else catches
+# it: assert-bills-processed reads processed_at, in another database, which a
+# reset never clears.
+#
+#   auto (default)  apply the table
+#   force           run both regardless
+#   off             fail at check-rebill if either is due — a read-only preflight
+#
+# gentrack-bill-numbers is scope, never a trigger: it narrows which blobs a
+# re-send re-opens, and never decides whether one happens.
 #
 # Periods. bill-period is the bill-run month M; the bill covers [M-1, M),
 # because the composition engine subtracts a month from the bill-run date.
@@ -118,7 +124,7 @@ spec:
       - { name: validation-mode, value: attended } # attended pauses before Commit
       - { name: dry-run, value: "true" } # true => plan + fabricate + validate only; no deletes, mongo writes, upload, register or bill-run
       - { name: bill-period, value: "" } # YYYY-MM bill-RUN month; empty => current month. The bill covers the month BEFORE it
-      - { name: rebill, value: auto } # auto => reset+reprocess only if a committed bill blocks the period; force | off
+      - { name: rebill, value: auto } # auto => reset only if a committed bill blocks the period, reprocess also when billing has no energy data for it; force | off
       - { name: gentrack-bill-numbers, value: "" } # gentrack bill number(s) to re-send, comma-separated (e.g. J40000010621); empty => the period being billed
       - { name: engineer-visit, value: "false" }
       - { name: verify, value: "false" } # true => also observe the other systems (baselines, ledger snapshots, BigQuery, the finance export)
@@ -218,7 +224,9 @@ spec:
                   value: 'join(uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number)), ",")'
                 - { name: output-format, value: lines } # emit the comma-joined scalar
 
-        # 4) CHECK: read-only. Is a committed bill holding the period being billed?
+        # 4) CHECK: read-only. Is a committed bill holding the period being billed,
+        #    and does billing hold its energy data? Also logs every
+        #    energy_platform_services row the account has, before anything moves.
         - - name: check-rebill
             templateRef: { name: step-billing-account-state, template: check }
             arguments:
@@ -228,20 +236,28 @@ spec:
                     value: "{{inputs.parameters.account-numbers}}",
                   }
                 - {
+                    name: account-ids,
+                    value: "{{steps.resolve-account.outputs.parameters.account-id}}",
+                  }
+                - {
                     name: bill-period,
                     value: "{{inputs.parameters.bill-period}}",
                   }
                 - { name: rebill, value: "{{inputs.parameters.rebill}}" }
+                - {
+                    name: gentrack-bill-numbers,
+                    value: "{{inputs.parameters.gentrack-bill-numbers}}",
+                  }
 
-        # 4b) SNAPSHOT (verify only): what the two stores hold before anything is deleted
-        #     or re-sent. Two namespaces, no shared data, so one parallel group. The
-        #     ledger's own before/after lives in bill-run, either side of the Commit that
-        #     moves it.
+        # 4b) SNAPSHOT (verify only): what the adapter holds before anything is re-sent.
+        #     Here and not later because reprocess-bills clears processed_at — after it
+        #     the "before" is gone. The ledger's own before/after lives in bill-run,
+        #     either side of the Commit that moves it.
         #
-        #     Here and not later because reset and reprocess-bills are the steps that
-        #     change these answers — after them the "before" is gone.
+        #     Billing's side needs no step: check-rebill above logs every
+        #     energy_platform_services row on every run, verify or not.
         #
-        #     Neither asserts. See the header.
+        #     Does not assert. See the header. Same scope precedence as the assert below.
         - - name: adapter-blobs-snapshot
             when: "{{inputs.parameters.verify}} == true"
             templateRef:
@@ -251,6 +267,10 @@ spec:
                 - {
                     name: external-account-number,
                     value: "{{steps.select-gentrack.outputs.parameters.result}}",
+                  }
+                - {
+                    name: gentrack-bill-numbers,
+                    value: "{{inputs.parameters.gentrack-bill-numbers}}",
                   }
                 - {
                     name: bill-period,
@@ -265,34 +285,15 @@ spec:
                     value: "{{inputs.parameters.assert-namespace}}",
                   }
 
-          - name: energy-services-snapshot
-            when: "{{inputs.parameters.verify}} == true"
-            templateRef:
-              { name: step-billing-account-state, template: snapshot }
-            arguments:
-              parameters:
-                - {
-                    name: account-ids,
-                    value: "{{steps.resolve-account.outputs.parameters.account-id}}",
-                  }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.billing-cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.billing-namespace}}",
-                  }
-
         # 5) RESET: clear what a previous bill run left, so these accounts can be billed
         #    again. Both stores in parallel from dev-merit/billing; dry-run reports row
         #    counts instead of deleting.
         #
-        #    Skipped when nothing is blocking the period — reset is not period-aware, so
-        #    running it unconditionally deletes every bill an account has to clear a
-        #    period that was never occupied.
+        #    Gated on do-reset alone: reset is not period-aware, so only a committed bill
+        #    number holding the period — which can be neither reused nor deleted — is
+        #    worth deleting every bill the account has for.
         - - name: reset-bills-for-account
-            when: "{{steps.check-rebill.outputs.parameters.do-rebill}} == true"
+            when: "{{steps.check-rebill.outputs.parameters.do-reset}} == true"
             templateRef:
               { name: step-billing-reset, template: reset-bills-for-account }
             arguments:
@@ -311,19 +312,19 @@ spec:
                     value: "{{inputs.parameters.billing-namespace}}",
                   }
 
-        # 6) REPROCESS: reset has just deleted the energy data these bills were built
-        #    from, and its blobs are still marked processed — so re-open them and have
-        #    the adapter send them again. Minutes, not seconds: the RPC has no
+        # 6) REPROCESS: re-open the adapter's blobs and have it send them again, so
+        #    billing holds the period's energy data. Minutes, not seconds: the RPC has no
         #    per-account form and walks every migrated account.
         #
-        #    Same gate as reset, read the other way round: without a reset the data is
-        #    still in billing-rds, so re-sending it is a slow no-op.
+        #    Runs when the reset above has just deleted that data, and also when
+        #    check-rebill found billing holding none — the state a half-finished earlier
+        #    run leaves, which the assert below cannot see.
         #
         #    Scope: gentrack-bill-numbers wins when given; otherwise blob-period, the
         #    period the bill will carry — bill-period shifted back a month by
         #    check-rebill, not the bill-run month itself.
         - - name: reprocess-bills
-            when: "{{steps.check-rebill.outputs.parameters.do-rebill}} == true"
+            when: "{{steps.check-rebill.outputs.parameters.do-reprocess}} == true"
             templateRef:
               { name: step-energy-reprocess-bills, template: reprocess }
             arguments:
@@ -351,11 +352,17 @@ spec:
                     value: "{{inputs.parameters.assert-namespace}}",
                   }
 
-        # 7) ASSERT: the energy data for the period reached billing, else fail. Runs
+        # 7) ASSERT: the energy data for the period reached the adapter, else fail. Runs
         #    whether or not reprocess did — on a first bill it is the only thing between
-        #    an unprocessed blob and a bill with no energy lines. Scoped to blob-period:
-        #    an older period holding an unprocessable blob is not a reason to refuse to
-        #    bill this one.
+        #    an unprocessed blob and a bill with no energy lines.
+        #
+        #    Same scope precedence as reprocess above, so it judges the rows that were
+        #    actually re-sent: named numbers, else blob-period. An older period holding
+        #    an unprocessable blob is not a reason to refuse to bill this one.
+        #
+        #    It reads processed_at only, so it cannot see a reset that left the blobs
+        #    marked processed and billing's energy rows deleted — that is check-rebill's
+        #    job, against the destination.
         - - name: assert-bills-processed
             templateRef:
               { name: step-energy-assert-bills-processed, template: assert }
@@ -364,6 +371,10 @@ spec:
                 - {
                     name: external-account-number,
                     value: "{{steps.select-gentrack.outputs.parameters.result}}",
+                  }
+                - {
+                    name: gentrack-bill-numbers,
+                    value: "{{inputs.parameters.gentrack-bill-numbers}}",
                   }
                 - {
                     name: bill-period,
