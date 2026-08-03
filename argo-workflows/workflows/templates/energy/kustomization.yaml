@@ -18,11 +18,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      # step-energy-reprocess-bills needs the EXEC mode added in qe-toolkit
-      # 3b49015 — the un-process step is a write, and without it query-pg can
-      # only run the statement through a cursor, which Postgres refuses for an
-      # UPDATE. Bump this to the SHA CI publishes for that commit.
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:80b1439b0c21d5ae40fc7c600a89f142fe2274d9
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:35583c85d23d9fcbefc816f52c0ba92cef39ad6a
       - call-grpc=registry.uw.systems/dev-enablement/call-grpc:main
 generatorOptions:
   disableNameSuffixHash: true
