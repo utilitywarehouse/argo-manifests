@@ -12,6 +12,24 @@
 #   Export   COMMITTED --update_segment(STATE_EXPORTING)--->  await EXPORTED (+produced/reported==total)
 #   Fulfil   EXPORTED  --set_segment_delivery_schedule + update_segment(STATE_FULFILLING)--> await FULFILLED
 #
+# WHAT COMMIT DID, in the stores rather than in the segment — `verify` only, and
+# skipped entirely when account-ids is empty (a hand-submitted bill-run):
+#
+#   after BILLED      ledger-snapshot-before, transaction-log-before
+#   ── COMMIT ──
+#   after COMMITTED   ledger-snapshot-after, transaction-log-after
+#   after EXPORTED    export-file-snapshot
+#
+# Each pair is one template called twice, `phase` apart. None of them assert —
+# they print rows for a person to judge and go red only on a connection,
+# credentials or unreadable-volume error. The before-snapshots run ahead of
+# pause-before-commit so they are there to read while suspended; the after ones
+# wait `verify-wait` for their store to catch up, which is a delay, not a gate.
+#
+# The waits key on {{workflow.creationTimestamp.RFC3339}} — later than any
+# previous bill, earlier than this Commit. Without it a re-bill stops waiting
+# immediately, satisfied by the rows the LAST run wrote.
+#
 # SCOPE: starts from an uploaded AND registered FWF. `generate-bill.yaml` is the
 # account-number entrypoint that produces the FWF and hands off here. This
 # template stays individually usable for re-running the pipeline.
@@ -52,6 +70,8 @@ spec:
       - { name: account-number } # for labels/traceability
       - { name: segment-name } # free text label for the group; also resolves the group id
       - { name: segment-ids } # minted FWF base name, no suffix; a PREFIX matched against list_segments
+      - { name: verify, value: "false" } # true => also observe the ledger, BigQuery and the finance export
+      - { name: account-ids, value: "" } # account-platform UUID(s), comma-joined; the ledger and tx log key on them. Empty => no observing whatever verify says
       - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       # attended -> pause for human validation before the irreversible Commit;
       # unattended -> run straight through (state polls still gate every stage)
@@ -64,6 +84,8 @@ spec:
           - { name: account-number }
           - { name: segment-name }
           - { name: segment-ids }
+          - { name: verify, value: "false" }
+          - { name: account-ids, value: "" }
           - { name: token, value: "" }
           - { name: validation-mode, value: attended }
           - { name: delivery-type, value: "0" }
@@ -78,6 +100,10 @@ spec:
           - { name: state-fulfilled, value: STATE_FULFILLED }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
+          - { name: ledgers-namespace, value: ledgers }
+          # How long each after-snapshot waits for its store to catch up with
+          # Commit before dumping anyway. None fail when it runs out.
+          - { name: verify-wait, value: 10m }
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
       steps:
         # ---- Resolve the segment FILE id -----------------------------------
@@ -220,6 +246,54 @@ spec:
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
 
+        # ---- The stores as Commit finds them -------------------------------
+        # Ahead of the pause on purpose: on an attended run these are already in
+        # the graph to read while the workflow is suspended, and they are what the
+        # after-snapshots get compared against. Two namespaces, no shared data, so
+        # one parallel group. No waits — nothing is in flight yet.
+        - - name: ledger-snapshot-before
+            when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
+            templateRef:
+              { name: step-ledgers-ledger-snapshot, template: snapshot }
+            arguments:
+              parameters:
+                - {
+                    name: account-ids,
+                    value: "{{inputs.parameters.account-ids}}",
+                  }
+                - { name: phase, value: before }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.ledgers-namespace}}",
+                  }
+
+          - name: transaction-log-before
+            when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
+            templateRef:
+              {
+                name: step-billing-transaction-log-snapshot,
+                template: snapshot,
+              }
+            arguments:
+              parameters:
+                - {
+                    name: account-ids,
+                    value: "{{inputs.parameters.account-ids}}",
+                  }
+                - { name: phase, value: before }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
         # ---- Human validation gate (attended only) -------------------------
         - - name: pause-before-commit
             templateRef: { name: step-pause, template: pause }
@@ -231,8 +305,12 @@ spec:
                     BEFORE COMMIT — the segment is BILLED and Commit is
                     irreversible. Validate the bill totals and VAT against
                     Gentrack, and check the bill-adapter pod logs in
-                    dev-merit/billing for the success signals. Resuming moves the
-                    segment to STATE_COMMITTING and on through Export and Fulfil.
+                    dev-merit/billing for the success signals. The
+                    ledger-snapshot-before and transaction-log-before nodes hold
+                    those two stores as they stand now — the after-snapshots below
+                    Commit run the same queries again, so each pair diffs.
+                    Resuming moves the segment to STATE_COMMITTING and on through
+                    Export and Fulfil.
 
         # ---- Commit: BILLED -> STATE_COMMITTING -> await COMMITTED ---------
         - - name: commit
@@ -283,6 +361,69 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        - - name: ledger-snapshot-after
+            when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
+            templateRef:
+              { name: step-ledgers-ledger-snapshot, template: snapshot }
+            arguments:
+              parameters:
+                - {
+                    name: account-ids,
+                    value: "{{inputs.parameters.account-ids}}",
+                  }
+                - { name: phase, value: after }
+                # A delay, not a gate: give the ledger a chance to catch up with
+                # Commit so the dump is about this run rather than about the lag.
+                - {
+                    name: wait-for-entry,
+                    value: "{{inputs.parameters.verify-wait}}",
+                  }
+                - {
+                    name: since,
+                    value: "{{workflow.creationTimestamp.RFC3339}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.ledgers-namespace}}",
+                  }
+
+          - name: transaction-log-after
+            when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
+            templateRef:
+              {
+                name: step-billing-transaction-log-snapshot,
+                template: snapshot,
+              }
+            arguments:
+              parameters:
+                - {
+                    name: account-ids,
+                    value: "{{inputs.parameters.account-ids}}",
+                  }
+                - { name: phase, value: after }
+                # Same bargain as the ledger's: a delay so the dump is about this
+                # run, not a gate on it having happened.
+                - {
+                    name: wait-for-row,
+                    value: "{{inputs.parameters.verify-wait}}",
+                  }
+                - {
+                    name: since,
+                    value: "{{workflow.creationTimestamp.RFC3339}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
 
         # ---- Export: COMMITTED -> STATE_EXPORTING -> await EXPORTED --------
         - - name: export
@@ -338,6 +479,26 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
                 - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+
+        - - name: export-file-snapshot
+            when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
+            templateRef:
+              { name: step-billing-export-file-snapshot, template: snapshot }
+            arguments:
+              parameters:
+                - { name: match, value: "{{inputs.parameters.account-number}}" }
+                - {
+                    name: wait-for-record,
+                    value: "{{inputs.parameters.verify-wait}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
 
         # ---- Fulfil: EXPORTED -> schedule + STATE_FULFILLING -> await FULFILLED
         # One mutation, as the UI does it: set the delivery schedule AND move the

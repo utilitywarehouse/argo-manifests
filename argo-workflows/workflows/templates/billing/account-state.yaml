@@ -1,0 +1,345 @@
+# =============================================================================
+# account-state — what billing holds for an account, and what follows from it
+# =============================================================================
+# Read-only, two templates over one connection to billing-rds `bills`:
+#
+#   check     decides whether the destructive half of the pipeline has to run
+#   snapshot  dumps the rows a run is about to disturb, for review
+#
+# They share every connection parameter, which is why they live together; adding
+# another table to `snapshot` is one more query, not another template.
+#
+# `check`. Decides from the account's own state whether the destructive half of
+# the pipeline has to run, so billing an account does not require the operator to
+# know what state it is in.
+#
+# What blocks a re-bill. `bill_number` is unique on (account_number,
+# billing_period_start, billing_period_end), and committing a bill sets
+# `available = false`, after which prevent_unavailable_bill_number_delete refuses
+# to delete the row:
+#
+#   committed bill for the period    reset required
+#   uncommitted bill for the period  no reset — saveBillNumber replaces it
+#   no bill for the period           no reset
+#
+# Hence one question, about `available`, about one period.
+#
+# Reset and reprocess are one decision. Reset deletes the energy data the bills
+# were built from and leaves the adapter's blobs marked processed, so reset
+# without reprocess bills an account with no energy lines; reprocess without
+# reset re-sends data billing-rds already holds, over an RPC that walks every
+# migrated account. One `do-rebill` output drives both.
+#
+# Periods. `bill-period` is the bill-run month M; the bill covers [M-1, M),
+# because the composition engine subtracts a month from the bill-run date. Both
+# resolve here, from one input, so they cannot drift apart:
+#
+#   bill-period  M      → produce-fwf (every date in the FWF derives from it)
+#   blob-period  M - 1  → the bill's own period, the blobs to re-send, and the
+#                         bill_number lookup below
+#
+# An empty bill-period resolves to the current month in the same query as the
+# lookup — Postgres does the month arithmetic, not the shell.
+#
+# One result channel: exec-kube returns a single `result` parameter, so the three
+# values travel as one colon-delimited string and are split back out into named
+# outputs below. Keep the emit and the splits in step.
+#
+# Connection. billing-rds, password auth: a password-free DSN plus PGPASSWORD, as
+# step-billing-reset does it — the URL leaves the field the Secret fills.
+#
+# Reference-only: consumed by step-billing-bill-account via templateRef.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-account-state
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Read-only, against billing-rds. `check` reports
+      whether a committed bill blocks the period and therefore whether reset +
+      reprocess must run; `snapshot` dumps the energy_platform_services rows a
+      run is about to mutate. Consumed via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+spec:
+  entrypoint: check
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-numbers } # UW customer account number(s), comma-separated
+      - { name: bill-period, value: "" } # YYYY-MM bill-RUN month; empty => current month
+      - { name: rebill, value: auto } # auto | force | off
+  templates:
+    - name: check
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: bill-period, value: "" }
+          - { name: rebill, value: auto }
+          - {
+              name: pg-url,
+              value: "postgres://uw_admin@billing-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/bills?sslmode=require",
+            }
+          - { name: pg-secret, value: energy-vat-declaration-eqdb-loader }
+          - { name: pg-password-key, value: db.password }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: do-rebill
+            valueFrom:
+              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[0]"
+          - name: bill-period
+            valueFrom:
+              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[1]"
+          - name: blob-period
+            valueFrom:
+              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[2]"
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: check-rebill }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: check
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.account-numbers}}"
+                                  PERIOD="{{inputs.parameters.bill-period}}"
+                                  MODE="{{inputs.parameters.rebill}}"
+
+                                  # One query resolves both periods and counts the bill numbers. The
+                                  # LEFT JOIN keeps the row when an account has no bill number at all,
+                                  # which is the commonest answer and is not an error.
+                                  /app/executor --format csv --output /tmp/out.csv --query "
+                                    WITH p AS (
+                                      SELECT CASE WHEN '$PERIOD' = '' THEN date_trunc('month', now())::date
+                                                  ELSE to_date('$PERIOD', 'YYYY-MM') END AS bill_run
+                                    )
+                                    SELECT to_char(p.bill_run, 'YYYY-MM')                        AS bill_period,
+                                           to_char(p.bill_run - interval '1 month', 'YYYY-MM')   AS blob_period,
+                                           count(*) FILTER (WHERE b.available = false)           AS committed,
+                                           count(b.value)                                        AS existing
+                                    FROM p
+                                    LEFT JOIN public.bill_number b
+                                      ON b.account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))
+                                     AND b.billing_period_start >= (p.bill_run - interval '1 month')
+                                     AND b.billing_period_start <  p.bill_run
+                                    GROUP BY p.bill_run"
+                                  cat /tmp/out.csv
+
+                                  row=$(tail -n 1 /tmp/out.csv)
+                                  bill_period=$(echo "$row" | cut -d, -f1)
+                                  blob_period=$(echo "$row" | cut -d, -f2)
+                                  committed=$(echo "$row" | cut -d, -f3)
+                                  existing=$(echo "$row" | cut -d, -f4)
+
+                                  echo "accounts [$ACCTS]: bill run $bill_period, billing the period $blob_period"
+                                  echo "bill_number rows for $blob_period: $existing, of which $committed committed"
+
+                                  case "$MODE" in
+                                    force)
+                                      do_rebill=true
+                                      echo "rebill=force: reset + reprocess will run whatever the state"
+                                      ;;
+                                    off)
+                                      if [ "$committed" != "0" ]; then
+                                        echo "a committed bill already exists for $blob_period; its bill number cannot be reused or deleted, so this account cannot be billed for that period again without a reset"
+                                        echo "re-run with rebill=force — note reset is NOT period-aware and deletes EVERY bill the account has, not just $blob_period's"
+                                        exit 1
+                                      fi
+                                      do_rebill=false
+                                      echo "rebill=off and nothing committed for $blob_period: reset + reprocess skipped"
+                                      ;;
+                                    auto)
+                                      if [ "$committed" != "0" ]; then
+                                        do_rebill=true
+                                        echo "committed bill for $blob_period: reset + reprocess will run"
+                                      else
+                                        do_rebill=false
+                                        echo "no committed bill for $blob_period: reset + reprocess skipped"
+                                        if [ "$existing" != "0" ]; then
+                                          echo "($existing uncommitted bill number(s) for $blob_period — set-invoice-number replaces those in place, no reset needed)"
+                                        fi
+                                      fi
+                                      ;;
+                                    *)
+                                      echo "unknown rebill mode '$MODE'; want auto, force or off"
+                                      exit 1
+                                      ;;
+                                  esac
+
+                                  echo "ARGO_RESULT_OUTPUT=$do_rebill:$bill_period:$blob_period"
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: CONNECTION_STRING, value: "{{inputs.parameters.pg-url}}" }
+                                # The password the DSN leaves out; pgx reads PGPASSWORD when the
+                                # DSN carries none.
+                                - name: PGPASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.pg-secret}}
+                                      key: {{inputs.parameters.pg-password-key}}
+
+    # -------------------------------------------------------------------------
+    # snapshot — the rows `check` is about to authorise the destruction of.
+    #
+    # Not an assertion: these rows are written when the adapter SENDS energy data,
+    # not when a bill is produced, so their presence says nothing about whether the
+    # account has been billed. Keyed on account-ids (the account-platform UUIDs),
+    # not the account numbers `check` uses.
+    # -------------------------------------------------------------------------
+    - name: snapshot
+      inputs:
+        parameters:
+          - { name: account-ids } # account-platform UUID(s), comma-joined; billing keys these rows on them
+          - {
+              name: pg-url,
+              value: "postgres://uw_admin@billing-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/bills?sslmode=require",
+            }
+          - { name: pg-secret, value: energy-vat-declaration-eqdb-loader }
+          - { name: pg-password-key, value: db.password }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.billing.outputs.parameters.result}}"
+        artifacts:
+          - name: snapshot
+            from: "{{steps.billing.outputs.artifacts.result}}"
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: energy-services-snapshot }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: snapshot
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.account-ids}}"
+                                  mkdir -p /tmp/snap
+                                  echo "energy services snapshot for [$ACCTS]"
+
+                                  # One query for all accounts, split per account when printed.
+                                  # `= '<the whole list>'` on a uuid column errors, it does not
+                                  # return nothing.
+                                  /app/executor --format ndjson --output /tmp/snap/eps.ndjson --query "
+                                    SELECT * FROM public.energy_platform_services
+                                    WHERE account_id IN (SELECT btrim(x)::uuid FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))
+                                    ORDER BY account_id"
+
+                                  for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
+                                    echo
+                                    echo "-- energy_platform_services (account $ACCT) --"
+                                    if ! grep -F "$ACCT" /tmp/snap/eps.ndjson; then echo "(no rows)"; fi
+                                  done
+
+                                  # exec-kube captures this block as `result`, stripping it from
+                                  # the logs. Own directory, not a /tmp glob.
+                                  echo
+                                  echo ARGO_RESULT_BEGIN
+                                  cat /tmp/snap/eps.ndjson
+                                  echo ARGO_RESULT_END
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: CONNECTION_STRING, value: "{{inputs.parameters.pg-url}}" }
+                                # The password the DSN leaves out; pgx reads PGPASSWORD when the
+                                # DSN carries none.
+                                - name: PGPASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.pg-secret}}
+                                      key: {{inputs.parameters.pg-password-key}}

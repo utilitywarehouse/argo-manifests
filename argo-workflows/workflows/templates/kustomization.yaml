@@ -6,8 +6,9 @@ resources:
   - billing/
   - energy/
   - account/
+  - ledgers/
   - test/
 
 # Image tags are pinned per package: each subdirectory (shared/, billing/,
-# energy/, account/, test/) owns a <pkg>-image-versions ConfigMap and replaces
-# the images used by its own templates. Nothing to replace at this level.
+# energy/, account/, ledgers/, test/) owns a <pkg>-image-versions ConfigMap and
+# replaces the images used by its own templates. Nothing to replace at this level.

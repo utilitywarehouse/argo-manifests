@@ -12,12 +12,13 @@ BUILD_DIR ?= bin
 KUSTOMIZE ?= kustomize
 ARGO ?= argo
 CONFTEST ?= conftest
+YQ ?= yq
 # Pinned by mise, not fetched by npx: a floating prettier can reformat and turn CI
 # red with no change to the repo. --ignore-path is explicit because make runs it
 # from a package directory, where it would not find the repo-root .prettierignore.
 PRETTIER ?= prettier --ignore-path $(ROOT)/../.prettierignore
 
-TOOLS := $(KUSTOMIZE) $(ARGO) $(CONFTEST) $(firstword $(PRETTIER))
+TOOLS := $(KUSTOMIZE) $(ARGO) $(CONFTEST) $(YQ) $(firstword $(PRETTIER))
 
 MISE_TOML := $(ROOT)/../mise.toml
 

@@ -1,0 +1,562 @@
+# =============================================================================
+# reprocess-bills — re-open an account's billing blobs, re-send them, wait
+# =============================================================================
+# Runs after reset. Reset deletes the bills but the adapter still has their blobs
+# marked processed (billing_period_accounts.processed_at), so nothing re-sends
+# them: the next bill is fabricated with no energy lines and
+# assert-bills-processed passes anyway. This closes that gap.
+#
+#   unprocess  processed_at = NULL for the rows in scope; the adapter selects on
+#              `processed_at IS NULL AND validation_issues IS NULL`
+#   send       ValidateAndSendBillingData — a bill run re-submits those blobs
+#   await      poll until those rows are processed, failing fast on any issue
+#
+# The RPC takes an empty request and walks every migrated account, hence the
+# minutes. `processed_at IS NULL` is the only scoping there is.
+#
+# Scope. First one set wins — a precedence, not a combination, and not a range.
+# unprocess and await must evaluate it identically, or await polls for rows
+# unprocess never touched.
+#
+#   gentrack-bill-numbers  no such column; the number sits inside file_name
+#                          (BillJ40000010621_1.json), so `position(num in
+#                          file_name) > 0` — not equality, not LIKE (`_` is a
+#                          wildcard)
+#   bill-period            one month of the BLOB's bill_period_from, which runs a
+#                          month behind the bill-run month
+#   neither                max(bill_period_from) per account
+#
+# Reset is not period-aware: it deletes every bill the account has, so a narrow
+# scope leaves earlier periods deleted and not re-sent. Name their bill numbers
+# if they matter.
+#
+# unprocess clears processing_issues and validation_issues too, so anything
+# non-NULL after the send belongs to this run. Nothing resets processing_issues
+# on success. A row carrying validation_issues is excluded from the adapter's
+# query — its energy data is gone and nothing would re-send it — so clearing is
+# the only way that period comes back; it also re-admits blobs the adapter was
+# skipping, and a send fails per account, so one broken blob blocks that
+# account's healthy periods.
+#
+# Reference-only: consumed by step-billing-bill-account via templateRef.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-energy-reprocess-bills
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Un-processes an account's billing blobs,
+      triggers ValidateAndSendBillingData and waits for them to come back
+      processed. Run AFTER reset. Consumed via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: energy
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: energy-billing
+spec:
+  entrypoint: reprocess
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: external-account-number } # gentrack account number(s), comma-separated
+      - { name: gentrack-bill-numbers, value: "" } # e.g. J40000010621, comma-separated; found INSIDE file_name
+      - { name: bill-period, value: "" } # YYYY-MM of the BLOB's bill_period_from (see scope)
+      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
+      - { name: dry-run, value: "true" } # true => report the rows, change nothing, send nothing
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: energy-billing }
+  templates:
+    # -------------------------------------------------------------------------
+    # reprocess — the composite callers want; the parts still render as their
+    # own nodes in the graph.
+    # -------------------------------------------------------------------------
+    - name: reprocess
+      inputs:
+        parameters:
+          - { name: external-account-number }
+          - { name: gentrack-bill-numbers, value: "" }
+          - { name: bill-period, value: "" }
+          - { name: token, value: "" }
+          - { name: dry-run, value: "true" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: energy-billing }
+          - { name: send-timeout, value: 30m } # the whole-environment bill run
+          - { name: await-timeout, value: 20m } # then for the rows to settle
+      steps:
+        - - name: unprocess
+            template: unprocess
+            arguments:
+              parameters:
+                - {
+                    name: external-account-number,
+                    value: "{{inputs.parameters.external-account-number}}",
+                  }
+                - {
+                    name: gentrack-bill-numbers,
+                    value: "{{inputs.parameters.gentrack-bill-numbers}}",
+                  }
+                - {
+                    name: bill-period,
+                    value: "{{inputs.parameters.bill-period}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        # Skipped on a dry run: it writes to billing, not just to the adapter.
+        - - name: send
+            when: "{{inputs.parameters.dry-run}} != true"
+            template: send
+            arguments:
+              parameters:
+                - { name: token, value: "{{inputs.parameters.token}}" }
+                - { name: timeout, value: "{{inputs.parameters.send-timeout}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        # Also skipped on a dry run: nothing was sent, so this either passes
+        # vacuously or burns the timeout.
+        - - name: await
+            when: "{{inputs.parameters.dry-run}} != true"
+            template: await
+            arguments:
+              parameters:
+                - {
+                    name: external-account-number,
+                    value: "{{inputs.parameters.external-account-number}}",
+                  }
+                - {
+                    name: gentrack-bill-numbers,
+                    value: "{{inputs.parameters.gentrack-bill-numbers}}",
+                  }
+                - {
+                    name: bill-period,
+                    value: "{{inputs.parameters.bill-period}}",
+                  }
+                - {
+                    name: timeout,
+                    value: "{{inputs.parameters.await-timeout}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+    # -------------------------------------------------------------------------
+    # unprocess — clear processed_at for the rows in scope, so the adapter's next
+    # run picks the blobs up again.
+    #
+    # The one step here that writes, hence --exec: query-pg's default path
+    # streams through a server-side cursor, and DECLARE CURSOR takes only
+    # SELECT/VALUES. billing_adapter_role is the adapter's own user, the role
+    # that sets processed_at, so no extra grant is involved.
+    # -------------------------------------------------------------------------
+    - name: unprocess
+      inputs:
+        parameters:
+          - { name: external-account-number }
+          - { name: gentrack-bill-numbers, value: "" }
+          - { name: bill-period, value: "" }
+          - { name: dry-run, value: "true" }
+          - {
+              name: connection-string,
+              value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
+            }
+          - { name: dsn-secret, value: "" }
+          - { name: dsn-key, value: DB_DSN }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: energy-billing }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: billing-adapter-rds-user }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.energy-billing.outputs.parameters.result}}"
+      steps:
+        - - name: energy-billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: unprocess-bills }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        metadata:
+                          annotations:
+                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: unprocess
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.external-account-number}}"
+                                  BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
+                                  PERIOD="{{inputs.parameters.bill-period}}"
+
+                                  # ---- scope (keep identical to the await step) ----
+                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
+                                  if [ -n "$BILL_NUMBERS" ]; then
+                                    MODE="gentrack bill numbers [$BILL_NUMBERS]"
+                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
+                                  elif [ -n "$PERIOD" ]; then
+                                    MODE="bill period $PERIOD only (not $PERIOD onward)"
+                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
+                                  else
+                                    MODE="latest bill period per account only"
+                                    SCOPE="$ACCT_IN AND (external_account_number, bill_period_from) IN (SELECT external_account_number, max(bill_period_from) FROM public.billing_period_accounts WHERE $ACCT_IN GROUP BY external_account_number)"
+                                  fi
+                                  echo "scope: accounts [$ACCTS], $MODE"
+
+                                  # Every row in scope, listed the same on a dry run and a real one —
+                                  # the UPDATE reports a bare count, so this is the only record of
+                                  # them. Already-open rows stay in scope; the send needs those too.
+                                  EFFECT="CASE WHEN processed_at IS NOT NULL THEN 'reopen' ELSE 'already open' END || CASE WHEN validation_issues IS NOT NULL THEN ' + clear validation_issues' ELSE '' END || CASE WHEN processing_issues IS NOT NULL THEN ' + clear processing_issues' ELSE '' END"
+                                  /app/executor --query "SELECT external_account_number, bill_period_from, bill_period_to, file_name, processed_at, validation_issues, processing_issues, $EFFECT AS effect FROM public.billing_period_accounts WHERE $SCOPE ORDER BY external_account_number, bill_period_from" --format csv --output /tmp/rows.csv
+                                  echo "rows in scope:"; cat /tmp/rows.csv
+
+                                  # Counted separately, not by csv lines: a validation_issues value
+                                  # can carry a newline and would inflate them.
+                                  /app/executor --query "SELECT count(*) AS in_scope FROM public.billing_period_accounts WHERE $SCOPE" --format csv --output /tmp/count.csv
+                                  in_scope=$(tail -n 1 /tmp/count.csv)
+                                  if [ "$in_scope" = "0" ]; then
+                                    echo "no billing_period_accounts rows matched — check the gentrack account numbers and the scope above"
+                                    exit 1
+                                  fi
+
+                                  if [ "{{inputs.parameters.dry-run}}" = "true" ]; then
+                                    echo "dry-run: $in_scope row(s) would be re-opened and re-sent; nothing changed"
+                                    echo "ARGO_RESULT_OUTPUT=dry-run"
+                                    exit 0
+                                  fi
+
+                                  # All three, so anything non-NULL after the send is this run's
+                                  # verdict. See the header for what clearing them re-admits.
+                                  SET="processed_at = NULL, processing_issues = NULL, validation_issues = NULL, updated_at = now()"
+                                  /app/executor --exec --query "UPDATE public.billing_period_accounts SET $SET WHERE $SCOPE" --format csv --output /tmp/out.csv
+                                  affected=$(tail -n 1 /tmp/out.csv)
+                                  echo "un-processed $affected of $in_scope row(s) in scope"
+                                  echo "ARGO_RESULT_OUTPUT=$affected"
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - name: CONNECTION_STRING
+                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
+
+    # -------------------------------------------------------------------------
+    # send — ValidateAndSendBillingData on the billing-processor.
+    #
+    # The utils service is served by the billing-processor deployment (its
+    # PROCESS_UTILS_PORT), not billing-adapter-api. Both are :8090, which makes
+    # the wrong one look right.
+    #
+    # The RPC blocks for the whole bill run with no server-side deadline, so
+    # `timeout` is the only bound — and cancelling the client cancels the run.
+    # Keep it generous.
+    #
+    # A run already in flight is rejected with "billing run already in progress".
+    # It may have passed our accounts before we un-processed them, so we wait it
+    # out and ask again rather than trust it.
+    # -------------------------------------------------------------------------
+    - name: send
+      inputs:
+        parameters:
+          - { name: token, value: "" }
+          - { name: grpc-endpoint, value: "billing-processor:8090" }
+          - {
+              name: method,
+              value: "uw.energy.billing.billing_adapter.v1.BillingAdapterUtilsService/ValidateAndSendBillingData",
+            }
+          - { name: attempts, value: "5" } # re-asks after "already in progress"
+          - { name: retry-wait, value: "60" } # seconds between attempts
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: energy-billing }
+          - {
+              name: call-grpc-image,
+              value: "registry.uw.systems/dev-enablement/call-grpc:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 30m }
+          - { name: job-active-deadline, value: 35m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: energy-billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: send-billing-data }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: send
+                              image: {{inputs.parameters.call-grpc-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # Assembled in-shell so the token never lands in the rendered manifest.
+                                  export HEADERS="authorization: Bearer ${TOKEN}"
+                                  i=1
+                                  while :; do
+                                    echo "ValidateAndSendBillingData attempt $i/{{inputs.parameters.attempts}} — this walks every migrated account, not just ours"
+                                    # Redirected, not piped: `if cmd | tee` tests tee's exit status,
+                                    # so every failure would read as a success.
+                                    if /app/executor --output /tmp/send.json >/tmp/send.log 2>&1; then
+                                      cat /tmp/send.log
+                                      echo "bill run completed"
+                                      cat /tmp/send.json 2>/dev/null || true
+                                      echo "ARGO_RESULT_OUTPUT=sent"
+                                      exit 0
+                                    fi
+                                    cat /tmp/send.log
+                                    if ! grep -qi "already in progress" /tmp/send.log; then
+                                      echo "ValidateAndSendBillingData failed (see above)"
+                                      exit 1
+                                    fi
+                                    i=$((i+1))
+                                    if [ "$i" -gt "{{inputs.parameters.attempts}}" ]; then
+                                      echo "a bill run was in progress for every attempt; it may have passed our accounts before they were un-processed"
+                                      exit 1
+                                    fi
+                                    echo "a bill run is already in progress; waiting {{inputs.parameters.retry-wait}}s"
+                                    sleep {{inputs.parameters.retry-wait}}
+                                  done
+                              env:
+                                - { name: ADDRESS, value: "{{inputs.parameters.grpc-endpoint}}" }
+                                - { name: METHOD, value: "{{inputs.parameters.method}}" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                # Short-lived, submitter-supplied bearer token (not a Secret).
+                                - { name: TOKEN, value: "{{inputs.parameters.token}}" }
+
+    # -------------------------------------------------------------------------
+    # await — poll billing_adapter_db until the rows in scope are processed.
+    #
+    # Polls rather than asserts: the send may have been answered by a bill run
+    # someone else started, and a slow run stays visible.
+    #
+    # unprocess cleared all three columns, so anything found here is this run's.
+    # Leaves early on:
+    #   validation_issues  the blob was re-ingested mid-run and failed again. The
+    #                      adapter filters those rows out, so they can never flip
+    #   processing_issues  the send's own verdict on the blob
+    #   no rows in scope   the scope is wrong; waiting cannot fix it
+    # -------------------------------------------------------------------------
+    - name: await
+      inputs:
+        parameters:
+          - { name: external-account-number }
+          - { name: gentrack-bill-numbers, value: "" }
+          - { name: bill-period, value: "" }
+          - {
+              name: connection-string,
+              value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
+            }
+          - { name: dsn-secret, value: "" }
+          - { name: dsn-key, value: DB_DSN }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: energy-billing }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: billing-adapter-rds-user }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: poll-interval, value: "60" } # seconds between polls
+          - { name: timeout, value: 20m } # deadline for the whole poll
+          - { name: job-active-deadline, value: 25m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: energy-billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                # exec-kube must outlive the poll, or it stops managing the Job mid-wait.
+                - {
+                    name: timeout,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: await-bills-processed }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        metadata:
+                          annotations:
+                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: await
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.external-account-number}}"
+                                  BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
+                                  PERIOD="{{inputs.parameters.bill-period}}"
+
+                                  # ---- scope (keep identical to the unprocess step) ----
+                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
+                                  if [ -n "$BILL_NUMBERS" ]; then
+                                    MODE="gentrack bill numbers [$BILL_NUMBERS]"
+                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
+                                  elif [ -n "$PERIOD" ]; then
+                                    MODE="bill period $PERIOD only (not $PERIOD onward)"
+                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
+                                  else
+                                    MODE="latest bill period per account only"
+                                    SCOPE="$ACCT_IN AND (external_account_number, bill_period_from) IN (SELECT external_account_number, max(bill_period_from) FROM public.billing_period_accounts WHERE $ACCT_IN GROUP BY external_account_number)"
+                                  fi
+                                  echo "scope: accounts [$ACCTS], $MODE"
+
+                                  TALLY="SELECT concat(count(*), ':', count(*) FILTER (WHERE processed_at IS NULL), ':', count(*) FILTER (WHERE validation_issues IS NOT NULL), ':', count(*) FILTER (WHERE processing_issues IS NOT NULL)) AS tally FROM public.billing_period_accounts WHERE $SCOPE"
+
+                                  deadline=$(( $(date +%s) + {{=int(duration(inputs.parameters['timeout']).Seconds())}} ))
+                                  attempt=0
+                                  while :; do
+                                    attempt=$((attempt+1))
+                                    /app/executor --query "$TALLY" --format csv --output /tmp/out.csv
+                                    tally=$(tail -n 1 /tmp/out.csv)
+                                    total=$(echo "$tally" | cut -d: -f1)
+                                    unprocessed=$(echo "$tally" | cut -d: -f2)
+                                    invalid=$(echo "$tally" | cut -d: -f3)
+                                    failed=$(echo "$tally" | cut -d: -f4)
+                                    echo "poll $attempt: total=$total unprocessed=$unprocessed validation_issues=$invalid processing_issues=$failed"
+
+                                    if [ "$total" = "0" ]; then
+                                      echo "no billing_period_accounts rows in scope — nothing to wait for"
+                                      exit 1
+                                    fi
+                                    if [ "$invalid" != "0" ]; then
+                                      echo "$invalid row(s) carry validation_issues; the adapter will never select them, so they cannot become processed."
+                                      echo "unprocess cleared this column, and only a re-consume of the blob from S3 writes it, so these were re-ingested mid-run and re-failed validation — the issue is live, not stale."
+                                      /app/executor --query "SELECT external_account_number, bill_period_from, file_name, validation_issues FROM public.billing_period_accounts WHERE $SCOPE AND validation_issues IS NOT NULL" --format csv --output /tmp/bad.csv
+                                      cat /tmp/bad.csv
+                                      exit 1
+                                    fi
+                                    if [ "$failed" != "0" ]; then
+                                      echo "$failed row(s) came back with processing_issues from this run"
+                                      /app/executor --query "SELECT external_account_number, bill_period_from, file_name, processing_issues FROM public.billing_period_accounts WHERE $SCOPE AND processing_issues IS NOT NULL" --format csv --output /tmp/bad.csv
+                                      cat /tmp/bad.csv
+                                      exit 1
+                                    fi
+                                    if [ "$unprocessed" = "0" ]; then
+                                      echo "all $total bill(s) processed"
+                                      echo "ARGO_RESULT_OUTPUT=processed"
+                                      exit 0
+                                    fi
+                                    if [ "$(date +%s)" -ge "$deadline" ]; then
+                                      echo "timed out with $unprocessed of $total still unprocessed"
+                                      exit 1
+                                    fi
+                                    sleep {{inputs.parameters.poll-interval}}
+                                  done
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - name: CONNECTION_STRING
+                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}

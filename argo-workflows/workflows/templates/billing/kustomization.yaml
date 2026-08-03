@@ -9,6 +9,9 @@ resources:
   - bill-account.yaml
   - set-invoice-number.yaml
   - reset.yaml
+  - account-state.yaml
+  - transaction-log-snapshot.yaml
+  - export-file-snapshot.yaml
 
 # ---------------------------------------------------------------------------
 # Image pins for the billing/ package templates.
@@ -25,6 +28,11 @@ configMapGenerator:
       - set-invoice-number=registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification
       - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
       - select=registry.uw.systems/dev-enablement/select:main
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:35583c85d23d9fcbefc816f52c0ba92cef39ad6a
+      - query-bq=registry.uw.systems/dev-enablement/query-bq:41285549b18add7d5a556711b3ceca3635d6f2f7
+      # Not an executor — a shell, for the step that reads the finance one-liner
+      # export off its NFS volume. Nothing is run but find/grep/cut.
+      - shell=alpine:3.21
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -67,6 +75,37 @@ replacements:
       - select: { kind: WorkflowTemplate, name: step-billing-bill-account }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=select-image].value
+  - source:
+      {
+        kind: ConfigMap,
+        name: billing-image-versions,
+        fieldPath: data.query-pg,
+      }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-billing-account-state }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+  - source:
+      {
+        kind: ConfigMap,
+        name: billing-image-versions,
+        fieldPath: data.query-bq,
+      }
+    targets:
+      - select:
+          {
+            kind: WorkflowTemplate,
+            name: step-billing-transaction-log-snapshot,
+          }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-bq-image].value
+  - source:
+      { kind: ConfigMap, name: billing-image-versions, fieldPath: data.shell }
+    targets:
+      - select:
+          { kind: WorkflowTemplate, name: step-billing-export-file-snapshot }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=shell-image].value
   - source:
       {
         kind: ConfigMap,
