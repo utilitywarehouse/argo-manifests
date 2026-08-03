@@ -76,6 +76,7 @@ spec:
       # attended -> pause for human validation before the irreversible Commit;
       # unattended -> run straight through (state polls still gate every stage)
       - { name: validation-mode, value: attended }
+      - { name: log-level, value: info } # every step below and the tools they dispatch
 
   templates:
     - name: main
@@ -105,6 +106,7 @@ spec:
           # Commit before dumping anyway. None fail when it runs out.
           - { name: verify-wait, value: 10m }
           - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+          - { name: log-level, value: info }
       steps:
         # ---- Resolve the segment FILE id -----------------------------------
         # The id is the S3 key with a data-dependent suffix, so read it back
@@ -115,6 +117,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: resolve-segment-file }
                 - {
                     name: payload,
@@ -146,6 +149,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: create-segment }
                 - name: payload
                   value: >-
@@ -168,6 +172,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: resolve-segment }
                 - name: payload
                   value: '{"query":"{ read_segments { segments { id name state } } }"}'
@@ -196,6 +201,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: bill }
                 - name: payload
                   value: >-
@@ -220,6 +226,7 @@ spec:
               { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: segment-id,
                     value: "{{steps.resolve-segment.outputs.parameters.result}}",
@@ -257,6 +264,7 @@ spec:
               { name: step-ledgers-ledger-snapshot, template: snapshot }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-ids,
                     value: "{{inputs.parameters.account-ids}}",
@@ -280,6 +288,7 @@ spec:
               }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-ids,
                     value: "{{inputs.parameters.account-ids}}",
@@ -317,6 +326,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: commit }
                 - name: payload
                   value: >-
@@ -341,6 +351,7 @@ spec:
               { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: segment-id,
                     value: "{{steps.resolve-segment.outputs.parameters.result}}",
@@ -368,6 +379,7 @@ spec:
               { name: step-ledgers-ledger-snapshot, template: snapshot }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-ids,
                     value: "{{inputs.parameters.account-ids}}",
@@ -401,6 +413,7 @@ spec:
               }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-ids,
                     value: "{{inputs.parameters.account-ids}}",
@@ -430,6 +443,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: export }
                 - name: payload
                   value: >-
@@ -454,6 +468,7 @@ spec:
               { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: segment-id,
                     value: "{{steps.resolve-segment.outputs.parameters.result}}",
@@ -486,6 +501,7 @@ spec:
               { name: step-billing-export-file-snapshot, template: snapshot }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: match, value: "{{inputs.parameters.account-number}}" }
                 - {
                     name: wait-for-record,
@@ -507,6 +523,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: fulfil }
                 - name: payload
                   value: >-
@@ -529,6 +546,7 @@ spec:
               { name: step-billing-await-segment-state, template: await }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: segment-id,
                     value: "{{steps.resolve-segment.outputs.parameters.result}}",

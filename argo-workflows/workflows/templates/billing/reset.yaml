@@ -76,11 +76,13 @@ spec:
               name: crdb-dsn,
               value: "postgresql://root@cockroachdb-proxy:26257/bo?sslmode=verify-full",
             }
+          - { name: log-level, value: info }
       steps:
         - - name: reset-bills-for-account-rds
             template: reset-bills-for-account-rds
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-numbers,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -101,6 +103,7 @@ spec:
             template: reset-bills-for-account-crdb
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-numbers,
                     value: "{{inputs.parameters.account-numbers}}",

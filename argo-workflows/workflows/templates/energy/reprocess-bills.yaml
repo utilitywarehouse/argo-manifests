@@ -84,11 +84,13 @@ spec:
           - { name: target-namespace, value: energy-billing }
           - { name: send-timeout, value: 30m } # the whole-environment bill run
           - { name: await-timeout, value: 20m } # then for the rows to settle
+          - { name: log-level, value: info }
       steps:
         - - name: unprocess
             template: unprocess
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: external-account-number,
                     value: "{{inputs.parameters.external-account-number}}",
@@ -117,6 +119,7 @@ spec:
             template: send
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - { name: timeout, value: "{{inputs.parameters.send-timeout}}" }
                 - {
@@ -135,6 +138,7 @@ spec:
             template: await
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: external-account-number,
                     value: "{{inputs.parameters.external-account-number}}",

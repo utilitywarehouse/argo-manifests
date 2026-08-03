@@ -26,6 +26,7 @@ spec:
       - { name: gentrack-bill-numbers, value: "" } # which bills to re-open, comma-separated (e.g. J40000010621). Empty => the period being billed
       - { name: engineer-visit, value: "false" }
       - { name: verify, value: "false" } # true => also observe the ledger, BigQuery and the finance export around the bill. Same bill either way
+      - { name: log-level, value: info } # info | debug — one level for every step and every tool a step dispatches
   templates:
     - name: main
       inputs:
@@ -39,6 +40,7 @@ spec:
           - { name: gentrack-bill-numbers, value: "" }
           - { name: engineer-visit, value: "false" }
           - { name: verify, value: "false" }
+          - { name: log-level, value: info }
       steps:
         - - name: bill-account
             templateRef: { name: step-billing-bill-account, template: main }
@@ -68,3 +70,4 @@ spec:
                     value: "{{inputs.parameters.engineer-visit}}",
                   }
                 - { name: verify, value: "{{inputs.parameters.verify}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }

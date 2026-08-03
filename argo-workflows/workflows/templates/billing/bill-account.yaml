@@ -128,6 +128,7 @@ spec:
       - { name: gentrack-bill-numbers, value: "" } # gentrack bill number(s) to re-send, comma-separated (e.g. J40000010621); empty => the period being billed
       - { name: engineer-visit, value: "false" }
       - { name: verify, value: "false" } # true => also observe the other systems (baselines, ledger snapshots, BigQuery, the finance export)
+      - { name: log-level, value: info } # one level for the whole pipeline; reaches every dispatched tool
   templates:
     - name: main
       inputs:
@@ -141,6 +142,7 @@ spec:
           - { name: gentrack-bill-numbers, value: "" }
           - { name: engineer-visit, value: "false" }
           - { name: verify, value: "false" }
+          - { name: log-level, value: info }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
           - { name: energy-service-cluster-name, value: dev-merit }
@@ -171,6 +173,7 @@ spec:
               { name: step-account-resolve-account, template: resolve }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-number,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -194,6 +197,7 @@ spec:
               }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-id,
                     value: "{{steps.resolve-account.outputs.parameters.account-id}}",
@@ -223,6 +227,7 @@ spec:
                 - name: expr
                   value: 'join(uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number)), ",")'
                 - { name: output-format, value: lines } # emit the comma-joined scalar
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
         # 4) CHECK: read-only. Is a committed bill holding the period being billed,
         #    and does billing hold its energy data? Also logs every
@@ -231,6 +236,7 @@ spec:
             templateRef: { name: step-billing-account-state, template: check }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-numbers,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -264,6 +270,7 @@ spec:
               { name: step-energy-assert-bills-processed, template: snapshot }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: external-account-number,
                     value: "{{steps.select-gentrack.outputs.parameters.result}}",
@@ -298,6 +305,7 @@ spec:
               { name: step-billing-reset, template: reset-bills-for-account }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-numbers,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -329,6 +337,7 @@ spec:
               { name: step-energy-reprocess-bills, template: reprocess }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: external-account-number,
                     value: "{{steps.select-gentrack.outputs.parameters.result}}",
@@ -368,6 +377,7 @@ spec:
               { name: step-energy-assert-bills-processed, template: assert }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: external-account-number,
                     value: "{{steps.select-gentrack.outputs.parameters.result}}",
@@ -396,6 +406,7 @@ spec:
               { name: step-billing-set-invoice-number, template: set }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-numbers,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -446,6 +457,7 @@ spec:
             templateRef: { name: step-billing-produce-fwf, template: produce }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: invoice-map,
                     value: "{{steps.set-invoice-number.outputs.parameters.plan}}",
@@ -491,6 +503,7 @@ spec:
             templateRef: { name: step-billing-graphql-call, template: call }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: register-fwf }
                 - name: payload
                   value: '{"file":"{{steps.produce-fwf.outputs.parameters.filename}}.snappy"}'
@@ -527,6 +540,7 @@ spec:
             templateRef: { name: step-billing-bill-run, template: main }
             arguments:
               parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: account-number,
                     value: "{{inputs.parameters.account-numbers}}",
@@ -584,6 +598,7 @@ spec:
           - { name: expr }
           - { name: format, value: ndjson }
           - { name: output-format, value: json }
+          - { name: log-level, value: info }
       container:
         image: "{{inputs.parameters.select-image}}"
         env:
@@ -595,7 +610,7 @@ spec:
               name: OUTPUT_FORMAT,
               value: "{{inputs.parameters.output-format}}",
             }
-          - { name: LOG_LEVEL, value: debug }
+          - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
       outputs:
         parameters:
           - name: result
