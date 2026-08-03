@@ -99,20 +99,36 @@ deny contains msg if {
 	)
 }
 
-# A templated job-name is only unique if its discriminator varies per call.
+# What a call invokes. The discriminator only has to be unique per callee: the
+# rest of the job-name is a literal the callee owns, so two DIFFERENT callees
+# given the same value still produce different Job names
+# (ledger-snapshot-before vs transaction-log-before).
+callee_of(call) := c if {
+	c := sprintf("%s/%s", [call.templateRef.name, call.templateRef.template])
+}
+
+callee_of(call) := c if {
+	not call.templateRef
+	c := sprintf("(local)/%s", [call.template])
+}
+
+# A templated job-name is only unique if its discriminator varies per call to the
+# same callee.
 deny contains msg if {
 	some entry in templates
 	some param_name in discriminators
+	some callee in {callee_of(c) | some c in calls_of(entry.template)}
 	values := [v |
 		some call in calls_of(entry.template)
+		callee_of(call) == callee
 		v := param(call, param_name)
 		literal(v)
 	]
 	some v in values
 	count([x | some x in values; x == v]) > 1
 	msg := sprintf(
-		"%s/%s: passes %s=%q to more than one step; it names their Jobs, so they must differ",
-		[entry.wt.metadata.name, entry.template.name, param_name, v],
+		"%s/%s: passes %s=%q to more than one %s step; it names their Jobs, so they must differ",
+		[entry.wt.metadata.name, entry.template.name, param_name, v, callee],
 	)
 }
 

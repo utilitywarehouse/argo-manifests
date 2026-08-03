@@ -1,0 +1,185 @@
+# transaction-log-snapshot — dump the accounts' rows from BigQuery's committed
+# transaction log for review. Asserts nothing; only a credentials or query error
+# turns it red. Called either side of Commit, `phase` apart (it names the Job).
+#
+# One query for ALL accounts, split per account when printed: every BigQuery
+# query is billed, so per-account reading is not worth paying N times for.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-transaction-log-snapshot
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Read-only. Dumps the accounts' rows from
+      BigQuery's billing.committed_transaction_log for review — it asserts
+      nothing and fails only on a credentials or query error. Called either side
+      of Commit by step-billing-bill-run.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: snapshot
+  serviceAccountName: workflow-step-executor
+  templates:
+    - name: snapshot
+      inputs:
+        parameters:
+          - { name: account-ids } # account-platform UUID(s), comma-joined; the log keys on them
+          - { name: phase, value: manual } # before | after; only names the remote Job
+          - { name: wait-for-row, value: 0s } # wait this long for a row newer than `since`, then dump regardless
+          - { name: since, value: "1970-01-01T00:00:00Z" } # what "newer" means for the wait above
+          - { name: gcp-project-id, value: uw-finance-dev }
+          - {
+              name: table,
+              value: "uw-finance-dev.billing.committed_transaction_log",
+            }
+          - { name: gcp-secret, value: billing-finance-dev-bigquery-secrets }
+          - { name: gcp-secret-key, value: billing-dataset_gcp_service_account }
+          # query-bq's own default path; keep the mount and this in step.
+          - { name: gcp-secret-path, value: /app/secrets }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: query-bq-image,
+              value: "registry.uw.systems/dev-enablement/query-bq:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: poll-interval, value: "60" } # seconds between checks; each one is a billed query
+          # The Job's deadline and exec-kube's timeout are both composed from the
+          # wait above plus this buffer, so widening the wait cannot outlive them.
+          - { name: job-buffer, value: 5m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.billing.outputs.parameters.result}}"
+        artifacts:
+          - name: snapshot
+            from: "{{steps.billing.outputs.artifacts.result}}"
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                # exec-kube must outlive the wait, or it stops managing the Job.
+                - {
+                    name: timeout,
+                    value: "{{=string(duration(inputs.parameters['wait-for-row']) + duration(inputs.parameters['job-buffer']))}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                # Two snapshots run in one workflow, into one namespace — so the
+                # Job name has to carry which one this is.
+                - {
+                    name: job-name,
+                    value: "transaction-log-{{inputs.parameters.phase}}",
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int((duration(inputs.parameters['wait-for-row']) + duration(inputs.parameters['job-buffer'])).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          volumes:
+                            # Projected at query-bq's default GCP_SERVICE_ACCOUNT_PATH,
+                            # which is why no env var names it.
+                            - name: gcp-creds
+                              secret:
+                                secretName: {{inputs.parameters.gcp-secret}}
+                                items:
+                                  - key: {{inputs.parameters.gcp-secret-key}}
+                                    path: gcp-secret-account.json
+                          containers:
+                            - name: snapshot
+                              image: {{inputs.parameters.query-bq-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              volumeMounts:
+                                - name: gcp-creds
+                                  mountPath: {{inputs.parameters.gcp-secret-path}}
+                                  readOnly: true
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.account-ids}}"
+                                  PHASE="{{inputs.parameters.phase}}"
+                                  SINCE="{{inputs.parameters.since}}"
+                                  TABLE="{{inputs.parameters.table}}"
+                                  WAIT={{=int(duration(inputs.parameters['wait-for-row']).Seconds())}}
+                                  echo "committed transaction log snapshot ($PHASE) for account(s) [$ACCTS], table $TABLE"
+
+                                  # Backticks escaped: the project id's hyphens make them
+                                  # mandatory, and sh would otherwise run the table name.
+                                  SCOPE="account_id IN UNNEST(SPLIT('$ACCTS', ','))"
+
+                                  # A delay so the dump is about this run rather than the lag,
+                                  # not a gate: running out is not an error.
+                                  if [ "$WAIT" -gt 0 ]; then
+                                    echo "waiting up to ${WAIT}s for a row created at or after $SINCE"
+                                    deadline=$(( $(date +%s) + WAIT ))
+                                    while :; do
+                                      /app/executor --format csv --output /tmp/wait.csv \
+                                        --query "SELECT count(*) AS n FROM \`$TABLE\` WHERE $SCOPE AND created_time >= TIMESTAMP('$SINCE')"
+                                      n=$(tail -n 1 /tmp/wait.csv)
+                                      echo "  rows since $SINCE: $n"
+                                      if [ "$n" != "0" ]; then
+                                        break
+                                      fi
+                                      if [ $(date +%s) -ge $deadline ]; then
+                                        echo "  nothing arrived within ${WAIT}s — snapshotting anyway; read the empty dump below as the finding"
+                                        break
+                                      fi
+                                      sleep {{inputs.parameters.poll-interval}}
+                                    done
+                                  fi
+
+                                  /app/executor --format ndjson --output /tmp/txlog.ndjson \
+                                    --query "SELECT * FROM \`$TABLE\` WHERE $SCOPE ORDER BY account_id, created_time"
+
+                                  # Split per account: a uuid is long enough that a fixed
+                                  # substring cannot collide with another column's value.
+                                  for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
+                                    echo
+                                    echo "-- committed_transaction_log ($PHASE, account $ACCT) --"
+                                    if grep -F "$ACCT" /tmp/txlog.ndjson > /tmp/acct.ndjson 2>/dev/null && [ -s /tmp/acct.ndjson ]; then
+                                      cat /tmp/acct.ndjson
+                                      echo "rows: $(wc -l < /tmp/acct.ndjson | tr -d ' ')"
+                                    else
+                                      echo "(no rows)"
+                                    fi
+                                  done
+
+                                  # The same rows again, bracketed. exec-kube captures this
+                                  # block as `result` and strips it from the logs, so the
+                                  # readable dump above is not duplicated.
+                                  echo
+                                  echo ARGO_RESULT_BEGIN
+                                  cat /tmp/txlog.ndjson
+                                  echo ARGO_RESULT_END
+                              env:
+                                - { name: GCP_PROJECT_ID, value: {{inputs.parameters.gcp-project-id}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }

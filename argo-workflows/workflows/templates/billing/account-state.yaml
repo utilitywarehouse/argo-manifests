@@ -1,7 +1,15 @@
 # =============================================================================
-# check-rebill — does this account need resetting before it can be billed?
+# account-state — what billing holds for an account, and what follows from it
 # =============================================================================
-# Read-only. Decides from the account's own state whether the destructive half of
+# Read-only, two templates over one connection to billing-rds `bills`:
+#
+#   check     decides whether the destructive half of the pipeline has to run
+#   snapshot  dumps the rows a run is about to disturb, for review
+#
+# They share every connection parameter, which is why they live together; adding
+# another table to `snapshot` is one more query, not another template.
+#
+# `check`. Decides from the account's own state whether the destructive half of
 # the pipeline has to run, so billing an account does not require the operator to
 # know what state it is in.
 #
@@ -45,13 +53,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: step-billing-check-rebill
+  name: step-billing-account-state
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Read-only. Reports whether an account has a committed bill for the period
-      being billed, and therefore whether reset + reprocess have to run. Fails
-      when a reset is needed and rebill=off. Consumed via templateRef.
+      Do NOT submit from the UI. Read-only, against billing-rds. `check` reports
+      whether a committed bill blocks the period and therefore whether reset +
+      reprocess must run; `snapshot` dumps the energy_platform_services rows a
+      run is about to mutate. Consumed via templateRef.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
@@ -208,6 +217,121 @@ spec:
                                   esac
 
                                   echo "ARGO_RESULT_OUTPUT=$do_rebill:$bill_period:$blob_period"
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - { name: CONNECTION_STRING, value: "{{inputs.parameters.pg-url}}" }
+                                # The password the DSN leaves out; pgx reads PGPASSWORD when the
+                                # DSN carries none.
+                                - name: PGPASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.pg-secret}}
+                                      key: {{inputs.parameters.pg-password-key}}
+
+    # -------------------------------------------------------------------------
+    # snapshot — the rows `check` is about to authorise the destruction of.
+    #
+    # Not an assertion: these rows are written when the adapter SENDS energy data,
+    # not when a bill is produced, so their presence says nothing about whether the
+    # account has been billed. Keyed on account-ids (the account-platform UUIDs),
+    # not the account numbers `check` uses.
+    # -------------------------------------------------------------------------
+    - name: snapshot
+      inputs:
+        parameters:
+          - { name: account-ids } # account-platform UUID(s), comma-joined; billing keys these rows on them
+          - {
+              name: pg-url,
+              value: "postgres://uw_admin@billing-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/bills?sslmode=require",
+            }
+          - { name: pg-secret, value: energy-vat-declaration-eqdb-loader }
+          - { name: pg-password-key, value: db.password }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.billing.outputs.parameters.result}}"
+        artifacts:
+          - name: snapshot
+            from: "{{steps.billing.outputs.artifacts.result}}"
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: energy-services-snapshot }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: snapshot
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.account-ids}}"
+                                  mkdir -p /tmp/snap
+                                  echo "energy services snapshot for [$ACCTS]"
+
+                                  # One query for all accounts, split per account when printed.
+                                  # `= '<the whole list>'` on a uuid column errors, it does not
+                                  # return nothing.
+                                  /app/executor --format ndjson --output /tmp/snap/eps.ndjson --query "
+                                    SELECT * FROM public.energy_platform_services
+                                    WHERE account_id IN (SELECT btrim(x)::uuid FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))
+                                    ORDER BY account_id"
+
+                                  for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
+                                    echo
+                                    echo "-- energy_platform_services (account $ACCT) --"
+                                    if ! grep -F "$ACCT" /tmp/snap/eps.ndjson; then echo "(no rows)"; fi
+                                  done
+
+                                  # exec-kube captures this block as `result`, stripping it from
+                                  # the logs. Own directory, not a /tmp glob.
+                                  echo
+                                  echo ARGO_RESULT_BEGIN
+                                  cat /tmp/snap/eps.ndjson
+                                  echo ARGO_RESULT_END
                               env:
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
                                 - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }

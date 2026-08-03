@@ -12,6 +12,8 @@
 #        │
 #   check-rebill                 read-only: does this need a reset first?
 #        │
+#   snapshot                     verify only: what the other stores hold first
+#        │
 #   reset                        destructive: clear the last bill run
 #        │
 #   reprocess-bills              re-open the blobs, re-send them, wait
@@ -31,6 +33,25 @@
 #   PAUSE                        segment exists, nothing billed yet
 #        │
 #   bill-run                     Create → Bill → Commit → Export → Fulfil
+#                                  ├─ either side of Commit: the ledger and
+#                                  │  BigQuery's committed transaction log
+#                                  └─ after Export: the finance one-liner file
+#
+# VERIFY. Two kinds of run share this pipeline: one that just produces a bill,
+# and one that produces a bill to watch what the other systems do with it.
+# `verify` is which, and it is false by default — the bill is identical either
+# way, so seven extra remote Jobs and a wait on the ledger are a choice.
+#
+# On, it snapshots the adapter's blobs and billing's energy services before
+# anything is deleted or re-sent, then (inside bill-run) the ledger and
+# BigQuery's transaction log either side of Commit and the finance one-liner
+# export after it. Every one is a snapshot, not a check: none can fail on what
+# it finds, so leaving verify on cannot turn a run red over the bill.
+#
+# There is no "this account should be untouched" mode. check-rebill knows whether
+# the account has been billed, but that is a fact about billing-rds and the
+# snapshots read other stores it does not imply — blobs and energy services both
+# exist without a bill ever having been produced.
 #
 # Pauses. All four are step-pause. The three above are unconditional — they
 # suspend on dry runs too, so a rehearsal walks the same gates as a real bill.
@@ -100,6 +121,7 @@ spec:
       - { name: rebill, value: auto } # auto => reset+reprocess only if a committed bill blocks the period; force | off
       - { name: gentrack-bill-numbers, value: "" } # gentrack bill number(s) to re-send, comma-separated (e.g. J40000010621); empty => the period being billed
       - { name: engineer-visit, value: "false" }
+      - { name: verify, value: "false" } # true => also observe the other systems (baselines, ledger snapshots, BigQuery, the finance export)
   templates:
     - name: main
       inputs:
@@ -112,6 +134,7 @@ spec:
           - { name: rebill, value: auto }
           - { name: gentrack-bill-numbers, value: "" }
           - { name: engineer-visit, value: "false" }
+          - { name: verify, value: "false" }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
           - { name: energy-service-cluster-name, value: dev-merit }
@@ -124,6 +147,8 @@ spec:
           # the FWF, the eTag write, register and bill-run
           - { name: billing-cluster-name, value: dev-merit }
           - { name: billing-namespace, value: billing }
+          # the account's ledger — the baseline below and bill-run's post-commit check
+          - { name: ledgers-namespace, value: ledgers }
           - {
               name: billing-graphql-endpoint,
               value: "http://billing-graphql:8080/graphql",
@@ -195,7 +220,7 @@ spec:
 
         # 4) CHECK: read-only. Is a committed bill holding the period being billed?
         - - name: check-rebill
-            templateRef: { name: step-billing-check-rebill, template: check }
+            templateRef: { name: step-billing-account-state, template: check }
             arguments:
               parameters:
                 - {
@@ -207,6 +232,57 @@ spec:
                     value: "{{inputs.parameters.bill-period}}",
                   }
                 - { name: rebill, value: "{{inputs.parameters.rebill}}" }
+
+        # 4b) SNAPSHOT (verify only): what the two stores hold before anything is deleted
+        #     or re-sent. Two namespaces, no shared data, so one parallel group. The
+        #     ledger's own before/after lives in bill-run, either side of the Commit that
+        #     moves it.
+        #
+        #     Here and not later because reset and reprocess-bills are the steps that
+        #     change these answers — after them the "before" is gone.
+        #
+        #     Neither asserts. See the header.
+        - - name: adapter-blobs-snapshot
+            when: "{{inputs.parameters.verify}} == true"
+            templateRef:
+              { name: step-energy-assert-bills-processed, template: snapshot }
+            arguments:
+              parameters:
+                - {
+                    name: external-account-number,
+                    value: "{{steps.select-gentrack.outputs.parameters.result}}",
+                  }
+                - {
+                    name: bill-period,
+                    value: "{{steps.check-rebill.outputs.parameters.blob-period}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.assert-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.assert-namespace}}",
+                  }
+
+          - name: energy-services-snapshot
+            when: "{{inputs.parameters.verify}} == true"
+            templateRef:
+              { name: step-billing-account-state, template: snapshot }
+            arguments:
+              parameters:
+                - {
+                    name: account-ids,
+                    value: "{{steps.resolve-account.outputs.parameters.account-id}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
 
         # 5) RESET: clear what a previous bill run left, so these accounts can be billed
         #    again. Both stores in parallel from dev-merit/billing; dry-run reports row
@@ -452,6 +528,12 @@ spec:
                     name: segment-ids,
                     value: "{{steps.produce-fwf.outputs.parameters.filename}}",
                   }
+                - { name: verify, value: "{{inputs.parameters.verify}}" }
+                # What bill-run's ledger snapshots and BigQuery lookup key on.
+                - {
+                    name: account-ids,
+                    value: "{{steps.resolve-account.outputs.parameters.account-id}}",
+                  }
                 - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: validation-mode,
@@ -464,6 +546,10 @@ spec:
                 - {
                     name: target-namespace,
                     value: "{{inputs.parameters.billing-namespace}}",
+                  }
+                - {
+                    name: ledgers-namespace,
+                    value: "{{inputs.parameters.ledgers-namespace}}",
                   }
                 - {
                     name: endpoint,

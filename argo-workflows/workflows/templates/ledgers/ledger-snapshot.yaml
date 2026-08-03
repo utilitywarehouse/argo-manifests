@@ -1,0 +1,201 @@
+# ledger-snapshot — dump the accounts' ledgers for review. Asserts nothing; only
+# a connection or query error turns it red. Called either side of Commit, `phase`
+# apart (it names the remote Job, which must differ per dispatch).
+#
+# ⚠️ account-ids is a comma-joined STRING. `= '<the whole list>'` on a uuid column
+# errors ("invalid input syntax for type uuid"), it does not return nothing.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-ledgers-ledger-snapshot
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Read-only. Dumps the accounts' ledgers, balances, entries, service splits
+      and any rejections from ledgers-rds, for review — it asserts nothing and
+      fails only on a query error.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: ledgers
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: snapshot
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-ids } # account-platform UUID(s), comma-joined
+      - { name: phase, value: manual } # before | after; names the remote Job
+      - { name: wait-for-entry, value: 0s } # wait this long for an entry newer than `since`, then dump regardless
+      - { name: since, value: "1970-01-01T00:00:00Z" }
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: ledgers }
+
+  templates:
+    - name: snapshot
+      inputs:
+        parameters:
+          - { name: account-ids }
+          - { name: phase, value: manual }
+          - { name: wait-for-entry, value: 0s }
+          - { name: since, value: "1970-01-01T00:00:00Z" }
+          # The whole DSN is one Secret (as the ledgers DI cronjobs read it). It
+          # carries a password, so query-pg skips RDS IAM by itself.
+          - { name: connection-string, value: "" } # non-empty wins over dsn-secret
+          - { name: dsn-secret, value: rds-readonly }
+          - { name: dsn-key, value: dsn }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: ledgers }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: poll-interval, value: "20" }
+          # The Job's deadline and exec-kube's timeout are both composed from the
+          # wait above plus this buffer, so widening the wait cannot outlive them.
+          - { name: job-buffer, value: 5m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.ledgers.outputs.parameters.result}}"
+        artifacts:
+          - name: snapshot
+            from: "{{steps.ledgers.outputs.artifacts.result}}"
+      steps:
+        - - name: ledgers
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                # exec-kube must outlive the wait, or it stops managing the Job.
+                - {
+                    name: timeout,
+                    value: "{{=string(duration(inputs.parameters['wait-for-entry']) + duration(inputs.parameters['job-buffer']))}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: job-name,
+                    value: "ledger-snapshot-{{inputs.parameters.phase}}",
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int((duration(inputs.parameters['wait-for-entry']) + duration(inputs.parameters['job-buffer'])).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: snapshot
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.account-ids}}"
+                                  SINCE="{{inputs.parameters.since}}"
+                                  WAIT={{=int(duration(inputs.parameters['wait-for-entry']).Seconds())}}
+                                  mkdir -p /tmp/snap
+                                  echo "ledger snapshot ({{inputs.parameters.phase}}) for [$ACCTS]"
+
+                                  IN_ACCTS="IN (SELECT btrim(x)::uuid FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
+
+                                  # A delay so the dump is about this run rather than the lag,
+                                  # not a gate: running out is not an error.
+                                  if [ "$WAIT" -gt 0 ]; then
+                                    deadline=$(( $(date +%s) + WAIT ))
+                                    while :; do
+                                      /app/executor --format csv --output /tmp/wait.csv --query "
+                                        SELECT count(*) AS n
+                                        FROM public.ledger_entry le
+                                        JOIN public.ledger l ON l.id = le.ledger_id
+                                        WHERE l.account_id $IN_ACCTS AND le.created_at >= '$SINCE'"
+                                      n=$(tail -n 1 /tmp/wait.csv)
+                                      echo "entries since $SINCE: $n"
+                                      if [ "$n" != "0" ]; then break; fi
+                                      if [ $(date +%s) -ge $deadline ]; then
+                                        echo "none within ${WAIT}s — snapshotting anyway; the empty ledger_entry section is the finding"
+                                        break
+                                      fi
+                                      sleep {{inputs.parameters.poll-interval}}
+                                    done
+                                  fi
+
+                                  # One query per table for ALL accounts, split per account when
+                                  # printed. account_id is on every row so both the reading below
+                                  # and anything consuming the payload can separate them.
+                                  TABLES="ledger ledger_balance ledger_entry service_split_ledger rejected_entry ledger_creation_failure"
+                                  q() { /app/executor --query "$2" --format ndjson --output "/tmp/snap/$1.ndjson"; }
+
+                                  q ledger "SELECT 'ledger' AS _table, l.*
+                                    FROM public.ledger l
+                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, l.id"
+
+                                  q ledger_balance "SELECT 'ledger_balance' AS _table, l.account_id, lb.*
+                                    FROM public.ledger_balance lb
+                                    JOIN public.ledger l ON l.id = lb.ledger_id
+                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, lb.ledger_id"
+
+                                  q ledger_entry "SELECT 'ledger_entry' AS _table, l.account_id, le.*
+                                    FROM public.ledger_entry le
+                                    JOIN public.ledger l ON l.id = le.ledger_id
+                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, le.created_at, le.id"
+
+                                  q service_split_ledger "SELECT 'service_split_ledger' AS _table, l.account_id, sl.*
+                                    FROM public.service_split_ledger sl
+                                    JOIN public.ledger_entry le ON le.id = sl.ledger_entry_id
+                                    JOIN public.ledger l ON l.id = le.ledger_id
+                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, sl.created_at, sl.id"
+
+                                  q rejected_entry "SELECT 'rejected_entry' AS _table, re.*
+                                    FROM public.rejected_entry re
+                                    WHERE re.account_id $IN_ACCTS ORDER BY re.account_id, re.created_at"
+
+                                  q ledger_creation_failure "SELECT 'ledger_creation_failure' AS _table, f.*
+                                    FROM public.ledger_creation_failure f
+                                    WHERE f.account_id $IN_ACCTS ORDER BY f.account_id, f.failed_at"
+
+                                  for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
+                                    echo
+                                    echo "===== account $ACCT ====="
+                                    for t in $TABLES; do
+                                      echo "-- $t --"
+                                      if ! grep -F "$ACCT" "/tmp/snap/$t.ndjson"; then echo "(no rows)"; fi
+                                    done
+                                  done
+
+                                  # exec-kube captures this block as `result` and strips it from
+                                  # the logs. Own directory: an unscoped /tmp glob would sweep up
+                                  # anything a later query happens to leave there.
+                                  echo
+                                  echo ARGO_RESULT_BEGIN
+                                  cat /tmp/snap/*.ndjson
+                                  echo ARGO_RESULT_END
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - name: CONNECTION_STRING
+                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}

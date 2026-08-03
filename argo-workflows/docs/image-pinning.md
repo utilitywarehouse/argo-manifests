@@ -61,25 +61,15 @@ carrying the parameter; see [kustomize constraints](#kustomize-constraints).
 ## One ConfigMap per package
 
 Each subdirectory of `templates/` has a `<pkg>-image-versions` ConfigMap (a `local-config`
-generator, stripped from output) and its own `replacements`. The top-level
-`templates/kustomization.yaml` has none.
-
-| Package    | ConfigMap                | Pins                                                                                                     |
-| ---------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `shared/`  | `shared-image-versions`  | `data-orchestrator`, `data-adapter`, `call-grpc`, `exec-kube` (also feeds healthcheck's `kubectl-image`) |
-| `billing/` | `billing-image-versions` | `call-http`, `fwf` (`fabricate-migrated-fwf`)                                                            |
-| `energy/`  | `energy-image-versions`  | `query-pg`                                                                                               |
-| `account/` | `account-image-versions` | `query-pg` (duplicate of energy's, keep in sync)                                                         |
-| `test/`    | `test-image-versions`    | `select`                                                                                                 |
+generator, stripped from output) and its own `replacements`. The top-level `templates/kustomization.yaml` has none.
 
 A package pins the images its own templates use, wherever they are consumed —
 `kustomize build templates/<pkg>` resolves its own images.
 
 **Why not one global list.** Three kustomize facts force co-location: a generated ConfigMap
 cannot be referenced across sibling packages (collision on aggregation); the default
-load-restrictor forbids reading a shared `../` file; so each package generates its own. The
-one cross-package image, `query-pg` (used by `energy/` and `account/`), is pinned in both,
-flagged with a comment.
+load-restrictor forbids reading a shared `../` file; so each package generates its own. The one cross-package image, `query-pg` (used by `energy/`, `account/`, `billing/` and
+`ledgers/`), is pinned in each, flagged with a comment.
 
 ## Why `templates/` is enough
 
@@ -103,7 +93,7 @@ separately: `workflows/kustomization.yaml` bundles only `templates/`; each workf
 
 Edit the literal in the owning package's ConfigMap; it propagates to every environment on
 the next apply. Use a commit SHA for a promoted version; a branch tag is fine while
-validating in dev. For `query-pg`, update both `energy/` and `account/`.
+validating in dev. For `query-pg`, update `energy/`, `account/`, `billing/` and `ledgers/`.
 
 ### Per-environment overrides
 
@@ -116,7 +106,10 @@ that workflow only:
 workflowTemplateRef: { name: step-data-orchestrator-runner }
 arguments:
   parameters:
-    - { name: orchestrator-image, value: registry.uw.systems/dev-enablement/data-orchestrator:<sha> }
+    - {
+        name: orchestrator-image,
+        value: registry.uw.systems/dev-enablement/data-orchestrator:<sha>,
+      }
 ```
 
 Add it per-workflow only when needed; do not pre-wire it.
