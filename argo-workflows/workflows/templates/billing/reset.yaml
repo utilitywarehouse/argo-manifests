@@ -141,7 +141,7 @@ spec:
           # uw_admin's password, taken from the one workload that still connects as
           # it.
           - { name: pg-secret, value: uw-billing-secrets }
-          - { name: pg-password-key, value: postgres.password }
+          - { name: pg-password-key, value: uwadmin.password }
           - { name: rds-use-password-auth, value: "true" }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
