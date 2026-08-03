@@ -319,7 +319,6 @@ spec:
       inputs:
         parameters:
           - { name: token, value: "" }
-          - { name: grpc-endpoint, value: "billing-processor:8090" }
           - {
               name: method,
               value: "uw.energy.billing.billing_adapter.v1.BillingAdapterUtilsService/ValidateAndSendBillingData",
@@ -378,6 +377,14 @@ spec:
                               args:
                                 - |
                                   set -eu
+                                  # energy-billing does not expose a Service for billing-processor, so dial the pod.
+                                  SA=/var/run/secrets/kubernetes.io/serviceaccount
+                                  ip=$(SSL_CERT_FILE=$SA/ca.crt wget -qO- --header="Authorization: Bearer $(cat $SA/token)" \
+                                    "https://kubernetes.default.svc/api/v1/namespaces/$(cat $SA/namespace)/pods?labelSelector=app%3Dbilling-processor&fieldSelector=status.phase%3DRunning" \
+                                    | tr ',' '\n' | grep '"podIP"' | head -1 | cut -d'"' -f4 | cut -d/ -f1)
+                                  [ -n "$ip" ] || { echo "no Running billing-processor pod"; exit 1; }
+                                  export ADDRESS="$ip:8090"
+                                  echo "billing-processor at $ADDRESS"
                                   # Assembled in-shell so the token never lands in the rendered manifest.
                                   export HEADERS="authorization: Bearer ${TOKEN}"
                                   i=1
@@ -406,7 +413,6 @@ spec:
                                     sleep {{inputs.parameters.retry-wait}}
                                   done
                               env:
-                                - { name: ADDRESS, value: "{{inputs.parameters.grpc-endpoint}}" }
                                 - { name: METHOD, value: "{{inputs.parameters.method}}" }
                                 - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
                                 - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
