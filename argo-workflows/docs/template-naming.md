@@ -107,6 +107,10 @@ part of the name belongs to the callee and only the discriminator is passed in.
 
 **Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. The rendered name is `argo-<job-name>-<uid8>`, so keep `job-name` to a DNS-1123 slug of **49 characters or fewer** (63 − 5 − 1 − 8) and both halves always fit.
 
+A templated job-name is measured on what it resolves to, not on its literal half: `policy/job_names.rego` adds the longest value that can reach each interpolated parameter to the literal characters around it. `billing-bill-run-{{op-name}}` is therefore 37, not 17 — `resolve-segment-file` is the longest `op-name` any step passes. Values are collected from step arguments, `inputs.parameters` defaults, and the top-level `arguments` of a Workflow or CronWorkflow, since that is where the long ones tend to live (`system-key` is set on a CronWorkflow's `workflowSpec`, never on a step).
+
+The limit of that check: a parameter nothing supplies literally — typed into the submit form and nowhere else — cannot be bounded, so it is left out of the sum rather than guessed at. Those names are under-counted, never over-counted, so the check does not fire on a name that actually fits. Keep the literal half short enough to absorb a long value if the discriminator is free-text.
+
 ## The `argo-` prefix
 
 `step-executor-remote-namespace` prepends a literal `argo-` to every `job-name`, so a step passing `send-billing-data` produces the Job `argo-send-billing-data-773761c5` and the pod `argo-send-billing-data-773761c5-nxfwr`. Do not repeat the prefix in `job-name`.

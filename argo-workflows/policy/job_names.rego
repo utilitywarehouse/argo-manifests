@@ -88,6 +88,81 @@ deny contains msg if {
 	)
 }
 
+# Characters a job-name contributes outside its {{...}} expressions.
+literal_len(name) := count(regex.replace(name, `\{\{[^}]*\}\}`, ""))
+
+# The parameters a name interpolates. Same extraction as `discriminators`, but
+# per-name rather than over the whole corpus.
+refs_of(name) := {ref |
+	some m in regex.find_n(`inputs\.parameters(?:\.[a-z0-9-]+|\['[a-z0-9-]+'\])`, name, -1)
+	ref := regex.replace(m, `inputs\.parameters\.?\[?'?|'?\]?$`, "")
+}
+
+# Set on a step of the owning WorkflowTemplate (op-name goes to a local `cli`
+# template, never across a templateRef), or handed in by a caller referencing it.
+step_values(wt_name, ref) := {v |
+	some entry in templates
+	some call in calls_of(entry.template)
+	reaches(entry, call, wt_name)
+	v := param(call, ref)
+	literal(v)
+}
+
+reaches(entry, _, wt_name) if entry.wt.metadata.name == wt_name
+
+reaches(_, call, wt_name) if call.templateRef.name == wt_name
+
+# Defaults declared on the owning WorkflowTemplate's own templates.
+default_values(wt_name, ref) := {v |
+	some entry in templates
+	entry.wt.metadata.name == wt_name
+	some p in object.get(entry.template, ["inputs", "parameters"], [])
+	p.name == ref
+	v := p.value
+	literal(v)
+}
+
+# Top-level arguments on a WorkflowTemplate, Workflow or CronWorkflow — where the
+# submitted values live (system-key is set on a CronWorkflow's workflowSpec, not
+# on any step). Not scoped to a WorkflowTemplate: what these feed is not traceable
+# from the document alone, so they are treated as reaching anything.
+top_level_values(ref) := {v |
+	some doc in input
+	some spec in [
+		object.get(doc.contents, "spec", {}),
+		object.get(doc.contents, ["spec", "workflowSpec"], {}),
+	]
+	some p in object.get(spec, ["arguments", "parameters"], [])
+	p.name == ref
+	v := p.value
+	literal(v)
+}
+
+# Longest value that can reach `ref`. Undefined when nothing literal does, which
+# leaves that ref unbounded — a job-name whose discriminator is only ever typed at
+# submit time cannot be bounded here, and is skipped rather than guessed at.
+max_arg_len(wt_name, ref) := max([count(v) |
+	some v in (step_values(wt_name, ref) | default_values(wt_name, ref)) | top_level_values(ref)
+])
+
+# A templated job-name is only as long as what gets substituted into it, which is
+# known: the callers are all in this corpus. sprig.replace is length-preserving,
+# so a sanitised ref still counts its raw value.
+#
+# Refs no caller supplies literally drop out of the sum, so this under-counts
+# rather than over-counts — it never fires on a name that actually fits.
+deny contains msg if {
+	some d in dispatches
+	not literal(d.name)
+	lens := [l | some ref in refs_of(d.name); l := max_arg_len(split(d.owner, "/")[0], ref)]
+	worst := literal_len(d.name) + sum(lens)
+	worst > max_len
+	msg := sprintf(
+		"%s: job-name %q resolves to %d chars at its longest (%d literal + %d substituted), over the %d limit; exec-kube truncates silently",
+		[d.owner, d.name, worst, literal_len(d.name), sum(lens), max_len],
+	)
+}
+
 # The failure this convention exists to prevent.
 deny contains msg if {
 	some d in dispatches
