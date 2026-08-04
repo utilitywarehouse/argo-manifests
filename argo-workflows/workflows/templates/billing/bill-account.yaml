@@ -1,8 +1,8 @@
 # =============================================================================
 # bill-account - by uw account number
 # =============================================================================
-# Given a customer account number and a short-lived token, derive everything
-# and run the pipeline to completion:
+# Given a customer account number, derive everything and run the pipeline to
+# completion
 #
 #   resolve-account              account-number → account_id
 #        │
@@ -120,7 +120,6 @@ spec:
   arguments:
     parameters:
       - { name: account-numbers } # UW customer account number(s), comma-separated; the same logic bills one or many
-      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       - { name: validation-mode, value: attended } # attended pauses before Commit
       - { name: dry-run, value: "true" } # true => plan + fabricate + validate only; no deletes, mongo writes, upload, register or bill-run
       - { name: bill-period, value: "" } # YYYY-MM bill-RUN month; empty => current month. The bill covers the month BEFORE it
@@ -134,7 +133,6 @@ spec:
       inputs:
         parameters:
           - { name: account-numbers }
-          - { name: token, value: "" }
           - { name: validation-mode, value: attended }
           - { name: dry-run, value: "false" }
           - { name: bill-period, value: "" }
@@ -157,10 +155,6 @@ spec:
           - { name: billing-namespace, value: billing }
           # the account's ledger — the baseline below and bill-run's post-commit check
           - { name: ledgers-namespace, value: ledgers }
-          - {
-              name: billing-graphql-endpoint,
-              value: "http://billing-graphql:8080/graphql",
-            }
           - {
               name: uploader-endpoint,
               value: "http://billing-bill-extracts-s3-uploader:80/api/2.0/fwf",
@@ -350,7 +344,6 @@ spec:
                     name: bill-period,
                     value: "{{steps.check-rebill.outputs.parameters.blob-period}}",
                   }
-                - { name: token, value: "{{inputs.parameters.token}}" }
                 - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
                 - {
                     name: cluster-name,
@@ -498,9 +491,11 @@ spec:
         # ── DRY RUN STOPS HERE: register + bill-run only run for a real bill ──
 
         # 10) REGISTER: tell the s3-uploader about the uploaded FWF (POST {"file": "<name>.snappy"})
+        # The uploader authenticates no-one, so use-iam stays off and no token
+        # is involved: Notify's body is empty, the status is the only signal.
         - - name: register
             when: "{{inputs.parameters.dry-run}} != true"
-            templateRef: { name: step-billing-graphql-call, template: call }
+            templateRef: { name: step-http-call, template: call }
             arguments:
               parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
@@ -517,7 +512,7 @@ spec:
                     value: "{{inputs.parameters.billing-namespace}}",
                   }
                 - {
-                    name: endpoint,
+                    name: url,
                     value: "{{inputs.parameters.uploader-endpoint}}",
                   }
 
@@ -559,7 +554,8 @@ spec:
                     name: account-ids,
                     value: "{{steps.resolve-account.outputs.parameters.account-id}}",
                   }
-                - { name: token, value: "{{inputs.parameters.token}}" }
+                # No token: bill-run goes straight to billing-orchestrator,
+                # which authenticates no-one.
                 - {
                     name: validation-mode,
                     value: "{{inputs.parameters.validation-mode}}",
@@ -575,10 +571,6 @@ spec:
                 - {
                     name: ledgers-namespace,
                     value: "{{inputs.parameters.ledgers-namespace}}",
-                  }
-                - {
-                    name: endpoint,
-                    value: "{{inputs.parameters.billing-graphql-endpoint}}",
                   }
 
     # -------------------------------------------------------------------------

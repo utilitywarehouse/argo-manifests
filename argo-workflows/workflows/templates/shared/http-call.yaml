@@ -1,0 +1,214 @@
+# =============================================================================
+# http-call — one HTTP request against a service in another namespace
+# =============================================================================
+# A one-pod Job running the `call-http` executor, dispatched via
+# step-executor-remote-namespace into the namespace where the target runs — the
+# Argo controller cannot reach those services itself. The gRPC twin is
+# step-grpc-call: same parameters, same predicates, same auth.
+#
+# Predicates are expr over `response.{status, ok, headers, body, messages, raw}`:
+#
+#   success-expr  poll the request until true     (omit for a fire-once call)
+#   failure-expr  bail early when true            (poll mode only)
+#   assert        assert once, no polling         (excludes success-expr)
+#   result-expr   capture a value -> step `result`
+#
+# With `assert` unset the call still requires response.ok, so a 4xx/5xx fails by
+# default. Operators (any/all/filter/len/matches/in): qe-toolkit/executors/call-http.
+#
+# `timeout` bounds the whole poll and, +2m, the Job — keep them tied, or raising
+# one leaves a stale deadline that kills the pod mid-poll. `poll-interval` is
+# fixed, no backoff.
+#
+# AUTH, composable: `use-iam` for a machine principal minted from the Job pod's
+# ServiceAccount (needs iam-machine-api reachable by the runner-sa); `token` for
+# a user principal, kept a parameter not a Secret because it is ephemeral, and
+# assembled in-shell so it never lands in the rendered manifest; neither if the
+# target authenticates no-one. Content-Type is left alone — call-http defaults it
+# to application/json whenever there is a body.
+#
+# Reference-only: consumed via templateRef.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-http-call
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. One HTTP request/poll against a service,
+      dispatched as a Job into its namespace. Consumed via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
+spec:
+  entrypoint: call
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: op-name } # names the Job; unique across the whole run
+      - { name: url } # e.g. http://svc.namespace:8080/api/v1/thing
+      - { name: method, value: POST }
+      - { name: payload, value: "" } # request body; empty sends none
+      - { name: success-expr, value: "" } # poll until true; empty => fire once
+      - { name: failure-expr, value: "" } # bail early when true; poll mode only
+      - { name: assert, value: "" } # assert-once alternative to success-expr
+      - { name: assert-message, value: "" } # failure message; {expr} segments interpolated
+      - { name: result-expr, value: "" } # value to capture -> step `result` output
+      - { name: use-iam, value: "false" }
+      - { name: token, value: "" }
+      - { name: extra-headers, value: "" } # comma-separated `name: value`
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace } # no default: this template has no domain
+      # call-http-image is a template input only (below): pinned by the
+      # image-versions ConfigMap, not settable from the UI.
+      - { name: insecure-skip-verify, value: "false" } # https targets only
+      - { name: wait-for-ready, value: "true" } # wait for the TCP transport first
+      - { name: runner-sa, value: default } # pod identity in the target ns
+      - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
+      - { name: log-level, value: info }
+      - { name: timeout, value: 5m } # per-call deadline (covers the whole poll)
+      - { name: poll-interval, value: 5s } # gap between polls; poll mode only
+      - { name: job-ttl, value: 24h } # keep finished Job for debug, then GC
+
+  templates:
+    - name: call
+      inputs:
+        parameters:
+          - { name: op-name }
+          - { name: url }
+          - { name: method, value: POST }
+          - { name: payload, value: "" }
+          - { name: success-expr, value: "" }
+          - { name: failure-expr, value: "" }
+          - { name: assert, value: "" }
+          - { name: assert-message, value: "" }
+          - { name: result-expr, value: "" }
+          - { name: use-iam, value: "false" }
+          - { name: token, value: "" }
+          - { name: extra-headers, value: "" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace }
+          - {
+              name: call-http-image,
+              value: "registry.uw.systems/dev-enablement/call-http:main",
+            }
+          - { name: insecure-skip-verify, value: "false" }
+          - { name: wait-for-ready, value: "true" }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: poll-interval, value: 5s }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        # The Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT), so
+        # callers can thread ids between stages.
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.call.outputs.parameters.result}}"
+      steps:
+        # Not named for the namespace, as domain templates are — this one cannot
+        # know it. The caller's own step name carries that.
+        - - name: call
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                # op-name is the ONLY discriminator: job_names.rego rejects a
+                # job-name built from two parameters, since the shared half then
+                # repeats across calls to this template.
+                - {
+                    name: job-name,
+                    value: "http-call-{{inputs.parameters.op-name}}",
+                  }
+                # Job manifest as a string; Argo substitutes before exec-kube
+                # creates it. No `metadata:` — exec-kube discards it and names the
+                # Job from job-name above.
+                #
+                # The shell body carries no {{...}} of its own: everything it
+                # branches on arrives as an env var, which keeps interpolated
+                # values in |- block scalars where a quote cannot break the
+                # manifest. See docs/template-naming.md.
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['timeout']).Seconds()) + 120}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: call
+                              image: {{inputs.parameters.call-http-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # Only when supplied: an empty token must not send a bare
+                                  # "Bearer " at a target that authenticates no-one.
+                                  if [ -n "${TOKEN:-}" ]; then
+                                    export HEADERS="authorization: Bearer ${TOKEN}${EXTRA_HEADERS:+,$EXTRA_HEADERS}"
+                                  elif [ -n "${EXTRA_HEADERS:-}" ]; then
+                                    export HEADERS="$EXTRA_HEADERS"
+                                  fi
+                                  /app/executor
+                                  # Only when asked for: with RESULT_EXPR empty the executor
+                                  # writes the whole body, which can be multi-line and would
+                                  # corrupt the result capture.
+                                  if [ -n "${RESULT_EXPR:-}" ]; then
+                                    echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result 2>/dev/null || true)"
+                                  fi
+                              env:
+                                - { name: URL, value: "{{inputs.parameters.url}}" }
+                                - { name: METHOD, value: "{{inputs.parameters.method}}" }
+                                - name: PAYLOAD
+                                  value: |-
+                                    {{inputs.parameters.payload}}
+                                - name: SUCCESS_EXPR
+                                  value: |-
+                                    {{inputs.parameters.success-expr}}
+                                - name: FAILURE_EXPR
+                                  value: |-
+                                    {{inputs.parameters.failure-expr}}
+                                - name: ASSERT
+                                  value: |-
+                                    {{inputs.parameters.assert}}
+                                - name: ASSERT_MESSAGE
+                                  value: |-
+                                    {{inputs.parameters.assert-message}}
+                                - name: RESULT_EXPR
+                                  value: |-
+                                    {{inputs.parameters.result-expr}}
+                                - { name: RESULT_PATH, value: /tmp/result }
+                                - { name: IAM, value: "{{inputs.parameters.use-iam}}" }
+                                # Short-lived, submitter-supplied bearer token (not a Secret).
+                                - { name: TOKEN, value: "{{inputs.parameters.token}}" }
+                                - name: EXTRA_HEADERS
+                                  value: |-
+                                    {{inputs.parameters.extra-headers}}
+                                - { name: INSECURE_SKIP_VERIFY, value: "{{inputs.parameters.insecure-skip-verify}}" }
+                                - { name: WAIT_FOR_READY, value: "{{inputs.parameters.wait-for-ready}}" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: POLL_INTERVAL, value: "{{=int(duration(inputs.parameters['poll-interval']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }

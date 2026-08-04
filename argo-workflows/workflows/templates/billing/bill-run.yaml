@@ -1,16 +1,26 @@
 # =============================================================================
-# bill-run — segment lifecycle via billing-graphql (mirrors the UI)
+# bill-run — segment lifecycle via the bill-run CLI
 # =============================================================================
-# Automates the billing-operations-frontend segment flow. Each action triggers a
-# state transition via update_segment (setting the -ING state), then we poll
-# read_segments until the segment reaches the -ED state — exactly how the UI
-# enables the next action's button. The transitions and gates are taken from the
-# frontend (getNextState + shouldAllow*Action):
+# Automates the billing-operations-frontend segment flow. Each stage asks
+# billing-orchestrator for an -ING state and returns once its consumer has
+# settled the group on the matching -ED state:
 #
-#   Bill     PENDING   --update_segment(STATE_BILLING)--->    await BILLED  (+produced/reported==total)
-#   Commit   BILLED    --update_segment(STATE_COMMITTING)-->  await COMMITTED
-#   Export   COMMITTED --update_segment(STATE_EXPORTING)--->  await EXPORTED (+produced/reported==total)
-#   Fulfil   EXPORTED  --set_segment_delivery_schedule + update_segment(STATE_FULFILLING)--> await FULFILLED
+#   Bill     PENDING   --progress --to STATE_BILLING-->    settles BILLED    (+produced/reported==total)
+#   Commit   BILLED    --progress --to STATE_COMMITTING--> settles COMMITTED
+#   Export   COMMITTED --progress --to STATE_EXPORTING-->  settles EXPORTED  (+produced/reported==total)
+#   Fulfil   EXPORTED  --schedule, then --to STATE_FULFILLING--> settles FULFILLED
+#
+# NO POLLING STEPS. `progress` owns both gates: it waits for the stage before it
+# to settle, refuses to write unless the group is in the one state the
+# transition is legal from, and returns only once its own state has settled. A
+# state the happy path does not pass through — cancelled, on hold, a dry run,
+# another stage's — fails the step immediately rather than being waited out. A
+# group already past the stage is left alone, so a retried step is safe.
+#
+# THE DELIVERY SCHEDULE IS DERIVED. `schedule` reads fido's own per-invoice
+# counts for the segment and schedules every delivery of each kind it finds.
+# The old parameters hardcoded one email delivery, which on a real segment
+# (59,083 emails, 19,239 prints) scheduled a single email and no print at all.
 #
 # WHAT COMMIT DID, in the stores rather than in the segment — `verify` only, and
 # skipped entirely when account-ids is empty (a hand-submitted bill-run):
@@ -37,14 +47,9 @@
 # SEGMENT NAME vs ID. name = free text label (segment_groups.name). id = the
 # extract file's S3 object key, suffix included (segments.id). `segment-ids` is
 # the minted base name WITHOUT suffix, used as a PREFIX — the suffix is
-# data-dependent (.snappy / .migrated.snappy) and resolved at run time.
+# data-dependent (.snappy / .migrated.snappy) and resolved at run time, and more
+# than one match fails rather than picking one.
 #
-#   argo submit --from workflowtemplate/step-billing-bill-run \
-#     -p segment-name=UWCDATA1_D181225_T114259.052 \
-#     -p segment-ids=UWCDATA1_D181225_T114259.052 -p token=<bearer>
-#
-# AUTH: `token` is a short-lived bearer token the submitter supplies (any
-# engineer can generate one). It is intentionally a parameter, not a Secret.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -53,9 +58,9 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Segment lifecycle (Bill → Commit → Export → Fulfil) against billing-graphql,
-      mirroring the billing-operations-frontend flow with a state-poll gate after
-      each transition.
+      Segment lifecycle (Bill → Commit → Export → Fulfil) via the bill-run CLI
+      against billing-orchestrator, each stage waiting for its state to settle
+      before the next is asked for.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
@@ -69,12 +74,11 @@ spec:
     parameters:
       - { name: account-number } # for labels/traceability
       - { name: segment-name } # free text label for the group; also resolves the group id
-      - { name: segment-ids } # minted FWF base name, no suffix; a PREFIX matched against list_segments
+      - { name: segment-ids } # FWF base name, no suffix; a PREFIX matched against the ungrouped ids
       - { name: verify, value: "false" } # true => also observe the ledger, BigQuery and the finance export
       - { name: account-ids, value: "" } # account-platform UUID(s), comma-joined; the ledger and tx log key on them. Empty => no observing whatever verify says
-      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       # attended -> pause for human validation before the irreversible Commit;
-      # unattended -> run straight through (state polls still gate every stage)
+      # unattended -> run straight through (state gates still hold every stage)
       - { name: validation-mode, value: attended }
       - { name: log-level, value: info } # every step below and the tools they dispatch
 
@@ -87,52 +91,30 @@ spec:
           - { name: segment-ids }
           - { name: verify, value: "false" }
           - { name: account-ids, value: "" }
-          - { name: token, value: "" }
           - { name: validation-mode, value: attended }
-          - { name: delivery-type, value: "0" }
-          - {
-              name: schedule-entries,
-              value: '[{"id":"0","total":1,"date":"{{workflow.creationTimestamp.RFC3339}}"}]',
-            }
-          - { name: state-pending, value: STATE_PENDING }
-          - { name: state-billed, value: STATE_BILLED }
-          - { name: state-committed, value: STATE_COMMITTED }
-          - { name: state-exported, value: STATE_EXPORTED }
-          - { name: state-fulfilled, value: STATE_FULFILLED }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
           - { name: ledgers-namespace, value: ledgers }
+          - { name: author, value: "argo/{{workflow.name}}" }
           # How long each after-snapshot waits for its store to catch up with
           # Commit before dumping anyway. None fail when it runs out.
           - { name: verify-wait, value: 10m }
-          - { name: endpoint, value: "http://billing-graphql:8080/graphql" }
+          - { name: stage-timeout, value: 15m }
           - { name: log-level, value: info }
       steps:
         # ---- Resolve the segment FILE id -----------------------------------
         # The id is the S3 key with a data-dependent suffix, so read it back
-        # rather than build it. list_segments returns UNGROUPED ids, so this
-        # also gates on the parser having ingested the file; `== 1` stops on
-        # ambiguity rather than grouping the wrong variant.
+        # rather than build it. Only UNGROUPED ids are considered, so this also
+        # gates on the parser having ingested the file; more than one match
+        # stops the run rather than grouping the wrong variant.
         - - name: resolve-segment-file
-            templateRef: { name: step-billing-graphql-call, template: call }
+            template: cli
             arguments:
               parameters:
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: resolve-segment-file }
-                - {
-                    name: payload,
-                    value: '{"query":"{ list_segments { ids } }"}',
-                  }
-                - name: success-expr
-                  value: >-
-                    len(filter(response.body.data.list_segments.ids,
-                    {hasPrefix(#, "{{inputs.parameters.segment-ids}}")})) == 1
-                - { name: failure-expr, value: "response.body.errors != nil" }
-                - name: result-expr
-                  value: >-
-                    filter(response.body.data.list_segments.ids,
-                    {hasPrefix(#, "{{inputs.parameters.segment-ids}}")})[0]
-                - { name: token, value: "{{inputs.parameters.token}}" }
+                - name: args
+                  value: "resolve --prefix {{inputs.parameters.segment-ids}}"
+                - { name: capture-result, value: "true" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -141,22 +123,21 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
         # ---- Create segment ------------------------------------------------
-        # create_segment returns emptypb.Empty — `success` is always null.
+        # Returns the group id every later stage is addressed by. A group that
+        # already has this name is returned as-is rather than duplicated.
         - - name: create-segment
-            templateRef: { name: step-billing-graphql-call, template: call }
+            template: cli
             arguments:
               parameters:
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: create-segment }
-                - name: payload
+                - name: args
                   value: >-
-                    {"query":"mutation($n:String,$ids:String){ create_segment(name:$n, segment_ids:$ids){ success error_message } }",
-                    "variables":{"n":"{{inputs.parameters.segment-name}}","ids":"{{steps.resolve-segment-file.outputs.parameters.result}}"}}
-                - { name: assert, value: "response.body.errors == nil" }
-                - { name: token, value: "{{inputs.parameters.token}}" }
+                    create --name '{{inputs.parameters.segment-name}}'
+                    --members {{steps.resolve-segment-file.outputs.parameters.result}}
+                - { name: capture-result, value: "true" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -165,53 +146,24 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
-
-        # ---- Resolve id + precondition: poll until the segment is PENDING ----
-        - - name: resolve-segment
-            templateRef: { name: step-billing-graphql-call, template: call }
-            arguments:
-              parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: op-name, value: resolve-segment }
-                - name: payload
-                  value: '{"query":"{ read_segments { segments { id name state } } }"}'
-                - name: success-expr
-                  value: >-
-                    any(response.body.data.read_segments.segments,
-                    {.name == "{{inputs.parameters.segment-name}}" && .state == "{{inputs.parameters.state-pending}}"})
-                - { name: failure-expr, value: "response.body.errors != nil" }
-                - name: result-expr
-                  value: >-
-                    filter(response.body.data.read_segments.segments,
-                    {.name == "{{inputs.parameters.segment-name}}"})[0].id
-                - { name: token, value: "{{inputs.parameters.token}}" }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.target-namespace}}",
-                  }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
 
-        # ---- Bill:   PENDING -> STATE_BILLING -> await BILLED --------------
+        # ---- Bill:   PENDING -> STATE_BILLING -> settles BILLED -------------
+        # The wait for BILLED, and the produced/reported gate Commit needs, are
+        # both inside `progress`.
         - - name: bill
-            templateRef: { name: step-billing-graphql-call, template: call }
+            template: cli
             arguments:
               parameters:
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: bill }
-                - name: payload
+                - name: args
                   value: >-
-                    {"query":"mutation($id:String,$s:String){ update_segment(id:$id, state:$s){ success error_message } }",
-                    "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_BILLING"}}
+                    progress --id {{steps.create-segment.outputs.parameters.result}}
+                    --to STATE_BILLING
                 - {
-                    name: assert,
-                    value: "response.body.data.update_segment.success == true",
+                    name: timeout,
+                    value: "{{inputs.parameters.stage-timeout}}",
                   }
-                - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -220,38 +172,7 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
-        - - name: await-billed
-            templateRef:
-              { name: step-billing-await-segment-state, template: await }
-            arguments:
-              parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - {
-                    name: segment-id,
-                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
-                  }
-                - {
-                    name: target-state,
-                    value: "{{inputs.parameters.state-billed}}",
-                  }
-                - { name: op-name, value: await-billed }
-                # Commit is gated on full production, same as the UI
-                # total > 0: an empty segment satisfies produced == total == 0
-                - {
-                    name: extra-expr,
-                    value: ".stats.total > 0 && .stats.produced == .stats.total && .stats.reported == .stats.total",
-                  }
-                - { name: token, value: "{{inputs.parameters.token}}" }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.target-namespace}}",
-                  }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
 
         # ---- The stores as Commit finds them -------------------------------
         # Ahead of the pause on purpose: on an attended run these are already in
@@ -321,22 +242,20 @@ spec:
                     Resuming moves the segment to STATE_COMMITTING and on through
                     Export and Fulfil.
 
-        # ---- Commit: BILLED -> STATE_COMMITTING -> await COMMITTED ---------
+        # ---- Commit: BILLED -> STATE_COMMITTING -> settles COMMITTED --------
         - - name: commit
-            templateRef: { name: step-billing-graphql-call, template: call }
+            template: cli
             arguments:
               parameters:
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: commit }
-                - name: payload
+                - name: args
                   value: >-
-                    {"query":"mutation($id:String,$s:String){ update_segment(id:$id, state:$s){ success error_message } }",
-                    "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_COMMITTING"}}
+                    progress --id {{steps.create-segment.outputs.parameters.result}}
+                    --to STATE_COMMITTING
                 - {
-                    name: assert,
-                    value: "response.body.data.update_segment.success == true",
+                    name: timeout,
+                    value: "{{inputs.parameters.stage-timeout}}",
                   }
-                - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -345,33 +264,7 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
-        - - name: await-committed
-            templateRef:
-              { name: step-billing-await-segment-state, template: await }
-            arguments:
-              parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - {
-                    name: segment-id,
-                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
-                  }
-                - {
-                    name: target-state,
-                    value: "{{inputs.parameters.state-committed}}",
-                  }
-                - { name: op-name, value: await-committed }
-                - { name: extra-expr, value: ".stats.total > 0" }
-                - { name: token, value: "{{inputs.parameters.token}}" }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.target-namespace}}",
-                  }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
 
         - - name: ledger-snapshot-after
             when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
@@ -438,22 +331,20 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
 
-        # ---- Export: COMMITTED -> STATE_EXPORTING -> await EXPORTED --------
+        # ---- Export: COMMITTED -> STATE_EXPORTING -> settles EXPORTED -------
         - - name: export
-            templateRef: { name: step-billing-graphql-call, template: call }
+            template: cli
             arguments:
               parameters:
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: op-name, value: export }
-                - name: payload
+                - name: args
                   value: >-
-                    {"query":"mutation($id:String,$s:String){ update_segment(id:$id, state:$s){ success error_message } }",
-                    "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","s":"STATE_EXPORTING"}}
+                    progress --id {{steps.create-segment.outputs.parameters.result}}
+                    --to STATE_EXPORTING
                 - {
-                    name: assert,
-                    value: "response.body.data.update_segment.success == true",
+                    name: timeout,
+                    value: "{{inputs.parameters.stage-timeout}}",
                   }
-                - { name: token, value: "{{inputs.parameters.token}}" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -462,38 +353,7 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
-        - - name: await-exported
-            templateRef:
-              { name: step-billing-await-segment-state, template: await }
-            arguments:
-              parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - {
-                    name: segment-id,
-                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
-                  }
-                - {
-                    name: target-state,
-                    value: "{{inputs.parameters.state-exported}}",
-                  }
-                - { name: op-name, value: await-exported }
-                # Fulfil/Schedule is gated on full production, same as the UI
-                # total > 0: an empty segment satisfies produced == total == 0
-                - {
-                    name: extra-expr,
-                    value: ".stats.total > 0 && .stats.produced == .stats.total && .stats.reported == .stats.total",
-                  }
-                - { name: token, value: "{{inputs.parameters.token}}" }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.target-namespace}}",
-                  }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
 
         - - name: export-file-snapshot
             when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
@@ -516,22 +376,17 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
 
-        # ---- Fulfil: EXPORTED -> schedule + STATE_FULFILLING -> await FULFILLED
-        # One mutation, as the UI does it: set the delivery schedule AND move the
-        # segment to STATE_FULFILLING; the scheduled dispatch drives it to FULFILLED.
-        - - name: fulfil
-            templateRef: { name: step-billing-graphql-call, template: call }
+        # ---- Fulfil: schedule the deliveries, then EXPORTED -> FULFILLING ---
+        # Two steps, in this order: the schedule has to exist before the
+        # deliveries it describes are asked for. How many of each kind, and of
+        # which kinds, comes from fido — nothing is passed in.
+        - - name: schedule-deliveries
+            template: cli
             arguments:
               parameters:
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: op-name, value: fulfil }
-                - name: payload
-                  value: >-
-                    {"query":"mutation($id:String!,$t:Int,$e:[schedule_entry_input!]!,$s:String){ set_segment_delivery_schedule(segment_id:$id, type:$t, entries:$e){ success error_message } update_segment(id:$id, state:$s){ success error_message } }",
-                    "variables":{"id":"{{steps.resolve-segment.outputs.parameters.result}}","t":{{inputs.parameters.delivery-type}},"e":{{inputs.parameters.schedule-entries}},"s":"STATE_FULFILLING"}}
-                - name: assert
-                  value: "response.body.data.set_segment_delivery_schedule.success == true && response.body.data.update_segment.success == true"
-                - { name: token, value: "{{inputs.parameters.token}}" }
+                - { name: op-name, value: schedule-deliveries }
+                - name: args
+                  value: "schedule --id {{steps.create-segment.outputs.parameters.result}}"
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -540,32 +395,122 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
-        - - name: await-fulfilled
-            templateRef:
-              { name: step-billing-await-segment-state, template: await }
-            arguments:
-              parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - {
-                    name: segment-id,
-                    value: "{{steps.resolve-segment.outputs.parameters.result}}",
-                  }
-                - {
-                    name: target-state,
-                    value: "{{inputs.parameters.state-fulfilled}}",
-                  }
-                - { name: op-name, value: await-fulfilled }
-                - { name: extra-expr, value: ".stats.total > 0" }
-                - { name: token, value: "{{inputs.parameters.token}}" }
-                - {
-                    name: cluster-name,
-                    value: "{{inputs.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{inputs.parameters.target-namespace}}",
-                  }
-                - { name: endpoint, value: "{{inputs.parameters.endpoint}}" }
-                - { name: timeout, value: 15m } # scheduled dispatch can lag; poll longer
 
+        - - name: fulfil
+            template: cli
+            arguments:
+              parameters:
+                - { name: op-name, value: fulfil }
+                - name: args
+                  value: >-
+                    progress --id {{steps.create-segment.outputs.parameters.result}}
+                    --to STATE_FULFILLING
+                # The scheduled dispatch can lag well behind the transition.
+                - { name: timeout, value: 45m }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+
+    # -------------------------------------------------------------------------
+    # cli — one bill-run invocation, dispatched as a Job into the namespace the
+    # billing services run in.
+    #
+    # The Argo controller cannot reach billing-orchestrator, so the command runs
+    # from inside dev-merit/billing.
+    # fido lives in another cluster and is reached through its mirrored service.
+    #
+    # `capture-result` surfaces what the command printed on stdout (a segment
+    # file id, a group id) as this template's `result`; the logs go to stderr, so
+    # the capture stays clean.
+    # -------------------------------------------------------------------------
+    - name: cli
+      inputs:
+        parameters:
+          - { name: op-name } # e.g. bill, commit, schedule-deliveries
+          - { name: args } # bill-run's subcommand and flags
+          - { name: capture-result, value: "false" }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - { name: address, value: "billing-orchestrator:8090" }
+          - {
+              name: fido-address,
+              value: "aws-customer-billing-73736d-invoice-delivery-orchestrator.sys-semaphore:8090",
+            }
+          - { name: author, value: "argo/{{workflow.name}}" }
+          - {
+              name: bill-run-image,
+              value: "registry.uw.systems/billing/bill-run:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m } # deadline for the command, waiting included
+          - { name: poll-interval, value: 15s } # gap between state checks while waiting
+          - { name: job-ttl, value: 24h } # keep finished Job for debug, then GC
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.billing.outputs.parameters.result}}"
+      steps:
+        - - name: billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: job-name,
+                    value: "billing-bill-run-{{inputs.parameters.op-name}}",
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['timeout']).Seconds()) + 120}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: bill-run
+                              image: {{inputs.parameters.bill-run-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  # Diagnostics go to stderr, the captured value to stdout.
+                                  out=$(/svc {{inputs.parameters.args}})
+                                  if [ "{{inputs.parameters.capture-result}}" = "true" ]; then
+                                    echo "ARGO_RESULT_OUTPUT=${out}"
+                                  fi
+                              env:
+                                - { name: BO_ADDRESS, value: "{{inputs.parameters.address}}" }
+                                - { name: FIDO_ADDRESS, value: "{{inputs.parameters.fido-address}}" }
+                                - { name: AUTHOR, value: "{{inputs.parameters.author}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: POLL_INTERVAL, value: "{{inputs.parameters.poll-interval}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }

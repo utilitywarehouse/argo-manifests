@@ -20,7 +20,7 @@ namespace by `exec-kube`, and that Job is a YAML **string** (`job-template`, a `
 heredoc), not a real container. Inside it the image is an Argo expression:
 
 ```yaml
-# step-billing-graphql-call: the Job is a heredoc string, not a real container
+# step-http-call: the Job is a heredoc string, not a real container
 - name: job-template
   value: |
     ...

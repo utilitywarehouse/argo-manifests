@@ -36,14 +36,13 @@ a `domain-action` name without fighting its verb:
 ```
 flow-billing-generate-bill        # the whole: launched from the UI
   └─ step-billing-produce-fwf      # a part it assembles
+  └─ step-http-call                # a cross-domain part, from shared/
   └─ step-billing-bill-run
-       └─ step-billing-await-segment-state
-            └─ step-billing-graphql-call
 ```
 
 A **flow** is made of **steps** — the relationship is legible in the names. In the submit
 list and any alphabetical view, every `step-*` collapses into one block; flows group by
-domain (`flow-billing-*`), which is how you browse. `templateRef: { name: step-billing-graphql-call }`
+domain (`flow-billing-*`), which is how you browse. `templateRef: { name: step-http-call }`
 also tells the author "this is a part, not an entrypoint" right where they're reading it.
 
 Names are DNS-1123 (`[a-z0-9-]` only — no `.`, `/`, `_`, no case), which is why the marker
@@ -96,10 +95,15 @@ Name it after the **work**, never the target namespace — the namespace is what
 A template called many times in one run cannot use a constant. Derive it from whatever already varies per call:
 
 ```yaml
-- { name: job-name, value: "billing-gql-{{inputs.parameters.op-name}}" }
+- { name: job-name, value: "http-call-{{inputs.parameters.op-name}}" }
 ```
 
-Anything feeding that discriminator has to vary too — `step-billing-await-segment-state` takes an `op-name` from its caller instead of deriving one from `target-state`.
+Anything feeding that discriminator has to vary too — `step-grpc-call` takes an `op-name` from its caller rather than deriving one from the method it calls.
+
+**Use exactly one parameter.** `policy/job_names.rego` proves a templated job-name by checking that
+every parameter it interpolates varies across calls to the same callee. A two-part name
+(`{{prefix}}-{{op-name}}`) fails that check on the half callers legitimately share, so the literal
+part of the name belongs to the callee and only the discriminator is passed in.
 
 **Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. Keep `job-name` to a DNS-1123 slug of **54 characters or fewer** so `-<uid8>` always fits.
 

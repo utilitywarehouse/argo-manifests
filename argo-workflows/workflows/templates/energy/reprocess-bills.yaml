@@ -8,8 +8,15 @@
 #
 #   unprocess  processed_at = NULL for the rows in scope; the adapter selects on
 #              `processed_at IS NULL AND validation_issues IS NULL`
-#   send       ValidateAndSendBillingData — a bill run re-submits those blobs
-#   await      poll until those rows are processed, failing fast on any issue
+#   send   ┐   ValidateAndSendBillingData — a bill run re-submits those blobs.
+#          │   The RPC blocks for the whole run and returns nothing we act on, so
+#          ├─  these two are ONE step group: send stops WATCHING after a few
+#          │   minutes (the run itself carries on untouched) and await settling
+#   await  ┘   is what ends the group. They overlap rather than add up.
+#
+#              await polls until those rows are processed, failing fast on any
+#              issue. Past send's watch window it is also the only place a failed
+#              send surfaces — see both notes below.
 #
 # The RPC takes an empty request and walks every migrated account, hence the
 # minutes. `processed_at IS NULL` is the only scoping there is.
@@ -63,7 +70,6 @@ spec:
       - { name: external-account-number } # gentrack account number(s), comma-separated
       - { name: gentrack-bill-numbers, value: "" } # e.g. J40000010621, comma-separated; found INSIDE file_name
       - { name: bill-period, value: "" } # YYYY-MM of the BLOB's bill_period_from (see scope)
-      - { name: token, value: "" } # short-lived bearer token supplied by the submitter
       - { name: dry-run, value: "true" } # true => report the rows, change nothing, send nothing
       - { name: cluster-name, value: dev-merit }
       - { name: target-namespace, value: energy-billing }
@@ -78,12 +84,11 @@ spec:
           - { name: external-account-number }
           - { name: gentrack-bill-numbers, value: "" }
           - { name: bill-period, value: "" }
-          - { name: token, value: "" }
           - { name: dry-run, value: "true" }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: energy-billing }
-          - { name: send-timeout, value: 30m } # the whole-environment bill run
-          - { name: await-timeout, value: 20m } # then for the rows to settle
+          - { name: send-timeout, value: 60m } # the whole-environment bill run
+          - { name: await-timeout, value: 60m } # must cover that same bill run
           - { name: log-level, value: info }
       steps:
         - - name: unprocess
@@ -113,14 +118,20 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
 
-        # Skipped on a dry run: it writes to billing, not just to the adapter.
+        # ONE STEP GROUP, on purpose: the bill run and the wait for its result
+        # are the same stretch of time, not two. `send` stops watching after its
+        # watch-window while the run carries on, so `await` settling is what ends
+        # this group. The group doesn't wait on the RPC itself.
+        #
+        #
+        # Both skipped on a dry run: it writes to billing, not just to the
+        # adapter, and with nothing sent await would only burn its timeout.
         - - name: send
             when: "{{inputs.parameters.dry-run}} != true"
             template: send
             arguments:
               parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: token, value: "{{inputs.parameters.token}}" }
                 - { name: timeout, value: "{{inputs.parameters.send-timeout}}" }
                 - {
                     name: cluster-name,
@@ -131,9 +142,7 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
 
-        # Also skipped on a dry run: nothing was sent, so this either passes
-        # vacuously or burns the timeout.
-        - - name: await
+          - name: await
             when: "{{inputs.parameters.dry-run}} != true"
             template: await
             arguments:
@@ -301,24 +310,46 @@ spec:
                                   {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
 
     # -------------------------------------------------------------------------
-    # send — ValidateAndSendBillingData on the billing-processor.
+    # send — ValidateAndSendBillingData on the billing-processor. We stop
+    # WATCHING it early; it is never stopped.
     #
     # The utils service is served by the billing-processor deployment (its
     # PROCESS_UTILS_PORT), not billing-adapter-api. Both are :8090, which makes
-    # the wrong one look right.
+    # the wrong one look right. energy-billing exposes no Service for it at all,
+    # hence address-from-pod.
     #
-    # The RPC blocks for the whole bill run with no server-side deadline, so
-    # `timeout` is the only bound — and cancelling the client cancels the run.
-    # Keep it generous.
+    # The RPC blocks for the whole bill run with no server-side deadline and
+    # returns nothing we act on — the rows coming back processed is the real
+    # signal, and `await` watches for exactly that, in parallel with this. So
+    # there is no reason to sit on the call as well.
+    #
+    # HOW, exactly — because "not waiting" is easy to get wrong here:
+    #   timeout       how long the CALL may take. Stays long: it is call-grpc's
+    #                 own deadline, and cutting it would cancel the RPC, which
+    #                 billing-processor takes as "throw the bill run away".
+    #   watch-window  how long exec-kube streams the Job's logs. When it runs out
+    #                 exec-kube exits non-zero WITHOUT reaching its teardown
+    #                 branch. Nothing is deleted, nothing is cancelled: the Job
+    #                 pod keeps running, its gRPC client stays connected, and the
+    #                 bill run finishes normally. Only our watching stops.
+    #   continueOn    exec-kube's non-zero exit is expected, so it must not fail
+    #                 the run. The `energy-billing` child shows red (it stopped
+    #                 watching); this template stays green.
+    #
+    # The watch window is also the whole verdict: it is sized to outlast a
+    # rejection, so a bad method, a failed auth or a first "already in progress"
+    # lands in that child's logs. Anything after it shows up as `await` timing
+    # out, and the Job is kept for its ttl so you can read the rest:
+    #   kubectl -n energy-billing logs job/grpc-call-send-billing-data-<uid8>
     #
     # A run already in flight is rejected with "billing run already in progress".
     # It may have passed our accounts before we un-processed them, so we wait it
-    # out and ask again rather than trust it.
+    # out and ask again rather than trust it — that is what retry-on drives, and
+    # it keeps going inside the Job long after we have stopped reading.
     # -------------------------------------------------------------------------
     - name: send
       inputs:
         parameters:
-          - { name: token, value: "" }
           - {
               name: method,
               value: "uw.energy.billing.billing_adapter.v1.BillingAdapterUtilsService/ValidateAndSendBillingData",
@@ -327,23 +358,36 @@ spec:
           - { name: retry-wait, value: "60" } # seconds between attempts
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: energy-billing }
-          - {
-              name: call-grpc-image,
-              value: "registry.uw.systems/dev-enablement/call-grpc:main",
-            }
-          - { name: runner-sa, value: default }
-          - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
-          - { name: timeout, value: 30m }
-          - { name: job-active-deadline, value: 35m }
-          - { name: job-ttl, value: 24h }
+          # Long enough to catch a rejection (the first retry-on wait is 60s), far
+          # short of the run. Raising it only delays this node, never the bill run.
+          - { name: watch-window, value: 3m }
+          - { name: timeout, value: 60m } # the bill run's real deadline
       steps:
         - - name: energy-billing
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            continueOn: { failed: true }
+            templateRef: { name: step-grpc-call, template: call }
             arguments:
               parameters:
+                - { name: op-name, value: send-billing-data }
+                - { name: method, value: "{{inputs.parameters.method}}" }
+                # No Service: resolve a Running billing-processor pod and dial it.
+                - { name: address-from-pod, value: "app=billing-processor" }
+                - { name: address-port, value: "8090" }
+                - { name: retry-on, value: "already in progress" }
+                - { name: attempts, value: "{{inputs.parameters.attempts}}" }
+                - {
+                    name: retry-wait,
+                    value: "{{inputs.parameters.retry-wait}}",
+                  }
+                - { name: use-iam, value: "true" }
+                # The two clocks, deliberately different: let the call run this
+                # long, watch it for only that long.
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: watch-timeout,
+                    value: "{{inputs.parameters.watch-window}}",
+                  }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -352,72 +396,7 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: job-name, value: send-billing-data }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        spec:
-                          serviceAccountName: {{inputs.parameters.runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          containers:
-                            - name: send
-                              image: {{inputs.parameters.call-grpc-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  # energy-billing does not expose a Service for billing-processor, so dial the pod.
-                                  SA=/var/run/secrets/kubernetes.io/serviceaccount
-                                  ip=$(SSL_CERT_FILE=$SA/ca.crt wget -qO- --header="Authorization: Bearer $(cat $SA/token)" \
-                                    "https://kubernetes.default.svc/api/v1/namespaces/$(cat $SA/namespace)/pods?labelSelector=app%3Dbilling-processor&fieldSelector=status.phase%3DRunning" \
-                                    | tr ',' '\n' | grep '"podIP"' | head -1 | cut -d'"' -f4 | cut -d/ -f1)
-                                  [ -n "$ip" ] || { echo "no Running billing-processor pod"; exit 1; }
-                                  export ADDRESS="$ip:8090"
-                                  echo "billing-processor at $ADDRESS"
-                                  # Assembled in-shell so the token never lands in the rendered manifest.
-                                  export HEADERS="authorization: Bearer ${TOKEN}"
-                                  i=1
-                                  while :; do
-                                    echo "ValidateAndSendBillingData attempt $i/{{inputs.parameters.attempts}} — this walks every migrated account, not just ours"
-                                    # Redirected, not piped: `if cmd | tee` tests tee's exit status,
-                                    # so every failure would read as a success.
-                                    if /app/executor --output /tmp/send.json >/tmp/send.log 2>&1; then
-                                      cat /tmp/send.log
-                                      echo "bill run completed"
-                                      cat /tmp/send.json 2>/dev/null || true
-                                      echo "ARGO_RESULT_OUTPUT=sent"
-                                      exit 0
-                                    fi
-                                    cat /tmp/send.log
-                                    if ! grep -qi "already in progress" /tmp/send.log; then
-                                      echo "ValidateAndSendBillingData failed (see above)"
-                                      exit 1
-                                    fi
-                                    i=$((i+1))
-                                    if [ "$i" -gt "{{inputs.parameters.attempts}}" ]; then
-                                      echo "a bill run was in progress for every attempt; it may have passed our accounts before they were un-processed"
-                                      exit 1
-                                    fi
-                                    echo "a bill run is already in progress; waiting {{inputs.parameters.retry-wait}}s"
-                                    sleep {{inputs.parameters.retry-wait}}
-                                  done
-                              env:
-                                - { name: METHOD, value: "{{inputs.parameters.method}}" }
-                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
-                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
-                                # Short-lived, submitter-supplied bearer token (not a Secret).
-                                - { name: TOKEN, value: "{{inputs.parameters.token}}" }
 
     # -------------------------------------------------------------------------
     # await — poll billing_adapter_db until the rows in scope are processed.
@@ -455,8 +434,8 @@ spec:
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: poll-interval, value: "60" } # seconds between polls
-          - { name: timeout, value: 20m } # deadline for the whole poll
-          - { name: job-active-deadline, value: 25m }
+          - { name: timeout, value: 60m } # deadline for the whole poll
+          - { name: job-active-deadline, value: 65m }
           - { name: job-ttl, value: 24h }
       steps:
         - - name: energy-billing
@@ -561,6 +540,9 @@ spec:
                                     fi
                                     if [ "$(date +%s)" -ge "$deadline" ]; then
                                       echo "timed out with $unprocessed of $total still unprocessed"
+                                      echo "we stopped watching the send after its watch window, so past that point a failed"
+                                      echo "run looks exactly like a slow one. Read the Job before assuming it is just slow:"
+                                      echo "  kubectl -n {{inputs.parameters.target-namespace}} logs job/grpc-call-send-billing-data-<workflow-uid[:8]>"
                                       exit 1
                                     fi
                                     sleep {{inputs.parameters.poll-interval}}

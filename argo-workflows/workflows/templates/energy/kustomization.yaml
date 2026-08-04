@@ -19,7 +19,6 @@ configMapGenerator:
         config.kubernetes.io/local-config: "true"
     literals:
       - query-pg=registry.uw.systems/dev-enablement/query-pg:35583c85d23d9fcbefc816f52c0ba92cef39ad6a
-      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:main
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -39,17 +38,7 @@ replacements:
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-pg-image].value
       # Only two of this one's four templates query; the wildcard passes over the
-      # composite and the gRPC trigger rather than failing on them.
+      # composite and the send step rather than failing on them.
       - select: { kind: WorkflowTemplate, name: step-energy-reprocess-bills }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-pg-image].value
-  - source:
-      {
-        kind: ConfigMap,
-        name: energy-image-versions,
-        fieldPath: data.call-grpc,
-      }
-    targets:
-      - select: { kind: WorkflowTemplate, name: step-energy-reprocess-bills }
-        fieldPaths:
-          - spec.templates.*.inputs.parameters.[name=call-grpc-image].value
