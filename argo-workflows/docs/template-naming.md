@@ -36,14 +36,13 @@ a `domain-action` name without fighting its verb:
 ```
 flow-billing-generate-bill        # the whole: launched from the UI
   └─ step-billing-produce-fwf      # a part it assembles
+  └─ step-http-call                # a cross-domain part, from shared/
   └─ step-billing-bill-run
-       └─ step-billing-await-segment-state
-            └─ step-billing-graphql-call
 ```
 
 A **flow** is made of **steps** — the relationship is legible in the names. In the submit
 list and any alphabetical view, every `step-*` collapses into one block; flows group by
-domain (`flow-billing-*`), which is how you browse. `templateRef: { name: step-billing-graphql-call }`
+domain (`flow-billing-*`), which is how you browse. `templateRef: { name: step-http-call }`
 also tells the author "this is a part, not an entrypoint" right where they're reading it.
 
 Names are DNS-1123 (`[a-z0-9-]` only — no `.`, `/`, `_`, no case), which is why the marker
@@ -96,12 +95,45 @@ Name it after the **work**, never the target namespace — the namespace is what
 A template called many times in one run cannot use a constant. Derive it from whatever already varies per call:
 
 ```yaml
-- { name: job-name, value: "billing-gql-{{inputs.parameters.op-name}}" }
+- { name: job-name, value: "http-call-{{inputs.parameters.op-name}}" }
 ```
 
-Anything feeding that discriminator has to vary too — `step-billing-await-segment-state` takes an `op-name` from its caller instead of deriving one from `target-state`.
+Anything feeding that discriminator has to vary too — `step-grpc-call` takes an `op-name` from its caller rather than deriving one from the method it calls.
 
-**Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. Keep `job-name` to a DNS-1123 slug of **54 characters or fewer** so `-<uid8>` always fits.
+**Use exactly one parameter.** `policy/job_names.rego` proves a templated job-name by checking that
+every parameter it interpolates varies across calls to the same callee. A two-part name
+(`{{prefix}}-{{op-name}}`) fails that check on the half callers legitimately share, so the literal
+part of the name belongs to the callee and only the discriminator is passed in.
+
+**Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. The rendered name is `argo-<job-name>-<uid8>`, so keep `job-name` to a DNS-1123 slug of **49 characters or fewer** (63 − 5 − 1 − 8) and both halves always fit.
+
+A templated job-name is measured on what it resolves to, not on its literal half: `policy/job_names.rego` adds the longest value that can reach each interpolated parameter to the literal characters around it. `billing-bill-run-{{op-name}}` is therefore 37, not 17 — `resolve-segment-file` is the longest `op-name` any step passes. Values are collected from step arguments, `inputs.parameters` defaults, and the top-level `arguments` of a Workflow or CronWorkflow, since that is where the long ones tend to live (`system-key` is set on a CronWorkflow's `workflowSpec`, never on a step).
+
+The limit of that check: a parameter nothing supplies literally — typed into the submit form and nowhere else — cannot be bounded, so it is left out of the sum rather than guessed at. Those names are under-counted, never over-counted, so the check does not fire on a name that actually fits. Keep the literal half short enough to absorb a long value if the discriminator is free-text.
+
+## The `argo-` prefix
+
+`step-executor-remote-namespace` prepends a literal `argo-` to every `job-name`, so a step passing `send-billing-data` produces the Job `argo-send-billing-data-773761c5` and the pod `argo-send-billing-data-773761c5-nxfwr`. Do not repeat the prefix in `job-name`.
+
+It exists for IAM. A pod authenticating with a uwos-go machine token is identified to Cerbos by its namespace and pod name only — the PDP exposes no serviceaccount attribute, so the `runner-sa` a Job runs under is invisible to policy and cannot be matched on. The prefix is therefore the one stable handle every Argo-launched pod shares, and a derived role can be written once per domain:
+
+```yaml
+- name: uw.billing.v1.machine.argo-workflows
+  parentRoles: [machine]
+  condition:
+    match:
+      expr: |
+        P.attr.k8s.pod.startsWith("argo-") && (
+          P.attr.k8s.namespace == "billing" ||
+          P.attr.k8s.namespace == "energy-billing"
+        )
+```
+
+Keep such rules namespace-scoped: unqualified, `argo-` also matches Argo's own control-plane pods (`argo-server`, `argo-workflow-controller`).
+
+Prefixes nest, so the blanket role is not the only granularity available. Grant it for ordinary reads, and match a genuinely destructive step on its own full prefix — `P.attr.k8s.pod.startsWith("argo-send-billing-data")` — rather than widening what every step can reach.
+
+This is a convention, not an authentication boundary: anyone able to create a pod named `argo-*` in a listed namespace inherits the role. That is already true of every pod-name rule in `cerbos-policies`; the real gates remain Argo RBAC on workflow submission and Kubernetes RBAC on pod creation. Changing the prefix string breaks every policy written against it.
 
 `make validate` enforces all of it: `argo lint` catches a call that forgets `job-name`, and the `policy/job_names.rego` conftest policy catches duplicates, bad characters and over-long names.
 
