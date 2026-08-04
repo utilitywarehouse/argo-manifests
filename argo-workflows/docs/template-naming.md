@@ -105,7 +105,31 @@ every parameter it interpolates varies across calls to the same callee. A two-pa
 (`{{prefix}}-{{op-name}}`) fails that check on the half callers legitimately share, so the literal
 part of the name belongs to the callee and only the discriminator is passed in.
 
-**Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. Keep `job-name` to a DNS-1123 slug of **54 characters or fewer** so `-<uid8>` always fits.
+**Length.** Kubernetes caps names at 63 characters and `exec-kube` truncates rather than failing, which would silently reintroduce collisions. The rendered name is `argo-<job-name>-<uid8>`, so keep `job-name` to a DNS-1123 slug of **49 characters or fewer** (63 − 5 − 1 − 8) and both halves always fit.
+
+## The `argo-` prefix
+
+`step-executor-remote-namespace` prepends a literal `argo-` to every `job-name`, so a step passing `send-billing-data` produces the Job `argo-send-billing-data-773761c5` and the pod `argo-send-billing-data-773761c5-nxfwr`. Do not repeat the prefix in `job-name`.
+
+It exists for IAM. A pod authenticating with a uwos-go machine token is identified to Cerbos by its namespace and pod name only — the PDP exposes no serviceaccount attribute, so the `runner-sa` a Job runs under is invisible to policy and cannot be matched on. The prefix is therefore the one stable handle every Argo-launched pod shares, and a derived role can be written once per domain:
+
+```yaml
+- name: uw.billing.v1.machine.argo-workflows
+  parentRoles: [machine]
+  condition:
+    match:
+      expr: |
+        P.attr.k8s.pod.startsWith("argo-") && (
+          P.attr.k8s.namespace == "billing" ||
+          P.attr.k8s.namespace == "energy-billing"
+        )
+```
+
+Keep such rules namespace-scoped: unqualified, `argo-` also matches Argo's own control-plane pods (`argo-server`, `argo-workflow-controller`).
+
+Prefixes nest, so the blanket role is not the only granularity available. Grant it for ordinary reads, and match a genuinely destructive step on its own full prefix — `P.attr.k8s.pod.startsWith("argo-send-billing-data")` — rather than widening what every step can reach.
+
+This is a convention, not an authentication boundary: anyone able to create a pod named `argo-*` in a listed namespace inherits the role. That is already true of every pod-name rule in `cerbos-policies`; the real gates remain Argo RBAC on workflow submission and Kubernetes RBAC on pod creation. Changing the prefix string breaks every policy written against it.
 
 `make validate` enforces all of it: `argo lint` catches a call that forgets `job-name`, and the `policy/job_names.rego` conftest policy catches duplicates, bad characters and over-long names.
 

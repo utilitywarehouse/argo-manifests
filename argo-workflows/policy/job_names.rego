@@ -2,7 +2,7 @@
 #
 # `argo lint` proves every execute-job call supplies a job-name. It cannot prove the
 # values are usable: the Job name is assembled by exec-kube at runtime as
-# `<job-name>-<workflow.uid[:8]>`. Two dispatches of one run sharing a job-name
+# `argo-<job-name>-<workflow.uid[:8]>`. Two dispatches of one run sharing a job-name
 # collide in Kubernetes; a job-name that is not DNS-1123 is rejected outright. Both
 # fail in a remote cluster long after CI.
 #
@@ -13,9 +13,10 @@ package main
 
 executor := "step-executor-remote-namespace"
 
-# Job name is <job-name>-<uid[:8]> and Kubernetes caps names at 63. exec-kube
+# Job name is argo-<job-name>-<uid[:8]> and Kubernetes caps names at 63. exec-kube
 # truncates rather than failing, which silently reintroduces collisions.
-max_len := 54
+# 63 - len("argo-") - len("-") - 8 = 49.
+max_len := 49
 
 dns_1123 := `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 
