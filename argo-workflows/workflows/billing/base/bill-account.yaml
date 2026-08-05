@@ -18,14 +18,28 @@ spec:
   arguments:
     parameters:
       - { name: account-numbers } # UW customer account number(s), comma-separated — one or many
-      - { name: dry-run, value: "true" } # default safe: plan + fabricate only, no mongo writes/upload/register/bill-run
-      - { name: validation-mode, value: attended } # attended pauses before Commit
+      # default safe: plan + fabricate only, no mongo writes/upload/register/bill-run
+      - name: dry-run
+        value: "true"
+        enum: ["true", "false"]
+      - name: validation-mode # attended pauses before Commit
+        value: "attended"
+        enum: ["attended", "unattended"]
       - { name: bill-period, value: "" } # bill-run month; bills the month before it. Empty => current month
-      - { name: rebill, value: auto } # clear bills + re-send energy data first: auto (only if needed) | force | off
+      - name: rebill # clear bills + re-send energy data first
+        value: "auto"
+        enum: ["auto", "force", "off"]
       - { name: gentrack-bill-numbers, value: "" } # which bills to re-open, comma-separated (e.g. J40000010621). Empty => the period being billed
-      - { name: engineer-visit, value: "false" }
-      - { name: verify, value: "false" } # true => also observe the ledger, BigQuery and the finance export around the bill. Same bill either way
-      - { name: log-level, value: info } # info | debug — one level for every step and every tool a step dispatches
+      - name: engineer-visit
+        value: "false"
+        enum: ["true", "false"]
+      # true => also observe the ledger, BigQuery and the finance export. Same bill either way
+      - name: verify
+        value: "false"
+        enum: ["true", "false"]
+      - name: log-level
+        value: "info"
+        enum: ["info", "debug"]
   templates:
     - name: main
       inputs:

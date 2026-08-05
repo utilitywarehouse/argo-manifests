@@ -20,6 +20,7 @@ spec:
         value: "sys-k6"
       - name: log-level
         value: "info"
+        enum: ["info", "debug"]
       - name: job-name
         value: "print-secret"
       - name: job-template
