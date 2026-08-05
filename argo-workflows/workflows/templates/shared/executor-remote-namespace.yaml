@@ -51,6 +51,7 @@ spec:
         artifacts:
           - name: result
             path: /tmp/result.txt
+            globalName: "{{inputs.parameters.job-name}}"
             archive:
               none: {}
           - name: logs

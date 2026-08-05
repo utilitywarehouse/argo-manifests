@@ -45,14 +45,11 @@ spec:
           # wait above plus this buffer, so widening the wait cannot outlive them.
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
-      outputs:
-        parameters:
-          - name: result
-            valueFrom:
-              parameter: "{{steps.billing.outputs.parameters.result}}"
-        artifacts:
-          - name: snapshot
-            from: "{{steps.billing.outputs.artifacts.result}}"
+      # No outputs. Nothing consumes this template — it exists to be read, and
+      # execute-job's `result` is global, so the dump lands on the run itself as
+      # {{workflow.outputs.artifacts.export-file-snapshot}} without a mirror at
+      # every level between. Declare outputs here only when a CALLER needs the
+      # value, and then all the way up to it. See docs/data-flow.md.
       steps:
         - - name: billing
             templateRef:

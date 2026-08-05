@@ -62,14 +62,10 @@ spec:
           # wait above plus this buffer, so widening the wait cannot outlive them.
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
-      outputs:
-        parameters:
-          - name: result
-            valueFrom:
-              parameter: "{{steps.ledgers.outputs.parameters.result}}"
-        artifacts:
-          - name: snapshot
-            from: "{{steps.ledgers.outputs.artifacts.result}}"
+      # No outputs — read off the run as
+      # {{workflow.outputs.artifacts.ledger-snapshot-<phase>}}, not mirrored up
+      # through every level. A ledger dump is the case that most wants keeping out
+      # of etcd twice over. See docs/data-flow.md.
       steps:
         - - name: ledgers
             templateRef:
