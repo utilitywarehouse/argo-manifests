@@ -454,7 +454,7 @@ spec:
           - { name: address, value: "billing-orchestrator:8090" }
           - {
               name: fido-address,
-              value: "aws-customer-billing-73736d-invoice-delivery-orchestrator.sys-semaphore:8090",
+              value: "invoice-delivery-orchestrator.customer-billing.svc.cluster.aws:8090",
             }
           - { name: author, value: "argo/{{workflow.name}}" }
           - {
