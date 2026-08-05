@@ -190,10 +190,6 @@ spec:
           - { name: timeout, value: 5m }
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
-      # No outputs — read off the run as
-      # {{workflow.outputs.artifacts.adapter-blobs-snapshot}}, not mirrored up
-      # through every level. The `assert` template above is the one that judges;
-      # this one only reports. See docs/data-flow.md.
       steps:
         - - name: energy-billing
             templateRef:

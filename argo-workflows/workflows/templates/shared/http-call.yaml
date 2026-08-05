@@ -2,30 +2,28 @@
 # http-call — one HTTP request against a service in another namespace
 # =============================================================================
 # A one-pod Job running the `call-http` executor, dispatched via
-# step-executor-remote-namespace into the namespace where the target runs — the
-# Argo controller cannot reach those services itself. The gRPC twin is
-# step-grpc-call: same parameters, same predicates, same auth.
+# step-executor-remote-namespace (the Argo controller cannot reach those
+# services). gRPC twin: step-grpc-call — same parameters, predicates and auth.
 #
 # Predicates are expr over `response.{status, ok, headers, body, messages, raw}`:
 #
-#   success-expr  poll the request until true     (omit for a fire-once call)
+#   success-expr  poll until true                 (omit for a fire-once call)
 #   failure-expr  bail early when true            (poll mode only)
 #   assert        assert once, no polling         (excludes success-expr)
 #   result-expr   capture a value -> step `result`
 #
-# With `assert` unset the call still requires response.ok, so a 4xx/5xx fails by
-# default. Operators (any/all/filter/len/matches/in): qe-toolkit/executors/call-http.
+# With `assert` unset the call still requires response.ok. Operators:
+# qe-toolkit/executors/call-http.
 #
-# `timeout` bounds the whole poll and, +2m, the Job — keep them tied, or raising
-# one leaves a stale deadline that kills the pod mid-poll. `poll-interval` is
-# fixed, no backoff.
+# `timeout` bounds the poll and, +2m, the Job — keep them tied.
+# `watch-window` stops us watching WITHOUT failing (exec-kube detaches, exits 0,
+# Job carries on); for work that must not be cancelled, where the caller has its
+# own gate. `retry-on` re-makes a FAILED call matching that substring.
 #
-# AUTH, composable: `use-iam` for a machine principal minted from the Job pod's
-# ServiceAccount (needs iam-machine-api reachable by the runner-sa); `token` for
-# a user principal, kept a parameter not a Secret because it is ephemeral, and
-# assembled in-shell so it never lands in the rendered manifest; neither if the
-# target authenticates no-one. Content-Type is left alone — call-http defaults it
-# to application/json whenever there is a body.
+# AUTH, composable: `use-iam` (machine principal from the Job pod's SA, needs
+# iam-machine-api reachable by runner-sa); `token` (user principal, a parameter
+# not a Secret because it is ephemeral, and it WINS `authorization`). The
+# executor merges both and never logs the token.
 #
 # Reference-only: consumed via templateRef.
 # =============================================================================
@@ -69,6 +67,11 @@ spec:
       - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
       - { name: log-level, value: info }
       - { name: timeout, value: 5m } # per-call deadline (covers the whole poll)
+      - { name: watch-window, value: "" } # how long WE watch; empty => to completion
+      - { name: heartbeat, value: 30s } # progress line while the call blocks; 0s to silence
+      - { name: retry-on, value: "" } # substring in a FAILED call meaning "busy, re-ask"
+      - { name: attempts, value: "1" } # total tries, retry-on matches only
+      - { name: retry-wait, value: "60" } # seconds between attempts
       - { name: poll-interval, value: 5s } # gap between polls; poll mode only
       - { name: job-ttl, value: 24h } # keep finished Job for debug, then GC
 
@@ -100,18 +103,21 @@ spec:
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 5m }
+          - { name: watch-window, value: "" }
+          - { name: heartbeat, value: 30s }
+          - { name: retry-on, value: "" }
+          - { name: attempts, value: "1" }
+          - { name: retry-wait, value: "60" }
           - { name: poll-interval, value: 5s }
           - { name: job-ttl, value: 24h }
       outputs:
-        # The Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT), so
-        # callers can thread ids between stages.
+        # The Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT).
         parameters:
           - name: result
             valueFrom:
               parameter: "{{steps.call.outputs.parameters.result}}"
       steps:
-        # Not named for the namespace, as domain templates are — this one cannot
-        # know it. The caller's own step name carries that.
+        # Not namespace-named as domain templates are: this one cannot know it.
         - - name: call
             templateRef:
               name: step-executor-remote-namespace
@@ -126,23 +132,21 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - name: timeout
+                  value: "{{=int(duration(inputs.parameters['timeout']).Seconds()) + 120}}s"
+                - {
+                    name: detach-after,
+                    value: "{{inputs.parameters.watch-window}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 # op-name is the ONLY discriminator: job_names.rego rejects a
-                # job-name built from two parameters, since the shared half then
-                # repeats across calls to this template.
+                # job-name built from two parameters.
                 - {
                     name: job-name,
                     value: "http-call-{{inputs.parameters.op-name}}",
                   }
-                # Job manifest as a string; Argo substitutes before exec-kube
-                # creates it. No `metadata:` — exec-kube discards it and names the
-                # Job from job-name above.
-                #
-                # The shell body carries no {{...}} of its own: everything it
-                # branches on arrives as an env var, which keeps interpolated
-                # values in |- block scalars where a quote cannot break the
-                # manifest. See docs/template-naming.md.
+                # Job manifest as a string, substituted before exec-kube creates
+                # it. No `metadata:` — exec-kube discards it and uses job-name.
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
@@ -161,27 +165,16 @@ spec:
                             - name: call
                               image: {{inputs.parameters.call-http-image}}
                               imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  # Only when supplied: an empty token must not send a bare
-                                  # "Bearer " at a target that authenticates no-one.
-                                  if [ -n "${TOKEN:-}" ]; then
-                                    export HEADERS="authorization: Bearer ${TOKEN}${EXTRA_HEADERS:+,$EXTRA_HEADERS}"
-                                  elif [ -n "${EXTRA_HEADERS:-}" ]; then
-                                    export HEADERS="$EXTRA_HEADERS"
-                                  fi
-                                  /app/executor
-                                  # Only when asked for: with RESULT_EXPR empty the executor
-                                  # writes the whole body, which can be multi-line and would
-                                  # corrupt the result capture.
-                                  if [ -n "${RESULT_EXPR:-}" ]; then
-                                    echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result 2>/dev/null || true)"
-                                  fi
+                              # No shell: every caller value arrives as an env var
+                              # in a |- block scalar a quote cannot close.
+                              command: ["/app/executor"]
                               env:
-                                - { name: URL, value: "{{inputs.parameters.url}}" }
-                                - { name: METHOD, value: "{{inputs.parameters.method}}" }
+                                - name: URL
+                                  value: |-
+                                    {{inputs.parameters.url}}
+                                - name: METHOD
+                                  value: |-
+                                    {{inputs.parameters.method}}
                                 - name: PAYLOAD
                                   value: |-
                                     {{inputs.parameters.payload}}
@@ -201,10 +194,29 @@ spec:
                                   value: |-
                                     {{inputs.parameters.result-expr}}
                                 - { name: RESULT_PATH, value: /tmp/result }
+                                # Only when asked for: with result-expr empty the
+                                # executor would capture the whole response body.
+                                - { name: RESULT_MARKER, value: "{{=inputs.parameters['result-expr'] != '' ? 'true' : 'false'}}" }
+                                - name: RETRY_ON
+                                  value: |-
+                                    {{inputs.parameters.retry-on}}
+                                - name: ATTEMPTS
+                                  value: |-
+                                    {{inputs.parameters.attempts}}
+                                - name: RETRY_WAIT
+                                  value: |-
+                                    {{inputs.parameters.retry-wait}}
+                                - { name: HEARTBEAT, value: "{{=int(duration(inputs.parameters['heartbeat']).Seconds())}}" }
+                                # Machine principal: becomes a `uw.iam.machine`
+                                # header, plus `authorization: Bearer` if TOKEN
+                                # has not claimed it.
                                 - { name: IAM, value: "{{inputs.parameters.use-iam}}" }
-                                # Short-lived, submitter-supplied bearer token (not a Secret).
-                                - { name: TOKEN, value: "{{inputs.parameters.token}}" }
-                                - name: EXTRA_HEADERS
+                                # User principal; wins `authorization`.
+                                - name: TOKEN
+                                  value: |-
+                                    {{inputs.parameters.token}}
+                                # The executor merges TOKEN in — nothing to assemble here.
+                                - name: HEADERS
                                   value: |-
                                     {{inputs.parameters.extra-headers}}
                                 - { name: INSECURE_SKIP_VERIFY, value: "{{inputs.parameters.insecure-skip-verify}}" }

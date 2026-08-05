@@ -2,48 +2,49 @@
 # grpc-call — one gRPC request against a service in another namespace
 # =============================================================================
 # A one-pod Job running the `call-grpc` executor, dispatched via
-# step-executor-remote-namespace into the namespace where the target runs.
-# Descriptors come from server reflection, so no .proto files travel with it.
-# The HTTP twin is step-http-call: same parameters, same predicates, same auth.
+# step-executor-remote-namespace. Descriptors come from server reflection, so no
+# .proto files travel with it. HTTP twin: step-http-call — same parameters,
+# predicates and auth.
 #
 # Predicates are expr over `response.{status, ok, headers, body, messages, raw}`
 # (status 0 on OK, body the last message, messages all of a server-streaming
 # call):
 #
-#   success-expr  poll the method until true      (omit for a fire-once call)
+#   success-expr  poll until true                 (omit for a fire-once call)
 #   failure-expr  bail early when true            (poll mode only)
 #   assert        assert once, no polling         (excludes success-expr)
 #   result-expr   capture a value -> step `result`
 #
 # With `assert` unset the call still requires response.ok.
 #
-# ⚠️ POLLING DOES NOT RETRY ERRORS. success-expr re-issues the call only on a
-# RESPONSE that fails the predicate; a non-OK gRPC status is an error and the
-# executor exits on it. "Busy, ask again" cannot be a predicate — that is what
-# `retry-on` is for, which greps the executor's output and re-runs it.
+# ⚠️ POLLING DOES NOT RETRY ERRORS. success-expr re-issues only on a RESPONSE
+# that fails the predicate; a non-OK status is an error and the executor exits.
+# "Busy, ask again" is `retry-on`: re-makes a FAILED call whose error or body
+# matches that substring. Never fires for a call that is merely slow.
 #
-# address-from-pod dials a Running pod's IP for targets with no Service at all
+# address-from-pod dials a Running pod's IP for targets with no Service
 # (billing-processor, by design). Needs `pods list` on the runner-sa.
 #
-# AUTH, composable: `use-iam` for a machine principal minted from the Job pod's
-# ServiceAccount (needs iam-machine-api reachable by the runner-sa); `token` for
-# a user principal, kept a parameter not a Secret because it is ephemeral, and
-# assembled in-shell so it never lands in the rendered manifest; neither if the
-# target authenticates no-one.
+# AUTH, composable: `use-iam` (machine principal from the Job pod's SA, needs
+# iam-machine-api reachable by runner-sa); `token` (user principal, a parameter
+# not a Secret because it is ephemeral, and it WINS `authorization`). The
+# executor merges both and never logs the token.
 #
-# TWO CLOCKS. `timeout` is how long the CALL may take — it bounds the executor
-# and, +2m, the Job. `watch-timeout` is how long WE watch; empty means `timeout`.
-# Setting it shorter is how a caller stops watching a method that blocks for the
-# whole job it kicks off: exec-kube stops streaming and exits non-zero without
-# reaching teardown, so nothing is deleted or cancelled and the call finishes on
-# its own clock. Pair with `continueOn: {failed: true}` so the caller stays green
-# (step-energy-reprocess-bills' `send`), and only where the caller has its own
-# gate on the work landing — past the watch window that gate is the only verdict.
-# The gate is never this template's business; it can be any step at all.
+# THREE CLOCKS, and only the middle one is safe to shorten:
 #
-# ⚠️ Shorten watch-timeout, NEVER timeout. Cutting `timeout` makes call-grpc
-# cancel the RPC, and a server that ties its work to the client's context
-# (billing-processor does) throws the work away with it.
+#   timeout       how long the CALL may take; bounds the executor and, +2m, the
+#                 Job. ⚠️ NEVER cut this to stop waiting — it cancels the RPC,
+#                 and a server tying its work to the client context
+#                 (billing-processor does) throws the work away with it.
+#   watch-window  how long WE watch. On expiry exec-kube stops streaming and
+#                 exits ZERO, leaving the Job running and skipping teardown.
+#                 Empty watches to completion.
+#   failure       reaching `timeout` while still watching.
+#
+# Set watch-window only where the caller has its own gate on the work landing
+# (see step-energy-reprocess-bills: `send` detaches, `await` is the gate). It
+# needs no `continueOn`, and a REAL failure inside the window still fails the
+# caller. `heartbeat` keeps a long block distinguishable from a hang.
 #
 # Reference-only: consumed via templateRef.
 # =============================================================================
@@ -92,7 +93,8 @@ spec:
       - { name: image-pull-secret, value: dockerhub-key } # must exist in target ns
       - { name: log-level, value: info }
       - { name: timeout, value: 5m } # how long the CALL may take
-      - { name: watch-timeout, value: "" } # how long WE watch it; empty => timeout
+      - { name: watch-window, value: "" } # how long WE watch; empty => to completion
+      - { name: heartbeat, value: 30s } # progress line while the call blocks; 0s to silence
       - { name: poll-interval, value: 5s } # gap between polls; poll mode only
       - { name: job-ttl, value: 24h } # keep finished Job for debug, then GC
 
@@ -129,19 +131,18 @@ spec:
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 5m }
-          - { name: watch-timeout, value: "" }
+          - { name: watch-window, value: "" }
+          - { name: heartbeat, value: 30s }
           - { name: poll-interval, value: 5s }
           - { name: job-ttl, value: 24h }
       outputs:
-        # The Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT), so
-        # callers can thread ids between stages.
+        # The Job's captured value (RESULT_EXPR -> ARGO_RESULT_OUTPUT).
         parameters:
           - name: result
             valueFrom:
               parameter: "{{steps.call.outputs.parameters.result}}"
       steps:
-        # Not named for the namespace, as domain templates are — this one cannot
-        # know it. The caller's own step name carries that.
+        # Not namespace-named as domain templates are: this one cannot know it.
         - - name: call
             templateRef:
               name: step-executor-remote-namespace
@@ -156,26 +157,26 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                # How long exec-kube streams the logs, NOT how long the call may
-                # take — see TWO CLOCKS in the header.
+                # The call's timeout +2m, matching activeDeadlineSeconds below, so
+                # exec-kube outlives the call it watches. The 's' sits outside the
+                # tag: expr yields an integer, YAML makes it a duration string.
                 - name: timeout
-                  value: "{{=inputs.parameters['watch-timeout'] == '' ? inputs.parameters['timeout'] : inputs.parameters['watch-timeout']}}"
+                  value: "{{=int(duration(inputs.parameters['timeout']).Seconds()) + 120}}s"
+                - {
+                    name: detach-after,
+                    value: "{{inputs.parameters.watch-window}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 # op-name is the ONLY discriminator: job_names.rego rejects a
-                # job-name built from two parameters, since the shared half then
-                # repeats across calls to this template.
+                # job-name built from two parameters.
                 - {
                     name: job-name,
                     value: "grpc-call-{{inputs.parameters.op-name}}",
                   }
-                # Job manifest as a string; Argo substitutes before exec-kube
-                # creates it. No `metadata:` — exec-kube discards it and names the
-                # Job from job-name above.
-                #
-                # The shell body carries no {{...}} of its own: everything it
-                # branches on arrives as an env var, which keeps interpolated
-                # values in |- block scalars where a quote cannot break the
-                # manifest. See docs/template-naming.md.
+                # Job manifest as a string, substituted before exec-kube creates
+                # it. No `metadata:` — exec-kube discards it and uses job-name.
+                # No shell: every caller value arrives as an env var in a |- block
+                # scalar a quote cannot close. See docs/template-naming.md.
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
@@ -194,53 +195,20 @@ spec:
                             - name: call
                               image: {{inputs.parameters.call-grpc-image}}
                               imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  # No Service: dial a Running pod's IP. wget, not curl (not in
-                                  # the image); SSL_CERT_FILE, not --ca-certificate; and the
-                                  # trailing cut drops Calico's /32.
-                                  if [ -n "${POD_SELECTOR:-}" ]; then
-                                    SA=/var/run/secrets/kubernetes.io/serviceaccount
-                                    ip=$(SSL_CERT_FILE=$SA/ca.crt wget -qO- --header="Authorization: Bearer $(cat $SA/token)" \
-                                      "https://kubernetes.default.svc/api/v1/namespaces/$(cat $SA/namespace)/pods?labelSelector=${POD_SELECTOR}&fieldSelector=status.phase%3DRunning" \
-                                      | tr ',' '\n' | grep '"podIP"' | head -1 | cut -d'"' -f4 | cut -d/ -f1)
-                                    [ -n "$ip" ] || { echo "no Running pod matching ${POD_SELECTOR}"; exit 1; }
-                                    export ADDRESS="$ip:${ADDRESS_PORT}"
-                                    echo "resolved ${POD_SELECTOR} to $ADDRESS"
-                                  fi
-                                  # Only when supplied: an empty token must not send a bare
-                                  # "Bearer " at a target that authenticates no-one.
-                                  if [ -n "${TOKEN:-}" ]; then
-                                    export HEADERS="authorization: Bearer ${TOKEN}${EXTRA_HEADERS:+,$EXTRA_HEADERS}"
-                                  elif [ -n "${EXTRA_HEADERS:-}" ]; then
-                                    export HEADERS="$EXTRA_HEADERS"
-                                  fi
-                                  i=1
-                                  while :; do
-                                    # Redirected, not piped: `if cmd | tee` tests tee's exit
-                                    # status, so every failure would read as a success.
-                                    if /app/executor >/tmp/run.log 2>&1; then cat /tmp/run.log; break; fi
-                                    cat /tmp/run.log
-                                    { [ -n "${RETRY_ON:-}" ] && grep -qi "$RETRY_ON" /tmp/run.log; } || exit 1
-                                    i=$((i+1))
-                                    if [ "$i" -gt "${ATTEMPTS:-1}" ]; then
-                                      echo "still matching \"$RETRY_ON\" after $ATTEMPTS attempt(s); giving up"
-                                      exit 1
-                                    fi
-                                    echo "matched \"$RETRY_ON\"; retrying in ${RETRY_WAIT}s (attempt $i/$ATTEMPTS)"
-                                    sleep "$RETRY_WAIT"
-                                  done
-                                  # Only when asked for: with RESULT_EXPR empty the executor
-                                  # writes the whole body, which can be multi-line and would
-                                  # corrupt the result capture.
-                                  if [ -n "${RESULT_EXPR:-}" ]; then
-                                    echo "ARGO_RESULT_OUTPUT=$(cat /tmp/result 2>/dev/null || true)"
-                                  fi
+                              command: ["/app/executor"]
                               env:
-                                - { name: ADDRESS, value: "{{inputs.parameters.address}}" }
-                                - { name: METHOD, value: "{{inputs.parameters.method}}" }
+                                - name: ADDRESS
+                                  value: |-
+                                    {{inputs.parameters.address}}
+                                - name: ADDRESS_FROM_POD
+                                  value: |-
+                                    {{inputs.parameters.address-from-pod}}
+                                - name: ADDRESS_PORT
+                                  value: |-
+                                    {{inputs.parameters.address-port}}
+                                - name: METHOD
+                                  value: |-
+                                    {{inputs.parameters.method}}
                                 - name: PAYLOAD
                                   value: |-
                                     {{inputs.parameters.payload}}
@@ -260,19 +228,30 @@ spec:
                                   value: |-
                                     {{inputs.parameters.result-expr}}
                                 - { name: RESULT_PATH, value: /tmp/result }
-                                - name: POD_SELECTOR
-                                  value: |-
-                                    {{inputs.parameters.address-from-pod}}
-                                - { name: ADDRESS_PORT, value: "{{inputs.parameters.address-port}}" }
+                                # Only when asked for: with result-expr empty the
+                                # executor would capture the whole response body.
+                                - { name: RESULT_MARKER, value: "{{=inputs.parameters['result-expr'] != '' ? 'true' : 'false'}}" }
                                 - name: RETRY_ON
                                   value: |-
                                     {{inputs.parameters.retry-on}}
-                                - { name: ATTEMPTS, value: "{{inputs.parameters.attempts}}" }
-                                - { name: RETRY_WAIT, value: "{{inputs.parameters.retry-wait}}" }
+                                - name: ATTEMPTS
+                                  value: |-
+                                    {{inputs.parameters.attempts}}
+                                - name: RETRY_WAIT
+                                  value: |-
+                                    {{inputs.parameters.retry-wait}}
+                                - { name: HEARTBEAT, value: "{{=int(duration(inputs.parameters['heartbeat']).Seconds())}}" }
+                                # Machine principal: rides a dial interceptor as
+                                # `uw.iam.machine` metadata on every RPC, reflection
+                                # included — never goes near HEADERS.
                                 - { name: IAM, value: "{{inputs.parameters.use-iam}}" }
-                                # Short-lived, submitter-supplied bearer token (not a Secret).
-                                - { name: TOKEN, value: "{{inputs.parameters.token}}" }
-                                - name: EXTRA_HEADERS
+                                # User principal; merged into HEADERS as
+                                # `authorization: Bearer <token>`, never logged.
+                                - name: TOKEN
+                                  value: |-
+                                    {{inputs.parameters.token}}
+                                # The executor merges TOKEN in — nothing to assemble here.
+                                - name: HEADERS
                                   value: |-
                                     {{inputs.parameters.extra-headers}}
                                 - { name: PLAINTEXT, value: "{{inputs.parameters.plaintext}}" }

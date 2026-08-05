@@ -162,6 +162,14 @@ Two things break it, and both come from ordinary values — expr predicates like
 
 `policy/job_templates.rego` enforces both: it substitutes the nastiest value any caller passes to each parameter and parses the Job manifest that comes out.
 
+> **Prefer no shell at all.** Where the image is a purpose-built executor, give the
+> container `command: ["/app/executor"]` and pass everything as env vars. That removes the
+> failure mode rather than policing it: with no `args:` there is nowhere for a future
+> author to write `--flag "$VALUE"` and put a caller's quote on a command line.
+> `step-grpc-call` and `step-http-call` are the worked examples — pod-IP resolution, bearer
+> assembly, retries and the result marker all moved into the binary so the template could
+> stop scripting them. Reach for `sh -c` only when the image is a general-purpose one.
+
 ## Adding a new template
 
 1. Decide: does a human launch it? → `flow-`. Is it called by other workflows? → `step-`.

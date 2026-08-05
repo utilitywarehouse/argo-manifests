@@ -11,38 +11,44 @@ metadata:
     workflows.argoproj.io/invocation: reference-only
 spec:
   templates:
-    # FIXME: data only travels IN as values substituted into job-template, never as a
+    # FIXME: data travels IN only as values substituted into job-template, never as a
     # file — Argo mounts artifacts onto THIS pod, while the Job runs in another cluster
-    # with no Argo executor or artifact-repo creds. So multi-line data has to be inlined
-    # and breaks the Job manifest's YAML, capping callers at one row (see the FIXMEs in
+    # with no Argo executor or artifact-repo creds. Multi-line data inlined this way
+    # breaks the Job manifest's YAML, capping callers at one row (see the FIXMEs in
     # step-billing-set-invoice-number / step-billing-produce-fwf). Fix in exec-kube:
-    # take an input artifact here, project it as a ConfigMap in the target namespace and
-    # volumeMount it into the Job's containers, owner-referenced to the Job for GC. Also
-    # needs configmaps create/delete on the job-executor Role
-    # (system/namespaced/workflow/modules/job-executor/sa.yaml), and is ~1MiB-capped.
+    # take an input artifact here, project it as a ConfigMap in the target namespace,
+    # volumeMounted into the Job's containers and owner-referenced to the Job for GC.
+    # Needs configmaps create/delete on the job-executor Role
+    # (system/namespaced/workflow/modules/job-executor/sa.yaml); ~1MiB cap.
     - name: execute-job
       inputs:
         parameters:
-          # cluster-name is the single key that resolves everything 1:1: the CA cert
-          # (cluster-ca-certs/<cluster-name>-ca.crt), the token
-          # (job-executor-tokens/<cluster-name>-<namespace>) and the API server URL
-          # (cluster-servers/<cluster-name>, see CLUSTER_SERVER below).
+          # Resolves everything 1:1: the CA cert (cluster-ca-certs/<name>-ca.crt), the
+          # token (job-executor-tokens/<name>-<namespace>) and the API server URL
+          # (cluster-servers/<name>).
           - name: cluster-name
           - name: target-namespace
           # The ONLY thing that names the Job: exec-kube creates
           # `argo-<job-name>-<workflow.uid[:8]>` and rebuilds ObjectMeta from scratch,
-          # so a `metadata:` in job-template below is parsed and discarded. The uid
-          # suffix is identical for every step of one run, so job-name must be unique
-          # across EVERY execute-job call a workflow makes into the same
-          # cluster+namespace — including calls made by templates it composes. Reusing
-          # one means the second Job creates while the first is still being torn down:
+          # so a `metadata:` in job-template is parsed and discarded. The uid suffix is
+          # identical for every step of one run, so job-name must be unique across EVERY
+          # execute-job call a workflow makes into the same cluster+namespace, composed
+          # templates included. Reusing one gives:
           #   failed to create job: object is being deleted: jobs.batch "x" already exists
-          # Name it after the WORK, never the namespace (the namespace is what
-          # collides). DNS-1123 slug, <= 49 chars. See docs/template-naming.md.
+          # Name it after the WORK, never the namespace. DNS-1123 slug, <= 49 chars.
+          # See docs/template-naming.md.
           - name: job-name
           - name: job-template
+          # The FAILURE deadline: reaching it fails the step. Keep it the real
+          # ceiling and use detach-after to stop watching without failing.
           - name: timeout
             value: "5m"
+          # Stop watching after this long and exit 0, leaving the Job running and
+          # skipping teardown. Empty watches to completion. Must be less than
+          # timeout, or exec-kube rejects it at startup. The caller needs its own
+          # gate on the work landing; `result` is empty when this fires.
+          - name: detach-after
+            value: ""
           - name: teardown
             value: "true"
           - name: log-level
@@ -75,8 +81,7 @@ spec:
         env:
           - name: CLUSTER_NAME
             value: "{{inputs.parameters.cluster-name}}"
-          # Resolved from the per-environment cluster-servers ConfigMap by cluster-name;
-          # Argo substitutes {{inputs.parameters.cluster-name}} into the key before submit.
+          # Keyed by cluster-name, substituted into the key before submit.
           - name: CLUSTER_SERVER
             valueFrom:
               configMapKeyRef:
@@ -90,14 +95,15 @@ spec:
             value: "{{workflow.name}}"
           - name: WORKFLOW_UID
             value: "{{workflow.uid}}"
-          # exec-kube's --workflow-step-name, which is what it prefixes the Job name
-          # with. Passed explicitly rather than taken from the calling step's name:
-          # the step name is the namespace-labelled node the UI graph wants, and
-          # several templates legitimately share one.
+          # exec-kube's --workflow-step-name, its Job-name prefix. Explicit rather
+          # than the calling step's name, which is namespace-labelled for the UI
+          # graph and shared by several templates.
           - name: WORKFLOW_STEP_NAME
             value: "argo-{{inputs.parameters.job-name}}"
           - name: TIMEOUT
             value: "{{inputs.parameters.timeout}}"
+          - name: DETACH_AFTER
+            value: "{{inputs.parameters.detach-after}}"
           - name: TEARDOWN
             value: "{{inputs.parameters.teardown}}"
           - name: LOG_LEVEL

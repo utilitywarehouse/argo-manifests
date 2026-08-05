@@ -1,27 +1,28 @@
 # =============================================================================
 # reprocess-bills — re-open an account's billing blobs, re-send them, wait
 # =============================================================================
-# Runs after reset. Reset deletes the bills but the adapter still has their blobs
-# marked processed (billing_period_accounts.processed_at), so nothing re-sends
-# them: the next bill is fabricated with no energy lines and
-# assert-bills-processed passes anyway. This closes that gap.
+# Runs AFTER reset. Reset deletes the bills but the adapter still has their
+# blobs marked processed (billing_period_accounts.processed_at), so nothing
+# re-sends them and the next bill is fabricated with no energy lines.
 #
 #   unprocess  processed_at = NULL for the rows in scope; the adapter selects on
 #              `processed_at IS NULL AND validation_issues IS NULL`
 #   send   ┐   ValidateAndSendBillingData — a bill run re-submits those blobs.
 #          │   The RPC blocks for the whole run and returns nothing we act on, so
 #          ├─  these two are ONE step group: send stops WATCHING after a few
-#          │   minutes (the run itself carries on untouched) and await settling
-#   await  ┘   is what ends the group. They overlap rather than add up.
+#          │   minutes (the run carries on untouched) and await settling ends the
+#   await  ┘   group. They overlap rather than add up.
 #
 #              await polls until those rows are processed, failing fast on any
 #              issue. Past send's watch window it is also the only place a failed
-#              send surfaces — see both notes below.
+#              send surfaces.
 #
-# The RPC takes an empty request and walks every migrated account, hence the
-# minutes. `processed_at IS NULL` is the only scoping there is.
+# The RPC scopes to one account (`optional string external_account_number = 1`),
+# so send passes the FIRST of external-account-number. Left unset it walks every
+# migrated account instead. Within that account `processed_at IS NULL` is the
+# only scoping there is, so send always covers more periods than the SQL scope.
 #
-# Scope. First one set wins — a precedence, not a combination, and not a range.
+# SCOPE. First one set wins — a precedence, not a combination, and not a range.
 # unprocess and await must evaluate it identically, or await polls for rows
 # unprocess never touched.
 #
@@ -33,17 +34,16 @@
 #                          month behind the bill-run month
 #   neither                max(bill_period_from) per account
 #
-# Reset is not period-aware: it deletes every bill the account has, so a narrow
+# Reset is not period-aware — it deletes every bill the account has — so a narrow
 # scope leaves earlier periods deleted and not re-sent. Name their bill numbers
 # if they matter.
 #
 # unprocess clears processing_issues and validation_issues too, so anything
-# non-NULL after the send belongs to this run. Nothing resets processing_issues
-# on success. A row carrying validation_issues is excluded from the adapter's
-# query — its energy data is gone and nothing would re-send it — so clearing is
-# the only way that period comes back; it also re-admits blobs the adapter was
-# skipping, and a send fails per account, so one broken blob blocks that
-# account's healthy periods.
+# non-NULL after the send belongs to this run. A row carrying validation_issues
+# is excluded from the adapter's query, so clearing it is the only way that
+# period comes back; it also re-admits blobs the adapter was skipping, and a
+# send fails per account, so one broken blob blocks that account's healthy
+# periods.
 #
 # Reference-only: consumed by step-billing-bill-account via templateRef.
 # =============================================================================
@@ -75,8 +75,8 @@ spec:
       - { name: target-namespace, value: energy-billing }
   templates:
     # -------------------------------------------------------------------------
-    # reprocess — the composite callers want; the parts still render as their
-    # own nodes in the graph.
+    # reprocess — the composite callers want; the parts still render as their own
+    # nodes in the graph.
     # -------------------------------------------------------------------------
     - name: reprocess
       inputs:
@@ -118,20 +118,22 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
 
-        # ONE STEP GROUP, on purpose: the bill run and the wait for its result
-        # are the same stretch of time, not two. `send` stops watching after its
-        # watch-window while the run carries on, so `await` settling is what ends
-        # this group. The group doesn't wait on the RPC itself.
+        # ONE STEP GROUP, on purpose: the bill run and the wait for its result are
+        # the same stretch of time. `send` stops watching after its watch-window
+        # while the run carries on, so `await` settling ends the group.
         #
-        #
-        # Both skipped on a dry run: it writes to billing, not just to the
-        # adapter, and with nothing sent await would only burn its timeout.
+        # Both skipped on a dry run: sending writes to billing, and with nothing
+        # sent await would only burn its timeout.
         - - name: send
             when: "{{inputs.parameters.dry-run}} != true"
             template: send
             arguments:
               parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: external-account-number,
+                    value: "{{inputs.parameters.external-account-number}}",
+                  }
                 - { name: timeout, value: "{{inputs.parameters.send-timeout}}" }
                 - {
                     name: cluster-name,
@@ -177,10 +179,9 @@ spec:
     # unprocess — clear processed_at for the rows in scope, so the adapter's next
     # run picks the blobs up again.
     #
-    # The one step here that writes, hence --exec: query-pg's default path
-    # streams through a server-side cursor, and DECLARE CURSOR takes only
-    # SELECT/VALUES. billing_adapter_role is the adapter's own user, the role
-    # that sets processed_at, so no extra grant is involved.
+    # The only step that writes, hence --exec: query-pg's default path streams
+    # through a server-side cursor, and DECLARE CURSOR takes only SELECT/VALUES.
+    # billing_adapter_role is the adapter's own user, so no extra grant.
     # -------------------------------------------------------------------------
     - name: unprocess
       inputs:
@@ -208,9 +209,6 @@ spec:
           - { name: timeout, value: 5m }
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
-      # No outputs — nothing reads this, and execute-job's `result` is global, so
-      # it lands on the run as {{workflow.outputs.artifacts.unprocess-bills}}.
-      # See docs/data-flow.md.
       steps:
         - - name: energy-billing
             templateRef:
@@ -272,7 +270,7 @@ spec:
                                   fi
                                   echo "scope: accounts [$ACCTS], $MODE"
 
-                                  # Every row in scope, listed the same on a dry run and a real one —
+                                  # Every row in scope, listed the same on a dry run and a real one:
                                   # the UPDATE reports a bare count, so this is the only record of
                                   # them. Already-open rows stay in scope; the send needs those too.
                                   EFFECT="CASE WHEN processed_at IS NOT NULL THEN 'reopen' ELSE 'already open' END || CASE WHEN validation_issues IS NOT NULL THEN ' + clear validation_issues' ELSE '' END || CASE WHEN processing_issues IS NOT NULL THEN ' + clear processing_issues' ELSE '' END"
@@ -295,7 +293,7 @@ spec:
                                   fi
 
                                   # All three, so anything non-NULL after the send is this run's
-                                  # verdict. See the header for what clearing them re-admits.
+                                  # verdict. Header covers what clearing them re-admits.
                                   SET="processed_at = NULL, processing_issues = NULL, validation_issues = NULL, updated_at = now()"
                                   /app/executor --exec --query "UPDATE public.billing_period_accounts SET $SET WHERE $SCOPE" --format csv --output /tmp/out.csv
                                   affected=$(tail -n 1 /tmp/out.csv)
@@ -308,46 +306,41 @@ spec:
                                   {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
 
     # -------------------------------------------------------------------------
-    # send — ValidateAndSendBillingData on the billing-processor. We stop
-    # WATCHING it early; it is never stopped.
+    # send — ValidateAndSendBillingData on the billing-processor. We stop WATCHING
+    # it early; it is never stopped.
     #
     # The utils service is served by the billing-processor deployment (its
     # PROCESS_UTILS_PORT), not billing-adapter-api. Both are :8090, which makes
-    # the wrong one look right. energy-billing exposes no Service for it at all,
-    # hence address-from-pod.
+    # the wrong one look right. energy-billing exposes no Service for it, hence
+    # address-from-pod.
     #
-    # The RPC blocks for the whole bill run with no server-side deadline and
-    # returns nothing we act on — the rows coming back processed is the real
-    # signal, and `await` watches for exactly that, in parallel with this. So
-    # there is no reason to sit on the call as well.
+    # The RPC blocks for the whole run with no server-side deadline and returns
+    # nothing we act on; the rows coming back processed is the real signal, and
+    # `await` watches for that in parallel.
     #
-    # HOW, exactly — because "not waiting" is easy to get wrong here:
-    #   timeout       how long the CALL may take. Stays long: it is call-grpc's
-    #                 own deadline, and cutting it would cancel the RPC, which
-    #                 billing-processor takes as "throw the bill run away".
-    #   watch-window  how long exec-kube streams the Job's logs. When it runs out
-    #                 exec-kube exits non-zero WITHOUT reaching its teardown
-    #                 branch. Nothing is deleted, nothing is cancelled: the Job
-    #                 pod keeps running, its gRPC client stays connected, and the
-    #                 bill run finishes normally. Only our watching stops.
-    #   continueOn    exec-kube's non-zero exit is expected, so it must not fail
-    #                 the run. The `energy-billing` child shows red (it stopped
-    #                 watching); this template stays green.
+    #   timeout       how long the CALL may take. Stays long: cutting it cancels
+    #                 the RPC, which billing-processor takes as "throw the bill
+    #                 run away".
+    #   watch-window  how long exec-kube streams the Job's logs. On expiry it
+    #                 detaches, writes the artefacts it has and exits ZERO,
+    #                 skipping teardown. The Job pod keeps running, its gRPC
+    #                 client stays connected, and the step stays GREEN.
     #
-    # The watch window is also the whole verdict: it is sized to outlast a
-    # rejection, so a bad method, a failed auth or a first "already in progress"
-    # lands in that child's logs. Anything after it shows up as `await` timing
-    # out, and the Job is kept for its ttl so you can read the rest:
-    #   kubectl -n energy-billing logs job/grpc-call-send-billing-data-<uid8>
+    # No continueOn: detaching is a success, and a REAL failure inside the window
+    # — bad method, failed auth, a rejection outlasting the retries — still fails
+    # the run. The window is sized to outlast a rejection so those land in the
+    # child's logs; anything later shows up as `await` timing out, and the Job is
+    # kept for its ttl:
+    #   kubectl -n energy-billing logs job/argo-grpc-call-send-billing-data-<uid8>
     #
     # A run already in flight is rejected with "billing run already in progress".
-    # It may have passed our accounts before we un-processed them, so we wait it
-    # out and ask again rather than trust it — that is what retry-on drives, and
-    # it keeps going inside the Job long after we have stopped reading.
+    # It may have passed our accounts before we un-processed them, so retry-on
+    # waits it out and asks again rather than trusting it.
     # -------------------------------------------------------------------------
     - name: send
       inputs:
         parameters:
+          - { name: external-account-number }
           - {
               name: method,
               value: "uw.energy.billing.billing_adapter.v1.BillingAdapterUtilsService/ValidateAndSendBillingData",
@@ -358,17 +351,23 @@ spec:
           - { name: target-namespace, value: energy-billing }
           - { name: log-level, value: info }
           # Long enough to catch a rejection (the first retry-on wait is 60s), far
-          # short of the run. Raising it only delays this node, never the bill run.
+          # short of the run. Raising it only delays this node.
           - { name: watch-window, value: 3m }
           - { name: timeout, value: 60m } # the bill run's real deadline
       steps:
         - - name: energy-billing
-            continueOn: { failed: true }
             templateRef: { name: step-grpc-call, template: call }
             arguments:
               parameters:
                 - { name: op-name, value: send-billing-data }
                 - { name: method, value: "{{inputs.parameters.method}}" }
+                # `optional string external_account_number = 1` — singular, so
+                # only the FIRST of a comma-separated list is sent. Plural support
+                # is an upstream ask; until then a multi-account run re-sends only
+                # that account's blobs and `await` fails on the rest.
+                - name: payload
+                  value: |-
+                    {"external_account_number": "{{=trim(split(inputs.parameters['external-account-number'], ',')[0])}}"}
                 # No Service: resolve a Running billing-processor pod and dial it.
                 - { name: address-from-pod, value: "app=billing-processor" }
                 - { name: address-port, value: "8090" }
@@ -379,11 +378,11 @@ spec:
                     value: "{{inputs.parameters.retry-wait}}",
                   }
                 - { name: use-iam, value: "true" }
-                # The two clocks, deliberately different: let the call run this
-                # long, watch it for only that long.
+                # Deliberately different: let the call run this long, watch it for
+                # only that long.
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - {
-                    name: watch-timeout,
+                    name: watch-window,
                     value: "{{inputs.parameters.watch-window}}",
                   }
                 - {
@@ -400,11 +399,9 @@ spec:
     # await — poll billing_adapter_db until the rows in scope are processed.
     #
     # Polls rather than asserts: the send may have been answered by a bill run
-    # someone else started, and a slow run stays visible.
-    #
-    # unprocess cleared all three columns, so anything found here is this run's.
-    # Leaves early on:
-    #   validation_issues  the blob was re-ingested mid-run and failed again. The
+    # someone else started, and a slow run stays visible. unprocess cleared all
+    # three columns, so anything found here is this run's. Leaves early on:
+    #   validation_issues  the blob was re-ingested mid-run and failed again; the
     #                      adapter filters those rows out, so they can never flip
     #   processing_issues  the send's own verdict on the blob
     #   no rows in scope   the scope is wrong; waiting cannot fix it
@@ -450,7 +447,7 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                # exec-kube must outlive the poll, or it stops managing the Job mid-wait.
+                # Must outlive the poll, or exec-kube drops the Job mid-wait.
                 - {
                     name: timeout,
                     value: "{{inputs.parameters.job-active-deadline}}",
@@ -519,8 +516,8 @@ spec:
                                       exit 1
                                     fi
                                     if [ "$invalid" != "0" ]; then
-                                      echo "$invalid row(s) carry validation_issues; the adapter will never select them, so they cannot become processed."
-                                      echo "unprocess cleared this column, and only a re-consume of the blob from S3 writes it, so these were re-ingested mid-run and re-failed validation — the issue is live, not stale."
+                                      echo "$invalid row(s) carry validation_issues; the adapter never selects them, so they cannot become processed."
+                                      echo "unprocess cleared this column and only a re-consume from S3 writes it, so the issue is live, not stale."
                                       /app/executor --query "SELECT external_account_number, bill_period_from, file_name, validation_issues FROM public.billing_period_accounts WHERE $SCOPE AND validation_issues IS NOT NULL" --format csv --output /tmp/bad.csv
                                       cat /tmp/bad.csv
                                       exit 1
@@ -538,8 +535,7 @@ spec:
                                     fi
                                     if [ "$(date +%s)" -ge "$deadline" ]; then
                                       echo "timed out with $unprocessed of $total still unprocessed"
-                                      echo "we stopped watching the send after its watch window, so past that point a failed"
-                                      echo "run looks exactly like a slow one. Read the Job before assuming it is just slow:"
+                                      echo "past the send's watch window a failed run looks like a slow one — read the Job:"
                                       echo "  kubectl -n {{inputs.parameters.target-namespace}} logs job/grpc-call-send-billing-data-<workflow-uid[:8]>"
                                       exit 1
                                     fi

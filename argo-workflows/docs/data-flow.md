@@ -58,6 +58,12 @@ echo "ARGO_RESULT_OUTPUT=$account_id"
 
 Only `<value>` is written to `result`. With no marker, `result` is empty.
 
+**The `call-*` executors emit it themselves.** Set `RESULT_MARKER=true` alongside
+`RESULT_PATH` and `call-grpc`/`call-http` print the marker for you — the single-line form
+for a scalar, the `BEGIN`/`END` block when the value spans lines. `step-grpc-call` and
+`step-http-call` turn it on exactly when a caller passes `result-expr`, so a step needs no
+shell to capture a value.
+
 ### Where the result rides back
 
 Parameters live in the Workflow object (etcd) — keep them small. Artifacts live in S3 and
