@@ -105,7 +105,8 @@ spec:
           # How long each after-snapshot waits for its store to catch up with
           # Commit before dumping anyway. None fail when it runs out.
           - { name: verify-wait, value: 10m }
-          - { name: stage-timeout, value: 15m }
+          - { name: stage-timeout, value: 30m }
+          - { name: call-timeout, value: 10m }
           - { name: log-level, value: info }
       steps:
         # ---- Resolve the segment FILE id -----------------------------------
@@ -121,6 +122,7 @@ spec:
                 - name: args
                   value: "resolve --prefix {{inputs.parameters.segment-ids}}"
                 - { name: capture-result, value: "true" }
+                - { name: timeout, value: "{{inputs.parameters.call-timeout}}" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -144,6 +146,7 @@ spec:
                     create --name '{{inputs.parameters.segment-name}}'
                     --members {{steps.resolve-segment-file.outputs.parameters.result}}
                 - { name: capture-result, value: "true" }
+                - { name: timeout, value: "{{inputs.parameters.call-timeout}}" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -233,9 +236,10 @@ spec:
         # ---- Human validation gate (attended only) -------------------------
         - - name: pause-before-commit
             templateRef: { name: step-pause, template: pause }
-            when: "{{inputs.parameters.validation-mode}} == attended"
             arguments:
               parameters:
+                - name: active
+                  value: "{{inputs.parameters.validation-mode}}"
                 - name: message
                   value: >-
                     BEFORE COMMIT — the segment is BILLED and Commit is
@@ -393,6 +397,7 @@ spec:
                 - { name: op-name, value: schedule-deliveries }
                 - name: args
                   value: "schedule --id {{steps.create-segment.outputs.parameters.result}}"
+                - { name: timeout, value: "{{inputs.parameters.call-timeout}}" }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -412,8 +417,10 @@ spec:
                   value: >-
                     progress --id {{steps.create-segment.outputs.parameters.result}}
                     --to STATE_FULFILLING
-                # The scheduled dispatch can lag well behind the transition.
-                - { name: timeout, value: 45m }
+                - {
+                    name: timeout,
+                    value: "{{inputs.parameters.stage-timeout}}",
+                  }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",

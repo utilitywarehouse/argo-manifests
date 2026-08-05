@@ -18,9 +18,13 @@
 #
 #   when: "{{steps.<pause-step>.outputs.parameters.approve}} == yes"
 #
-# GATING THE PAUSE ITSELF is the caller's business: leave it unconditional for a
-# checkpoint that always fires, or add `when:` for one that only fires in some
-# modes (step-billing-bill-run gates its pre-Commit pause on validation-mode).
+# GATING THE PAUSE ITSELF is this template's business, not the caller's: pass
+# `active`, never a `when:`. It defaults to true, and `attended` fires it as
+# well, so a workflow hands its own validation-mode straight through without
+# translating it. Anything else skips, and the outputs below fall back to their defaults.
+#
+# The suspend sits in its own template so the gate can skip it, which nests a
+# node under each pause: resume the inner `suspend`, not the `pause` parent.
 #
 # Reference-only: consumed via templateRef.
 # =============================================================================
@@ -31,7 +35,8 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Do NOT submit from the UI. Suspend until a human resumes, showing what to
-      verify and prompting for a yes/no decision. Consumed via templateRef.
+      verify and prompting for a yes/no decision. Skipped when the caller's
+      `active` input is not true. Consumed via templateRef.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: qe
@@ -39,6 +44,38 @@ metadata:
 spec:
   templates:
     - name: pause
+      inputs:
+        parameters:
+          - name: message
+            description: What to verify before resuming this workflow
+          - name: active
+            description: >-
+              The caller's own condition for this checkpoint. true or attended
+              fires it; anything else skips it.
+            default: "true"
+      steps:
+        - - name: suspend
+            template: suspend
+            # `attended` is accepted alongside `true` so a workflow can hand its
+            # validation-mode straight through without translating it.
+            when: >-
+              {{inputs.parameters.active}} == true ||
+              {{inputs.parameters.active}} == attended
+            arguments:
+              parameters:
+                - { name: message, value: "{{inputs.parameters.message}}" }
+      outputs:
+        parameters:
+          - name: message
+            valueFrom:
+              parameter: "{{steps.suspend.outputs.parameters.message}}"
+              default: "{{inputs.parameters.message}}"
+          - name: approve
+            valueFrom:
+              parameter: "{{steps.suspend.outputs.parameters.approve}}"
+              default: "yes"
+
+    - name: suspend
       inputs:
         parameters:
           - name: message
