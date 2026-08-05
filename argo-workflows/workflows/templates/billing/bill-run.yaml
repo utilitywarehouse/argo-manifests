@@ -75,12 +75,18 @@ spec:
       - { name: account-number } # for labels/traceability
       - { name: segment-name } # free text label for the group; also resolves the group id
       - { name: segment-ids } # FWF base name, no suffix; a PREFIX matched against the ungrouped ids
-      - { name: verify, value: "false" } # true => also observe the ledger, BigQuery and the finance export
+      - name: verify # true => also observe the ledger, BigQuery and the finance export
+        value: "false"
+        enum: ["true", "false"]
       - { name: account-ids, value: "" } # account-platform UUID(s), comma-joined; the ledger and tx log key on them. Empty => no observing whatever verify says
       # attended -> pause for human validation before the irreversible Commit;
       # unattended -> run straight through (state gates still hold every stage)
-      - { name: validation-mode, value: attended }
-      - { name: log-level, value: info } # every step below and the tools they dispatch
+      - name: validation-mode
+        value: "attended"
+        enum: ["attended", "unattended"]
+      - name: log-level
+        value: "info"
+        enum: ["info", "debug"]
 
   templates:
     - name: main

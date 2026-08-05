@@ -26,7 +26,9 @@ spec:
       - { name: account-namespace, value: account-platform }
       - { name: energy-service-cluster-name, value: dev-merit }
       - { name: energy-service-namespace, value: energy-platform }
-      - { name: teardown, value: "true" }
+      - name: teardown
+        value: "true"
+        enum: ["true", "false"]
   templates:
     - name: main
       inputs:
