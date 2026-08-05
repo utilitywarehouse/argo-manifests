@@ -58,6 +58,12 @@ echo "ARGO_RESULT_OUTPUT=$account_id"
 
 Only `<value>` is written to `result`. With no marker, `result` is empty.
 
+**The `call-*` executors emit it themselves.** Set `RESULT_MARKER=true` alongside
+`RESULT_PATH` and `call-grpc`/`call-http` print the marker for you — the single-line form
+for a scalar, the `BEGIN`/`END` block when the value spans lines. `step-grpc-call` and
+`step-http-call` turn it on exactly when a caller passes `result-expr`, so a step needs no
+shell to capture a value.
+
 ### Where the result rides back
 
 Parameters live in the Workflow object (etcd) — keep them small. Artifacts live in S3 and
@@ -67,6 +73,54 @@ can be any size.
 | ---------------------------- | -------------------------- | ------------------------------------------------------------------------------------- |
 | Small (id maps, short lists) | the `result` **parameter** | a controller expr `{{= jsonpath(...) }}` / `{{= fromJson(...) }}`, or a `select` step |
 | Large (bulk rows)            | the `result` **artifact**  | a `select` step that mounts the artifact                                              |
+
+## Surfacing a result on the run
+
+The table above is about the **next step**. Reading a result off the finished run is a
+different problem, because **Argo never bubbles outputs**. An output belongs to the node
+that produced it; every enclosing template has to re-declare it to pass it up one level:
+
+```yaml
+outputs:
+  artifacts:
+    - name: snapshot
+      from: "{{steps.export-file-snapshot.outputs.artifacts.snapshot}}"
+```
+
+Four templateRefs deep (`flow-billing-bill-account` → `bill-account` → `bill-run` →
+`export-file-snapshot` → `execute-job`) that is four places to write it and four places to
+forget it. Worse, it does not survive a `when:` — a parent pulling `from:` a **skipped**
+step fails to resolve and takes the run down with it, so every optional producer needs a
+`fromExpression` guard for which there is no null artifact to fall back to.
+
+**So push, don't pull.** `globalName` hoists an output straight onto the Workflow's own
+`status.outputs` from whatever depth produced it:
+
+```yaml
+outputs:
+  artifacts:
+    - name: result
+      path: /tmp/result.txt
+      globalName: "{{inputs.parameters.job-name}}" # → {{workflow.outputs.artifacts.<job-name>}}
+```
+
+Nothing in between declares anything, and a step that never ran simply contributes
+nothing. `step-executor-remote-namespace` already does this, so **every remote Job's
+`result` lands on the run for free**, filed under its `job-name` — which is the key that
+already has to be unique per run for the Job itself, so captures cannot collide either.
+One run's outputs read as a manifest of everything it touched: `check-rebill`,
+`produce-fwf`, `ledger-snapshot-before`, `ledger-snapshot-after`, `export-file-snapshot`.
+
+Two rules:
+
+- **Artifacts, not parameters.** A global parameter's _value_ lives in the Workflow object;
+  a global artifact is an S3 pointer. Globalising a bulk result set as a parameter puts it
+  in etcd on every reconcile.
+- **A local template opts in the same way** — add `globalName` to its own output. It is one
+  field, not a wrapper template; there is nothing to compose or call.
+
+Global names are last-write-wins, so a retried step overwrites its own capture. Reusing one
+name for two producers silently keeps the second.
 
 ## Selecting fields with `select`
 
@@ -137,7 +191,10 @@ ndjson (the `identifiers` artifact). This is the workflow-to-workflow data pipe.
     template: select
     arguments:
       artifacts:
-        - { name: input, from: "{{steps.resolve-service-identifiers.outputs.artifacts.identifiers}}" }
+        - {
+            name: input,
+            from: "{{steps.resolve-service-identifiers.outputs.artifacts.identifiers}}",
+          }
       parameters:
         - name: expr
           value: >-
@@ -147,8 +204,8 @@ ndjson (the `identifiers` artifact). This is the workflow-to-workflow data pipe.
               supplies: map(rows, ({supply_type: .supply_type, mpxn: .mpxn,
                 gentrack_account_number: .gentrack_account_number}))
             }]
-        - { name: output, value: /tmp/out }          # emit the model as an artifact
-        - { name: output-format, value: ndjson }      # one account object per line
+        - { name: output, value: /tmp/out } # emit the model as an artifact
+        - { name: output-format, value: ndjson } # one account object per line
 ```
 
 **3. Select over the model** at any precision. The account is `rows[0]`; supplies are
@@ -166,7 +223,7 @@ array straight into `withParam`:
 
 ```yaml
 - - name: bill-each
-    withParam: "{{steps.select-gentrack.outputs.parameters.result}}"   # ["J20000032681", …]
+    withParam: "{{steps.select-gentrack.outputs.parameters.result}}" # ["J20000032681", …]
     arguments:
       parameters: [{ name: gentrack-account-number, value: "{{item}}" }]
 ```

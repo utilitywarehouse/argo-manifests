@@ -12,44 +12,39 @@
 #
 # NO POLLING STEPS. `progress` owns both gates: it waits for the stage before it
 # to settle, refuses to write unless the group is in the one state the
-# transition is legal from, and returns only once its own state has settled. A
-# state the happy path does not pass through — cancelled, on hold, a dry run,
-# another stage's — fails the step immediately rather than being waited out. A
-# group already past the stage is left alone, so a retried step is safe.
+# transition is legal from, and returns only once its own state has settled. Any
+# other state — cancelled, on hold, a dry run, another stage's — fails the step
+# immediately. A group already past the stage is left alone, so a retry is safe.
 #
-# THE DELIVERY SCHEDULE IS DERIVED. `schedule` reads fido's own per-invoice
-# counts for the segment and schedules every delivery of each kind it finds.
-# The old parameters hardcoded one email delivery, which on a real segment
-# (59,083 emails, 19,239 prints) scheduled a single email and no print at all.
+# `schedule` DERIVES the delivery schedule: it reads fido's per-invoice counts
+# for the segment and schedules every delivery of each kind it finds.
 #
 # WHAT COMMIT DID, in the stores rather than in the segment — `verify` only, and
-# skipped entirely when account-ids is empty (a hand-submitted bill-run):
+# skipped when account-ids is empty (a hand-submitted bill-run):
 #
 #   after BILLED      ledger-snapshot-before, transaction-log-before
 #   ── COMMIT ──
 #   after COMMITTED   ledger-snapshot-after, transaction-log-after
 #   after EXPORTED    export-file-snapshot
 #
-# Each pair is one template called twice, `phase` apart. None of them assert —
-# they print rows for a person to judge and go red only on a connection,
-# credentials or unreadable-volume error. The before-snapshots run ahead of
-# pause-before-commit so they are there to read while suspended; the after ones
-# wait `verify-wait` for their store to catch up, which is a delay, not a gate.
+# Each pair is one template called twice, `phase` apart. None assert — they
+# print rows for a person to judge and go red only on a connection, credentials
+# or unreadable-volume error. The before-snapshots run ahead of
+# pause-before-commit so they can be read while suspended; the after ones wait
+# `verify-wait` for their store to catch up, a delay rather than a gate.
 #
 # The waits key on {{workflow.creationTimestamp.RFC3339}} — later than any
 # previous bill, earlier than this Commit. Without it a re-bill stops waiting
 # immediately, satisfied by the rows the LAST run wrote.
 #
 # SCOPE: starts from an uploaded AND registered FWF. `generate-bill.yaml` is the
-# account-number entrypoint that produces the FWF and hands off here. This
-# template stays individually usable for re-running the pipeline.
+# account-number entrypoint that produces the FWF and hands off here.
 #
 # SEGMENT NAME vs ID. name = free text label (segment_groups.name). id = the
 # extract file's S3 object key, suffix included (segments.id). `segment-ids` is
 # the minted base name WITHOUT suffix, used as a PREFIX — the suffix is
-# data-dependent (.snappy / .migrated.snappy) and resolved at run time, and more
+# data-dependent (.snappy / .migrated.snappy) and resolved at run time; more
 # than one match fails rather than picking one.
-#
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -78,9 +73,9 @@ spec:
       - name: verify # true => also observe the ledger, BigQuery and the finance export
         value: "false"
         enum: ["true", "false"]
-      - { name: account-ids, value: "" } # account-platform UUID(s), comma-joined; the ledger and tx log key on them. Empty => no observing whatever verify says
-      # attended -> pause for human validation before the irreversible Commit;
-      # unattended -> run straight through (state gates still hold every stage)
+      - { name: account-ids, value: "" } # account-platform UUID(s), comma-joined; the ledger and tx log key on them. Empty => no observing, whatever verify says
+      # attended => pause before the irreversible Commit; unattended => straight
+      # through (the state gates still hold every stage)
       - name: validation-mode
         value: "attended"
         enum: ["attended", "unattended"]
@@ -111,9 +106,8 @@ spec:
       steps:
         # ---- Resolve the segment FILE id -----------------------------------
         # The id is the S3 key with a data-dependent suffix, so read it back
-        # rather than build it. Only UNGROUPED ids are considered, so this also
-        # gates on the parser having ingested the file; more than one match
-        # stops the run rather than grouping the wrong variant.
+        # rather than build it. Only UNGROUPED ids count, which also gates on the
+        # parser having ingested the file; more than one match stops the run.
         - - name: resolve-segment-file
             template: cli
             arguments:
@@ -158,8 +152,8 @@ spec:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
         # ---- Bill:   PENDING -> STATE_BILLING -> settles BILLED -------------
-        # The wait for BILLED, and the produced/reported gate Commit needs, are
-        # both inside `progress`.
+        # `progress` holds both the wait for BILLED and the produced/reported
+        # gate Commit needs.
         - - name: bill
             template: cli
             arguments:
@@ -184,10 +178,9 @@ spec:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
         # ---- The stores as Commit finds them -------------------------------
-        # Ahead of the pause on purpose: on an attended run these are already in
-        # the graph to read while the workflow is suspended, and they are what the
-        # after-snapshots get compared against. Two namespaces, no shared data, so
-        # one parallel group. No waits — nothing is in flight yet.
+        # Ahead of the pause on purpose: on an attended run these are in the graph
+        # to read while suspended, and the after-snapshots diff against them. Two
+        # namespaces, no shared data, so one parallel group. No waits.
         - - name: ledger-snapshot-before
             when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
             templateRef:
@@ -288,8 +281,7 @@ spec:
                     value: "{{inputs.parameters.account-ids}}",
                   }
                 - { name: phase, value: after }
-                # A delay, not a gate: give the ledger a chance to catch up with
-                # Commit so the dump is about this run rather than about the lag.
+                # A delay, not a gate: let the ledger catch up with Commit.
                 - {
                     name: wait-for-entry,
                     value: "{{inputs.parameters.verify-wait}}",
@@ -322,8 +314,7 @@ spec:
                     value: "{{inputs.parameters.account-ids}}",
                   }
                 - { name: phase, value: after }
-                # Same bargain as the ledger's: a delay so the dump is about this
-                # run, not a gate on it having happened.
+                # A delay, not a gate — same as the ledger's.
                 - {
                     name: wait-for-row,
                     value: "{{inputs.parameters.verify-wait}}",
@@ -387,9 +378,8 @@ spec:
                   }
 
         # ---- Fulfil: schedule the deliveries, then EXPORTED -> FULFILLING ---
-        # Two steps, in this order: the schedule has to exist before the
-        # deliveries it describes are asked for. How many of each kind, and of
-        # which kinds, comes from fido — nothing is passed in.
+        # Order matters: the schedule must exist before the deliveries it
+        # describes are asked for. Kinds and counts come from fido.
         - - name: schedule-deliveries
             template: cli
             arguments:
@@ -432,16 +422,12 @@ spec:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
     # -------------------------------------------------------------------------
-    # cli — one bill-run invocation, dispatched as a Job into the namespace the
-    # billing services run in.
+    # cli — one bill-run invocation, dispatched as a Job into the billing
+    # namespace: the Argo controller cannot reach billing-orchestrator. fido is
+    # in another cluster, reached through its mirrored service.
     #
-    # The Argo controller cannot reach billing-orchestrator, so the command runs
-    # from inside dev-merit/billing.
-    # fido lives in another cluster and is reached through its mirrored service.
-    #
-    # `capture-result` surfaces what the command printed on stdout (a segment
-    # file id, a group id) as this template's `result`; the logs go to stderr, so
-    # the capture stays clean.
+    # `capture-result` surfaces the command's stdout (a segment file id, a group
+    # id) as this template's `result`; logs go to stderr, so it stays clean.
     # -------------------------------------------------------------------------
     - name: cli
       inputs:
@@ -454,7 +440,7 @@ spec:
           - { name: address, value: "billing-orchestrator:8090" }
           - {
               name: fido-address,
-              value: "aws-customer-billing-73736d-invoice-delivery-orchestrator.sys-semaphore:8090",
+              value: "invoice-delivery-orchestrator.customer-billing.svc.cluster.aws:8090",
             }
           - { name: author, value: "argo/{{workflow.name}}" }
           - {

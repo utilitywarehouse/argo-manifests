@@ -30,9 +30,9 @@ configMapGenerator:
     literals:
       - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:5c9063aa3d12e0482d7cd37c368950e750377868
       - data-adapter=registry.uw.systems/dev-enablement/data-adapter:5c9063aa3d12e0482d7cd37c368950e750377868
-      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:49c8beed4b103d8fafb95917c70b5b927e1e89f7
-      - call-http=registry.uw.systems/dev-enablement/call-http:49c8beed4b103d8fafb95917c70b5b927e1e89f7
-      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:45bef4b0a82b6197098f785698e91f239d97c908
+      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:chore-improve-async-handling
+      - call-http=registry.uw.systems/dev-enablement/call-http:chore-improve-async-handling
+      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:chore-improve-async-handling
 generatorOptions:
   disableNameSuffixHash: true
 

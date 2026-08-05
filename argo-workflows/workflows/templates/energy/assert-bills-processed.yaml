@@ -190,14 +190,6 @@ spec:
           - { name: timeout, value: 5m }
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
-      outputs:
-        parameters:
-          - name: result
-            valueFrom:
-              parameter: "{{steps.energy-billing.outputs.parameters.result}}"
-        artifacts:
-          - name: snapshot
-            from: "{{steps.energy-billing.outputs.artifacts.result}}"
       steps:
         - - name: energy-billing
             templateRef:
