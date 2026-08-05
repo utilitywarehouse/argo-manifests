@@ -54,10 +54,9 @@
 # another store it does not imply — a blob exists without a bill ever having been
 # produced.
 #
-# Pauses. All four are step-pause. The three above are unconditional — they
-# suspend on dry runs too, so a rehearsal walks the same gates as a real bill.
-# The fourth is bill-run's own, before the irreversible Commit, gated on
-# validation-mode.
+# Pauses. All four are step-pause, and all four are gated on validation-mode:
+# attended walks every gate, on dry runs too, so a rehearsal matches a real
+# bill, unattended runs straight through.
 #
 # The gentrack numbers scope reprocess-bills and the assert. produce-fwf,
 # register and bill-run key on the submitted UW account number: one account
@@ -426,6 +425,8 @@ spec:
             templateRef: { name: step-pause, template: pause }
             arguments:
               parameters:
+                - name: active
+                  value: "{{inputs.parameters.validation-mode}}"
                 - name: message
                   value: >-
                     BEFORE FABRICATE + UPLOAD — nothing is in the bill-extracts
@@ -477,6 +478,8 @@ spec:
             templateRef: { name: step-pause, template: pause }
             arguments:
               parameters:
+                - name: active
+                  value: "{{inputs.parameters.validation-mode}}"
                 - name: message
                   value: >-
                     AFTER UPLOAD, BEFORE REGISTER — the FWF is in the bucket but
@@ -520,6 +523,8 @@ spec:
             templateRef: { name: step-pause, template: pause }
             arguments:
               parameters:
+                - name: active
+                  value: "{{inputs.parameters.validation-mode}}"
                 - name: message
                   value: >-
                     AFTER REGISTER, BEFORE BILL-RUN — the segment now exists and is
