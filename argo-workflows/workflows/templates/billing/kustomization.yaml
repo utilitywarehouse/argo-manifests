@@ -21,7 +21,7 @@ configMapGenerator:
         config.kubernetes.io/local-config: "true"
     literals:
       - fwf=registry.uw.systems/billing/fwf:chore-mono-script-classification
-      - bill-run=registry.uw.systems/billing/bill-run:main
+      - bill-run=registry.uw.systems/billing/bill-run:chore-mono-script-classification
       - reset=registry.uw.systems/billing/reset:chore-mono-script-classification
       - set-invoice-number=registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification
       - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
