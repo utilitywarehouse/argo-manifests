@@ -43,7 +43,7 @@ spec:
           - { name: account-namespace, value: account-platform }
           - {
               name: account-connection-string,
-              value: "postgresql://accounts@cockroachdb-proxy:26257/account_numbers?sslmode=verify-full&application_name=resolve-account",
+              value: "postgresql://accounts@cockroachdb-proxy:26257/account_api_20250214?sslmode=verify-full",
             }
           - { name: account-runner-sa, value: default }
           - { name: account-ca-secret, value: ca-auth-key }
@@ -110,7 +110,7 @@ spec:
                                   /app/executor
                                   account_ids=$(tail -n +2 /tmp/out.csv | sed '/^$/d' | tr '\n' ',' | sed 's/,$//')
                                   if [ -z "$account_ids" ]; then
-                                    echo "resolve-account: no account_numbers rows for account-number(s)={{inputs.parameters.account-number}}"
+                                    echo "resolve-account: no accounts rows for account-number(s)={{inputs.parameters.account-number}}"
                                     exit 1
                                   fi
                                   echo "account_ids=$account_ids"
@@ -118,8 +118,8 @@ spec:
                               env:
                                 - name: QUERY
                                   value: >-
-                                    SELECT account_id::string FROM account_numbers
-                                    WHERE number IN (SELECT unnest(string_to_array('{{inputs.parameters.account-number}}', ',')))
+                                    SELECT id::string FROM accounts
+                                    WHERE account_number IN (SELECT unnest(string_to_array('{{inputs.parameters.account-number}}', ',')))
                                 - { name: FORMAT, value: csv }
                                 - { name: OUTPUT, value: /tmp/out.csv }
                                 - { name: DB_TYPE, value: cockroachdb }
