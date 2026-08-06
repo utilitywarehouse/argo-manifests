@@ -18,25 +18,15 @@ make fmt        # prettier --write
 make tools      # check the toolchain, and that the argo pin matches the cluster
 ```
 
-Every package — `workflows/templates/<team>`, `workflows/<product>`, `environments/<env>` —
-has a Makefile including [conventions.mk](conventions.mk) and so answers the same targets
-(`build`, `lint`, `check`, `fmt`, `validate`, `clean`). Run them per package with
-`make -C <package> <target>`.
+Every package — `workflows/templates/<team>`, `workflows/<product>`, `environments/<env>` — has a Makefile including [conventions.mk](conventions.mk) and so answers the same targets (`build`, `lint`, `check`, `fmt`, `validate`, `clean`). Run them per package with `make -C <package> <target>`.
 
-The conventions live here rather than at the repo root because they are argo-specific
-(`argo lint`, the conftest policies, the argo version pin). The root Makefile just
-delegates, so the same targets work from either level.
+The conventions live here rather than at the repo root because they are argo-specific (`argo lint`, the conftest policies, the argo version pin). The root Makefile just delegates, so the same targets work from either level.
 
-`lint` and `check` only do work in `environments/`: that is where kustomize applies the
-`namespace:` transformer, without which `templateRef`s cannot resolve. Everything else
-renders and is validated there.
+`lint` and `check` only do work in `environments/`: that is where kustomize applies the `namespace:` transformer, without which `templateRef`s cannot resolve. Everything else renders and is validated there.
 
-Policies live in [policy/](policy/) and run under conftest. Each enforces a convention that
-`argo lint` cannot see, and each is written up in [docs/](docs/), the policy is where the
-rule is checked, the doc is where it is explained. Add one and add its doc.
+Policies live in [policy/](policy/) and run under conftest. Each enforces a convention that `argo lint` cannot see, and each is written up in [docs/](docs/), the policy is where the rule is checked, the doc is where it is explained. Add one and add its doc.
 
-Adding a package means a `kustomization.yaml` and a Makefile; the root Makefile discovers
-it by that Makefile, so nothing has to be registered:
+Adding a package means a `kustomization.yaml` and a Makefile; the root Makefile discovers it by that Makefile, so nothing has to be registered:
 
 ```makefile
 include ../../../conventions.mk
@@ -47,10 +37,7 @@ LINTABLE=no          # only environments/ can resolve templateRefs
 
 ### System
 
-- `make get-upstream`: gets the upstream manifests in a single file and splits it
-  in to cluster and namespaced resources. when updating please manually check for
-  any new resource type added to upstream.
-  Run it from `system/`, and bump `argo` in [mise.toml](../mise.toml) to match.
+- `make get-upstream`: gets the upstream manifests in a single file and splits it in to cluster and namespaced resources. when updating please manually check for any new resource type added to upstream. Run it from `system/`, and bump `argo` in [mise.toml](../mise.toml) to match.
 
 ### Documentation
 

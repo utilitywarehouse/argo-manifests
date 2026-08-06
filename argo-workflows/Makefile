@@ -47,13 +47,14 @@ clean:
 	$(call for_each,clean)
 
 # Formatting is repo-wide rather than per-package: prettier reads .prettierignore
-# from the repo root, which is where vendored upstream is excluded.
+# and .prettierrc.yaml from the repo root, which is where vendored upstream is
+# excluded and where markdown's proseWrap override lives.
 fmt:
-	@$(PRETTIER) --write "**/*.yaml" >/dev/null
+	@$(PRETTIER) --write "**/*.yaml" "**/*.md" >/dev/null
 	@echo "✅ fmt"
 
 fmt-check:
-	@$(PRETTIER) --check "**/*.yaml"
+	@$(PRETTIER) --check "**/*.yaml" "**/*.md"
 
 packages:
 	@printf '%s\n' $(PACKAGES)

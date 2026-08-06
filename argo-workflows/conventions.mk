@@ -48,11 +48,11 @@ check: build
 	fi
 
 fmt:
-	@$(PRETTIER) --write "**/*.yaml" >/dev/null
+	@$(PRETTIER) --write "**/*.yaml" "**/*.md" >/dev/null
 	@echo "✅ fmt $(PKG)"
 
 fmt-check:
-	@$(PRETTIER) --check "**/*.yaml"
+	@$(PRETTIER) --check "**/*.yaml" "**/*.md"
 
 validate: build lint check
 

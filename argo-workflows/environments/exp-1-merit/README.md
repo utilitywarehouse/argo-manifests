@@ -80,15 +80,54 @@ kubectl --context <cluster> -n <target-namespace> get secret argo-workflow-job-e
   -o jsonpath='{.data.token}' | base64 -d
 
 # Get the cluster's CA cert
+curl -sS https://kube-ca-cert.exp-1.aws.uw.systems/ > secrets/exp-1-aws-ca.crt
 
-# either from the sa secret
+# or from the sa secret
 kubectl --context <cluster> -n <target-namespace> get secret argo-workflow-job-executor-token \
   -o jsonpath='{.data.ca\.crt}' | base64 -d
+```
 
-# or from
-https://kube-ca-cert.<cluster_prefix>.[aws|gcp|merit].uw.systems/
+The `kube-ca-cert` host is the cluster name with its **last** hyphen swapped for a dot — `exp-1-aws` → `exp-1.aws`, `dev-merit` → `dev.merit`:
 
 ```
+https://kube-ca-cert.<cluster-prefix>.[aws|gcp|merit].uw.systems/
+```
+
+Don't take it from your kubeconfig (`~/.kube/certs/<cluster>/ca.pem`), that's whatever your last login cached, not necessarily current.
+
+### Expired CA certs
+
+An expired pinned CA breaks **every** dispatch to that cluster at TLS, in every namespace, and the error names the namespace of exec-kube's first API call rather than the cert. You should see something like
+
+```
+time="2026-08-06T07:40:53 UTC" level=debug msg="connecting to cluster dev-aws at https://elb.master.k8s.dev.uw.systems"
+time="2026-08-06T07:40:53 UTC" level=fatal msg="failed to resolve secret/configmap references: failed to list secrets in account-platform: Get \"https://elb.master.k8s.dev.uw.systems/api/v1/namespaces/account-platform/secrets\": tls: failed to verify certificate: x509: certificate has expired or is not yet valid: current time 2026-08-06T07:40:53Z is after 2026-08-06T00:04:00Z"
+```
+
+The job-executor tokens are legacy `kubernetes.io/service-account-token` Secrets with no `exp` claim, so they are never the cause. Check the certs first
+
+```bash
+for f in secrets/*-ca.crt; do
+  printf '%-28s %s\n' "$f" "$(openssl x509 -in "$f" -noout -enddate)"
+done
+```
+
+Or one, with a machine-readable verdict (`-checkend` takes seconds; 30 days shown here):
+
+```bash
+openssl x509 -in secrets/exp-1-aws-ca.crt -noout -checkend 2592000 \
+  && echo "valid > 30d" || echo "EXPIRING or EXPIRED — re-fetch"
+```
+
+To confirm a cert is genuinely the right anchor, verify the cluster's live serving cert against it:
+
+```bash
+echo | openssl s_client -connect elb.master.k8s.exp-1.aws.uw.systems:443 2>/dev/null \
+  | awk '/BEGIN CERT/,/END CERT/' > /tmp/leaf.pem
+openssl verify -CAfile secrets/exp-1-aws-ca.crt /tmp/leaf.pem   # → OK
+```
+
+Fixing is a re-fetch from the `kube-ca-cert` URL plus a commit — the tokens, RBAC and `cluster-servers` entries are unaffected by a CA rotation.
 
 #### On exp-1-merit
 
@@ -115,9 +154,7 @@ configMapGenerator:
       - secrets/exp-1-gcp-ca.crt
 ```
 
-**4. Register the cluster's API server URL** in `kustomization.yaml` under `cluster-servers`,
-keyed by `cluster-name` (this is what the executor resolves into `CLUSTER_SERVER`, so callers
-only pass `cluster-name`):
+**4. Register the cluster's API server URL** in `kustomization.yaml` under `cluster-servers`, keyed by `cluster-name` (this is what the executor resolves into `CLUSTER_SERVER`, so callers only pass `cluster-name`):
 
 ```yaml
 configMapGenerator:
@@ -166,13 +203,13 @@ spec:
 
 ### Parameters
 
-| Parameter          | Description                                                    | Default  |
-| ------------------ | -------------------------------------------------------------- | -------- |
-| `cluster-name`     | Target cluster; resolves the CA cert, token, and API server URL (via the `cluster-servers` ConfigMap) 1:1 | required |
-| `target-namespace` | Namespace to run the job in                                    | required |
-| `job-template`     | Full Job manifest as a YAML string                             | required |
-| `timeout`          | How long to wait for job completion                            | `5m`     |
-| `teardown`         | Delete the job after completion                                | `true`   |
+| Parameter | Description | Default |
+| --- | --- | --- |
+| `cluster-name` | Target cluster; resolves the CA cert, token, and API server URL (via the `cluster-servers` ConfigMap) 1:1 | required |
+| `target-namespace` | Namespace to run the job in | required |
+| `job-template` | Full Job manifest as a YAML string | required |
+| `timeout` | How long to wait for job completion | `5m` |
+| `teardown` | Delete the job after completion | `true` |
 
 ### Outputs
 
