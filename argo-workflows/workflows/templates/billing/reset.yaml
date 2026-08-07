@@ -1,40 +1,40 @@
 # =============================================================================
 # reset-bills-for-account — clear billing's records so accounts can be re-billed
 # =============================================================================
-# An account can only be billed once per period. To re-bill one, the records the
-# previous run left behind have to go first — then set-invoice-number hands out a
-# fresh number and the pipeline runs as if for the first time.
+# An account can only be billed once per period. Clear what the previous run left
+# behind and the pipeline runs as if for the first time. Three stores, three Jobs
+# in parallel — they share no data — all dispatched into dev-merit/billing:
 #
-#   ...-rds   billing-rds (postgres): bills, bill numbers, summaries,
-#             transactions, energy-platform services + their rows
-#   ...-crdb  billing crdb (pg wire): accounts, segments, segment_group_history,
-#             segment_groups
+#   ...-rds              billing-rds (postgres): bills, bill numbers, summaries,
+#                        transactions, energy-platform services + their rows
+#   ...-crdb             billing crdb (pg wire): accounts, segments,
+#                        segment_group_history, segment_groups
+#   ...-payment-details  finance-customer-payment-details mongo: the account's
+#                        payment document
 #
+# ⚠️ PAYMENT DETAILS is what makes invoice reporting reliable. That api consumes
+# bill extracts, so each run moves the account's document forward (later
+# collectiondate, new etag). Re-bill the same period against a stale document and
+# the api crashes, taking invoice-due-date-api with it: the bill never leaves
+# billed for committing, so the invoice is produced but never reported — a run
+# that looks half-finished rather than one that failed. Deleting the document puts
+# the account back to never-billed; the next extract writes it again.
 #
-# BOTH RUN IN dev-merit/billing. billing-rds is an RDS endpoint dialled over the
-# network, not an in-cluster service, so reaching it has nothing to do with where
-# the bills are served from. Two Jobs rather than one only because they are two
-# subcommands against two stores; they share no data, so they run in parallel.
+# INPUT. Account NUMBERS only, comma-separated. Each command derives its own store
+# key from the number (the frozen UUIDv5 account-platform mints), so no id list is
+# passed around and they cannot drift apart.
 #
-# INPUT. Account NUMBERS only, comma-separated. Both commands derive the id each
-# store keys its rows by from the number (the frozen UUIDv5 account-platform
-# mints), so no id list is passed around and the two cannot drift apart.
+# IDEMPOTENT. Ids that resolve to nothing skip their tables — a run against clean
+# accounts deletes nothing and exits 0. No "should we reset?" branch on purpose:
+# running it unconditionally has fewer failure modes than deciding first.
 #
-# IDEMPOTENT. Ids that resolve to nothing skip their tables, so a run against
-# already-clean accounts deletes nothing and exits 0. There is deliberately no
-# "should we reset?" branch — running it unconditionally is cheaper and has fewer
-# failure modes than deciding first. See RESET IS NOT PERIOD-AWARE below.
+# DRY RUN. `dry-run=true` (the default) logs the row count each delete WOULD
+# affect and deletes nothing. A safety gate, not a decision point — counts go to
+# stderr, exit code is 0 either way, nothing downstream can branch on them.
 #
-# DRY RUN. `dry-run=true` (the default) reports the row count each delete WOULD
-# affect and deletes nothing. This is a safety gate, not a decision point: the
-# counts go to stderr as log lines, there is no aggregate, and the exit code is 0
-# either way, so nothing downstream can branch on them.
-#
-# ⚠️ RESET IS NOT PERIOD-AWARE. `bills` resolves invoice numbers from
-# public.bill_number by account_number with NO period filter, so it deletes EVERY
-# bill the account has, not just the current period's. That is what you want for
-# a test account being re-billed; it is not what you want for an account whose
-# earlier periods matter.
+# ⚠️ NOT PERIOD-AWARE. `bills` resolves invoice numbers from public.bill_number by
+# account_number with NO period filter: it deletes EVERY bill the account has.
+# Right for a test account being re-billed, wrong where earlier periods matter.
 #
 # Reference-only: consumed by step-billing-bill-account via templateRef.
 # =============================================================================
@@ -46,7 +46,8 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Do NOT submit from the UI. DESTRUCTIVE — delete the accounts' bills
-      (billing-rds) and segments (billing crdb) so they can be billed again.
+      (billing-rds), segments (billing crdb) and payment details
+      (finance-customer-payment-details mongo) so they can be billed again.
       Defaults to dry-run. Consumed by step-billing-bill-account via templateRef.
   labels:
     app.kubernetes.io/component: step
@@ -57,8 +58,8 @@ spec:
   serviceAccountName: workflow-step-executor
   templates:
     # -------------------------------------------------------------------------
-    # reset-bills-for-account — both stores, in parallel. The template callers
-    # want; the two below are its parts, and still render as their own nodes in
+    # reset-bills-for-account — all three stores, in parallel. The template callers
+    # want; the three below are its parts, and still render as their own nodes in
     # the UI.
     # -------------------------------------------------------------------------
     - name: reset-bills-for-account
@@ -75,6 +76,10 @@ spec:
           - {
               name: crdb-dsn,
               value: "postgresql://root@cockroachdb-proxy:26257/bo?sslmode=verify-full",
+            }
+          - {
+              name: payment-details-mongo-address,
+              value: "mongodb://finance-customer-payment-details-mongodb.billing.svc.cluster.local:27017",
             }
           - { name: log-level, value: info }
       steps:
@@ -110,6 +115,30 @@ spec:
                   }
                 - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
                 - { name: crdb-dsn, value: "{{inputs.parameters.crdb-dsn}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+          # parallel with both: same namespace, a third store
+          - name: reset-bills-for-account-payment-details
+            template: reset-bills-for-account-payment-details
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: payment-details-mongo-address,
+                    value: "{{inputs.parameters.payment-details-mongo-address}}",
+                  }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.cluster-name}}",
@@ -322,3 +351,104 @@ spec:
                                     configMapKeyRef:
                                       name: {{inputs.parameters.ca-config}}
                                       key: {{inputs.parameters.ca-address-key}}
+
+    # -------------------------------------------------------------------------
+    # reset-bills-for-account-payment-details — dev-merit/billing: delete the
+    # accounts' documents in finance-customer-payment-details mongo. See WHY
+    # PAYMENT DETAILS above for what the leftover document breaks.
+    #
+    # CONNECTION. The same four values finance-customer-payment-details-api itself
+    # is given — address, db, username, password — because the reset has to be the
+    # user the documents were written as. The password is applied via SetAuth
+    # rather than embedded in the URI, so it needs no URL-encoding and never
+    # appears in a parameter. db is the first half of the api's STORE_NAME
+    # ("app/payment" in dev-merit, "customer/payment" in prod) and doubles as the
+    # auth source.
+    #
+    # The mongo is a 3-node replica set behind a headless Service; the address is
+    # that Service, exactly as the api has it, and the driver discovers the members.
+    # -------------------------------------------------------------------------
+    - name: reset-bills-for-account-payment-details
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: dry-run, value: "true" }
+          - {
+              name: payment-details-mongo-address,
+              value: "mongodb://finance-customer-payment-details-mongodb.billing.svc.cluster.local:27017",
+            }
+          - { name: payment-details-mongo-db, value: app }
+          - { name: payment-details-mongo-username, value: app }
+          - {
+              name: payment-details-mongo-secret,
+              value: finance-customer-payment-details-mongodb,
+            }
+          - { name: payment-details-mongo-password-key, value: app.password }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - {
+              name: reset-image,
+              value: "registry.uw.systems/billing/reset:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 12m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: billing-payment-details
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: job-name,
+                    value: reset-bills-for-account-payment-details,
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: reset-bills-for-account-payment-details
+                              image: {{inputs.parameters.reset-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /tmp/accounts.txt
+                                  /svc payment-details --input /tmp/accounts.txt --dry-run={{inputs.parameters.dry-run}}
+                              env:
+                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: MONGO_ADDRESS, value: "{{inputs.parameters.payment-details-mongo-address}}" }
+                                - { name: MONGO_DB, value: "{{inputs.parameters.payment-details-mongo-db}}" }
+                                - { name: MONGO_USERNAME, value: "{{inputs.parameters.payment-details-mongo-username}}" }
+                                - name: MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.payment-details-mongo-secret}}
+                                      key: {{inputs.parameters.payment-details-mongo-password-key}}
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
