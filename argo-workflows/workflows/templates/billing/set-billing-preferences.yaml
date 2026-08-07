@@ -1,0 +1,181 @@
+# =============================================================================
+# billing-preferences — seed the account's delivery preferences row
+# =============================================================================
+# Fulfilment reads billing preferences by account_id; no row is a NotFound and
+# the delivery event fails. Nothing in the bill pipeline writes that row — a
+# customer setting their preferences does — so an account that never has one
+# bills the whole way through and dies at the last stage.
+#
+# public.preferences in billing-communication-preferences-api-postgres
+# (dev-aws/customer-billing). account_id is TEXT and the PRIMARY KEY, so the
+# insert is ON CONFLICT DO NOTHING: existing preferences are kept, never
+# overwritten with the defaults below.
+#
+# ⚠️ NOT the `preferences` set-invoice-number writes — that is
+# invoice-preferences-api-mongo. Same cluster, same namespace, same word;
+# different store, keyed by account NUMBER where this is keyed by the UUIDv5.
+#
+# DRY RUN. `dry-run=true` (the default) lists which ids have a row and inserts
+# nothing.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-set-billing-preferences
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Ensure the accounts have a billing preferences row so fulfilment can
+      schedule deliveries. Existing preferences are never overwritten. Defaults
+      to dry-run.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: ensure
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-ids } # account-platform UUID(s), comma-joined
+      - name: dry-run
+        value: "true"
+        enum: ["true", "false"]
+
+  templates:
+    # -------------------------------------------------------------------------
+    # ensure — one Job in dev-aws/customer-billing, where the postgres is a plain
+    # in-namespace service. --exec on the insert: query-pg's default path streams
+    # through a cursor, and DECLARE CURSOR takes only SELECT/VALUES.
+    # -------------------------------------------------------------------------
+    - name: ensure
+      inputs:
+        parameters:
+          - { name: account-ids }
+          - { name: dry-run, value: "true" }
+          # Applied only to accounts with NO row. Email-only is what a bill needs
+          # to reach fulfilment.
+          - { name: email, value: "true" }
+          - { name: print, value: "false" }
+          - { name: large-print, value: "false" }
+          - { name: braille, value: "false" }
+          - { name: csv, value: "false" }
+          # admin.url is a complete DSN, so no password is composed into a URL.
+          # Not app.password — that lives under another service's secret.
+          - {
+              name: dsn-secret,
+              value: billing-communication-preferences-api-postgres-secrets,
+            }
+          - { name: dsn-key, value: admin.url }
+          - { name: db-type, value: postgres }
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: customer-billing }
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 6m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result # rows inserted, or 'dry-run'
+            valueFrom:
+              parameter: "{{steps.customer-billing.outputs.parameters.result}}"
+      steps:
+        - - name: customer-billing
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: ensure-billing-preferences }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            - name: ensure
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  ACCTS="{{inputs.parameters.account-ids}}"
+                                  echo "billing preferences for [$ACCTS]"
+
+                                  # ::uuid::text on the INPUT canonicalises case and rejects a
+                                  # malformed id now, rather than inserting one nothing matches.
+                                  # The column is TEXT; it is never cast.
+                                  IDS="SELECT btrim(x)::uuid::text AS account_id FROM unnest(string_to_array('$ACCTS', ',')) AS t(x)"
+
+                                  # One concatenated column: query-pg's CSV columns do not come
+                                  # back in the order they were selected.
+                                  /app/executor --format csv --output /tmp/state.csv --query "
+                                    SELECT concat(i.account_id, ' ', CASE WHEN p.account_id IS NULL THEN 'MISSING' ELSE 'present' END)
+                                    FROM ($IDS) i LEFT JOIN public.preferences p ON p.account_id = i.account_id
+                                    ORDER BY 1"
+                                  cat /tmp/state.csv
+
+                                  /app/executor --format csv --output /tmp/missing.csv --query "
+                                    SELECT count(*) FROM ($IDS) i
+                                    LEFT JOIN public.preferences p ON p.account_id = i.account_id
+                                    WHERE p.account_id IS NULL"
+                                  missing=$(tail -n 1 /tmp/missing.csv)
+
+                                  if [ "$missing" = "0" ]; then
+                                    echo "every account already has preferences; nothing to do"
+                                    echo "ARGO_RESULT_OUTPUT=0"
+                                    exit 0
+                                  fi
+
+                                  DEFAULTS="email={{inputs.parameters.email}} print={{inputs.parameters.print}} large_print={{inputs.parameters.large-print}} braille={{inputs.parameters.braille}} csv={{inputs.parameters.csv}}"
+                                  if [ "{{inputs.parameters.dry-run}}" = "true" ]; then
+                                    echo "dry-run: $missing row(s) would be inserted as $DEFAULTS; nothing changed"
+                                    echo "ARGO_RESULT_OUTPUT=dry-run"
+                                    exit 0
+                                  fi
+
+                                  # created_at/updated_at default to now(). ON CONFLICT covers an
+                                  # account that gained a row since the count above.
+                                  /app/executor --exec --format csv --output /tmp/out.csv --query "
+                                    INSERT INTO public.preferences (account_id, email, print, large_print, braille, csv)
+                                    SELECT i.account_id,
+                                           {{inputs.parameters.email}}, {{inputs.parameters.print}}, {{inputs.parameters.large-print}},
+                                           {{inputs.parameters.braille}}, {{inputs.parameters.csv}}
+                                    FROM ($IDS) i
+                                    ON CONFLICT (account_id) DO NOTHING"
+                                  inserted=$(tail -n 1 /tmp/out.csv)
+                                  echo "inserted $inserted of $missing missing row(s) as $DEFAULTS"
+                                  echo "ARGO_RESULT_OUTPUT=$inserted"
+                              env:
+                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
+                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                                - name: CONNECTION_STRING
+                                  valueFrom: { secretKeyRef: { name: {{inputs.parameters.dsn-secret}}, key: {{inputs.parameters.dsn-key}} } }
