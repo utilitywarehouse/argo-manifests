@@ -426,6 +426,12 @@ spec:
     # namespace: the Argo controller cannot reach billing-orchestrator. fido is
     # in another cluster, reached through its mirrored service.
     #
+    # The Job pod carries `policy.semaphore.uw.io/name`. fido sits behind a
+    # default-deny ingress in the aws cluster; semaphore-policy only mints a
+    # GlobalNetworkSet for a merit pod that has this label, and the calico policy
+    # guarding invoice-delivery-orchestrator matches on the labels it puts there.
+    # Without it the 8090 dial is silently dropped — i/o timeout, not refused.
+    #
     # `capture-result` surfaces the command's stdout (a segment file id, a group
     # id) as this template's `result`; logs go to stderr, so it stays clean.
     # -------------------------------------------------------------------------
@@ -488,6 +494,9 @@ spec:
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['timeout']).Seconds()) + 120}}
                       ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
+                        metadata:
+                          labels:
+                            policy.semaphore.uw.io/name: bill-run
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
