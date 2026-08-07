@@ -6,6 +6,7 @@ resources:
   - bill-run.yaml
   - bill-account.yaml
   - set-invoice-number.yaml
+  - set-billing-preferences.yaml
   - reset.yaml
   - account-state.yaml
   - transaction-log-snapshot.yaml
@@ -81,6 +82,10 @@ replacements:
       }
     targets:
       - select: { kind: WorkflowTemplate, name: step-billing-account-state }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+      - select:
+          { kind: WorkflowTemplate, name: step-billing-set-billing-preferences }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-pg-image].value
   - source:

@@ -393,6 +393,10 @@ spec:
 
         # 8) SET-INVOICE-NUMBER: plan the number, then write it to both mongos (skipped
         #    by dry-run). Emits the plan — applied everywhere before the FWF is built.
+        #
+        #    set-billing-preferences runs beside it: a different store with no bearing
+        #    on the plan, and the last group before the first pause. Without a preferences row the bill
+        #    fails at Fulfil.
         - - name: set-invoice-number
             templateRef:
               { name: step-billing-set-invoice-number, template: set }
@@ -419,6 +423,26 @@ spec:
                 - {
                     name: billing-namespace,
                     value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
+          - name: set-billing-preferences # keyed by account_id, not the number
+            templateRef:
+              { name: step-billing-set-billing-preferences, template: ensure }
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: account-ids,
+                    value: "{{steps.resolve-account.outputs.parameters.account-id}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.customer-billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.customer-billing-namespace}}",
                   }
 
         - - name: pause-before-produce-fwf
