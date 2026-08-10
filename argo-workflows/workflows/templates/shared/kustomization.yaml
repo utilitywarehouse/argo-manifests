@@ -8,6 +8,7 @@ resources:
   - http-call.yaml
   - grpc-call.yaml
   - pause.yaml
+  - query.yaml
 
 # ---------------------------------------------------------------------------
 # Image pins for the shared/ package templates. Each package (shared, billing,
@@ -33,6 +34,9 @@ configMapGenerator:
       - call-grpc=registry.uw.systems/dev-enablement/call-grpc:chore-improve-async-handling
       - call-http=registry.uw.systems/dev-enablement/call-http:chore-improve-async-handling
       - exec-kube=registry.uw.systems/dev-enablement/exec-kube:chore-improve-async-handling
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:chore-impl-caller-pattern-on-queriers
+      - query-bq=registry.uw.systems/dev-enablement/query-bq:chore-impl-caller-pattern-on-queriers
+      - query-mongo=registry.uw.systems/dev-enablement/query-mongo:chore-impl-caller-pattern-on-queriers
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -97,3 +101,25 @@ replacements:
       - select: { kind: WorkflowTemplate, name: step-healthcheck-namespace }
         fieldPaths:
           - spec.templates.*.container.image
+  - source:
+      { kind: ConfigMap, name: shared-image-versions, fieldPath: data.query-pg }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-query }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+  - source:
+      { kind: ConfigMap, name: shared-image-versions, fieldPath: data.query-bq }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-query }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-bq-image].value
+  - source:
+      {
+        kind: ConfigMap,
+        name: shared-image-versions,
+        fieldPath: data.query-mongo,
+      }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-query }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-mongo-image].value

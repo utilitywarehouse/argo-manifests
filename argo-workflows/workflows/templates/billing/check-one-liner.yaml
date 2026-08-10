@@ -1,0 +1,130 @@
+# check-one-liner — every account billed in this segment got its one-liner
+# record, and the records are captured for review.
+#
+# WHY MONGO, NOT THE API. finance-one-liner-api has no RPC listing one-liners for
+# a segment: OneLinerSummary is one aggregate that cannot name a missing account,
+# and ReadOneLinersByAccount is a pod per account.
+#
+# ⚠️ FILTER ON segmentid, NEVER _id — `_id` is uuid.NewSHA1(uuid.Nil, invoiceID),
+# not the invoice id. The store writes through mgocompat, so keys are lowercased
+# Go field names (`accountid`, `noofbills`) and a predicate naming `accountId`
+# matches nothing, silently. segmentid is set only on per-account one-liners, so
+# filtering on it can never return the aggregate.
+#
+# THIS STEP FAILS, naming the accounts with no record. It proves the record
+# exists, not that the batch file was written — the file is one output of that
+# process.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-billing-check-one-liner
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Read-only. Reads the per-account one-liners this segment produced from
+      finance-one-liner-api's mongo and fails unless every account billed has
+      one, naming the accounts that do not. Captures the records as the step's
+      result. Consumed by step-billing-bill-run via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: billing
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: check
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: segment-id } # the extract file's S3 object key, suffix included — what resolve-segment-file returns
+      - { name: accounts } # UW account number(s), comma-separated; each must have a one-liner
+      - { name: wait-for-record, value: 5m } # how long the record has to arrive after Export settles
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+
+  templates:
+    - name: check
+      inputs:
+        parameters:
+          - { name: segment-id }
+          - { name: accounts }
+          # Always polls: the record is written asynchronously after Export
+          # settles, so "look once" is a race rather than a mode. A 0s wait still
+          # gets one query and a verdict — see the floor on `timeout` below.
+          - { name: wait-for-record, value: 5m }
+          # The whole DSN, as finance-one-liner-api itself reads it.
+          - { name: uri-secret, value: finance-one-liner-api }
+          - { name: uri-key, value: mongo.url }
+          - { name: database, value: oneliner }
+          - { name: collection, value: oneliners }
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace, value: billing }
+          - { name: poll-interval, value: "20" }
+          - { name: heartbeat, value: "60" }
+          - { name: log-level, value: info }
+          # The Job's deadline is the wait plus this buffer.
+          - { name: job-buffer, value: 5m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: result # the per-account one-liners, as JSON
+            valueFrom:
+              parameter: "{{steps.one-liners.outputs.parameters.result}}"
+      steps:
+        - - name: one-liners
+            templateRef: { name: step-query, template: mongo }
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: job-name, value: check-one-liner }
+                - {
+                    name: uri-secret,
+                    value: "{{inputs.parameters.uri-secret}}",
+                  }
+                - { name: uri-key, value: "{{inputs.parameters.uri-key}}" }
+                - { name: database, value: "{{inputs.parameters.database}}" }
+                - {
+                    name: collection,
+                    value: "{{inputs.parameters.collection}}",
+                  }
+                # Every one-liner the segment produced, not only the accounts
+                # named below: the dump shows the run rather than the ask.
+                - name: query
+                  value: '{"segmentid": "{{inputs.parameters.segment-id}}"}'
+                # Oldest first, so a re-bill reads in write order.
+                - name: sort
+                  value: '{"billdate": 1, "accountid": 1}'
+                - { name: format, value: ndjson }
+                - { name: output, value: /tmp/one-liners.ndjson }
+                # What the grep was producing, structured — and what makes the
+                # later cross-check against the ledger entry's total_amount
+                # possible. Emitted once after the poll settles, not per poll.
+                - { name: result-expr, value: "rows" }
+                - name: success-expr
+                  value: >-
+                    all(split('{{inputs.parameters.accounts}}', ','), # in
+                    map(rows, .accountid))
+                - name: assert-message
+                  value: >-
+                    no one-liner for account(s) {join(filter(split('{{inputs.parameters.accounts}}',
+                    ','), !(# in map(rows, .accountid))), ',')} in segment
+                    {{inputs.parameters.segment-id}} — it holds {rowCount}
+                    record(s) for {len(uniq(map(rows, .accountid)))} account(s)
+                - {
+                    name: poll-interval,
+                    value: "{{inputs.parameters.poll-interval}}",
+                  }
+                - { name: heartbeat, value: "{{inputs.parameters.heartbeat}}" }
+                - name: timeout
+                  value: "{{=string(duration(inputs.parameters['wait-for-record']) + duration('30s'))}}"
+                - name: job-active-deadline
+                  value: "{{=string(duration(inputs.parameters['wait-for-record']) + duration(inputs.parameters['job-buffer']))}}"
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }

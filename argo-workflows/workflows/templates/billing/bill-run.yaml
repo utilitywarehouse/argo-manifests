@@ -25,13 +25,16 @@
 #   after BILLED      ledger-snapshot-before, transaction-log-before
 #   ── COMMIT ──
 #   after COMMITTED   ledger-snapshot-after, transaction-log-after
-#   after EXPORTED    export-file-snapshot
+#   after EXPORTED    check-one-liner
 #
-# Each pair is one template called twice, `phase` apart. None assert — they
-# print rows for a person to judge and go red only on a connection, credentials
-# or unreadable-volume error. The before-snapshots run ahead of
-# pause-before-commit so they can be read while suspended; the after ones wait
-# `verify-wait` for their store to catch up, a delay rather than a gate.
+# Each pair is one template called twice, `phase` apart. The before-snapshots run
+# ahead of pause-before-commit so they can be read while suspended; the after
+# ones wait `verify-wait` for their store to catch up.
+#
+# transaction-log-snapshot asserts nothing. The other two GATE: every account
+# must hold a ledger and, after commit, a 'bill' entry; every account billed must
+# have its one-liner. A wait that runs out there is a failed bill run, and the
+# failure names the accounts that are missing.
 #
 # The waits key on {{workflow.creationTimestamp.RFC3339}} — later than any
 # previous bill, earlier than this Commit. Without it a re-bill stops waiting
@@ -70,7 +73,7 @@ spec:
       - { name: account-number } # for labels/traceability
       - { name: segment-name } # free text label for the group; also resolves the group id
       - { name: segment-ids } # FWF base name, no suffix; a PREFIX matched against the ungrouped ids
-      - name: verify # true => also observe the ledger, BigQuery and the finance export
+      - name: verify # true => also observe the ledger, BigQuery and the finance one-liners
         value: "false"
         enum: ["true", "false"]
       - { name: account-ids, value: "" } # account-platform UUID(s), comma-joined; the ledger and tx log key on them. Empty => no observing, whatever verify says
@@ -356,14 +359,26 @@ spec:
                   }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
-        - - name: export-file-snapshot
+        # The one-liner keys on the UW account NUMBER, not the account-platform
+        # uuid the two stores above use — `accountid` in the store is what the
+        # export file called AccountNo. account-ids still gates the step: it is
+        # what `verify` means.
+        - - name: check-one-liner
             when: '"{{inputs.parameters.account-ids}}" != "" && {{inputs.parameters.verify}} == true'
-            templateRef:
-              { name: step-billing-export-file-snapshot, template: snapshot }
+            templateRef: { name: step-billing-check-one-liner, template: check }
             arguments:
               parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: match, value: "{{inputs.parameters.account-number}}" }
+                - {
+                    name: accounts,
+                    value: "{{inputs.parameters.account-number}}",
+                  }
+                # The extract file's object key, suffix included — what
+                # resolve-segment-file returned and create-segment was given.
+                - {
+                    name: segment-id,
+                    value: "{{steps.resolve-segment-file.outputs.parameters.result}}",
+                  }
                 - {
                     name: wait-for-record,
                     value: "{{inputs.parameters.verify-wait}}",

@@ -54,9 +54,10 @@
 # rolling derivation does not fit a run, name the bill numbers instead.
 #
 # One result channel: exec-kube returns a single `result` parameter, so the four
-# values travel as one colon-delimited string and are split back out into named
-# outputs below. Keep the emit and the splits in step. The energy rows ride back
-# separately in the `logs` artifact, because they are printed and not captured.
+# values travel as one JSON object and the outputs below read it back by field.
+# It is emitted AFTER the rebill=force override, not by the query — exec-kube
+# honours the first ARGO_RESULT_OUTPUT= line it sees. The energy rows ride back
+# separately in the `logs` artifact, being printed rather than captured.
 #
 # Connection. billing-rds, password auth: a password-free DSN plus PGPASSWORD, as
 # step-billing-reset does it — the URL leaves the field the Secret fills.
@@ -127,16 +128,16 @@ spec:
         parameters:
           - name: do-reset
             valueFrom:
-              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[0]"
+              expression: "sprig.fromJson(steps.billing.outputs.parameters.result).do_reset"
           - name: do-reprocess
             valueFrom:
-              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[1]"
+              expression: "sprig.fromJson(steps.billing.outputs.parameters.result).do_reprocess"
           - name: bill-period
             valueFrom:
-              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[2]"
+              expression: "sprig.fromJson(steps.billing.outputs.parameters.result).bill_period"
           - name: blob-period
             valueFrom:
-              expression: "sprig.splitList(':', steps.billing.outputs.parameters.result)[3]"
+              expression: "sprig.fromJson(steps.billing.outputs.parameters.result).blob_period"
       steps:
         - - name: billing
             templateRef:
@@ -211,7 +212,12 @@ spec:
                                   # rows — hence no outer join and no GROUP BY. The decisions are
                                   # pure functions of those counts, so they belong here: running this
                                   # query by hand is an exact preview of what a run will decide.
-                                  /app/executor --format csv --output /tmp/out.csv --query "
+                                  # --result-path, NOT --result-marker: rebill=force overrides the
+                                  # decision below, and exec-kube honours the FIRST
+                                  # ARGO_RESULT_OUTPUT= line, so the executor must not emit one.
+                                  /app/executor --format csv --output /tmp/out.csv \
+                                    --result-expr 'row' --result-path /tmp/state.json \
+                                    --query "
                                     WITH p AS (
                                       SELECT CASE WHEN '$PERIOD' = '' THEN date_trunc('month', now())::date
                                                   ELSE to_date('$PERIOD', 'YYYY-MM') END AS bill_run
@@ -237,34 +243,34 @@ spec:
                                       FROM p, a, public.energy_platform_services s
                                       WHERE s.account_id = ANY(a.ids)
                                     )
-                                    SELECT concat(
-                                             CASE WHEN n.committed > 0 THEN 'true' ELSE 'false' END, ':',
-                                             CASE WHEN n.committed > 0 OR e.eps_accounts < a.accounts
-                                                  THEN 'true' ELSE 'false' END, ':',
-                                             to_char(p.bill_run, 'YYYY-MM'), ':',
-                                             to_char(p.bill_run - interval '1 month', 'YYYY-MM'), ':',
-                                             CASE WHEN e.eps_accounts < a.accounts THEN 'true' ELSE 'false' END, ':',
-                                             n.committed, ':', n.existing, ':',
-                                             e.eps_accounts, ':', e.eps_any, ':', a.accounts
-                                           ) AS state
+                                    SELECT
+                                      CASE WHEN n.committed > 0 THEN 'true' ELSE 'false' END AS do_reset,
+                                      CASE WHEN n.committed > 0 OR e.eps_accounts < a.accounts
+                                           THEN 'true' ELSE 'false' END                      AS do_reprocess,
+                                      to_char(p.bill_run, 'YYYY-MM')                         AS bill_period,
+                                      to_char(p.bill_run - interval '1 month', 'YYYY-MM')    AS blob_period,
+                                      CASE WHEN e.eps_accounts < a.accounts THEN 'true' ELSE 'false' END AS energy_gap,
+                                      n.committed, n.existing, e.eps_accounts, e.eps_any, a.accounts
                                     FROM p, a, n, e"
                                   cat /tmp/out.csv
 
-                                  row=$(tail -n 1 /tmp/out.csv)
-                                  do_reset=$(echo "$row"     | cut -d: -f1)
-                                  do_reprocess=$(echo "$row" | cut -d: -f2)
-                                  bill_period=$(echo "$row"  | cut -d: -f3)
-                                  blob_period=$(echo "$row"  | cut -d: -f4)
-                                  energy_gap=$(echo "$row"   | cut -d: -f5)
-                                  committed=$(echo "$row"    | cut -d: -f6)
-                                  existing=$(echo "$row"     | cut -d: -f7)
-                                  eps_accounts=$(echo "$row" | cut -d: -f8)
-                                  eps_any=$(echo "$row"      | cut -d: -f9)
-                                  accounts=$(echo "$row"     | cut -d: -f10)
+                                  # By name, not position: the executor writes the row as a JSON
+                                  # object, so a column moving cannot swap two values.
+                                  read_field() { jq -r --arg k "$1" '.[$k]' /tmp/state.json; }
+                                  do_reset=$(read_field do_reset)
+                                  do_reprocess=$(read_field do_reprocess)
+                                  bill_period=$(read_field bill_period)
+                                  blob_period=$(read_field blob_period)
+                                  energy_gap=$(read_field energy_gap)
+                                  committed=$(read_field committed)
+                                  existing=$(read_field existing)
+                                  eps_accounts=$(read_field eps_accounts)
+                                  eps_any=$(read_field eps_any)
+                                  accounts=$(read_field accounts)
 
                                   case "$do_reset,$do_reprocess" in
                                     true,true|true,false|false,true|false,false) ;;
-                                    *) echo "could not read the decision row from the query above (got [$row]) — refusing to guess at reset/reprocess"; exit 1 ;;
+                                    *) echo "could not read the decision from the query above (got [$do_reset,$do_reprocess]) — refusing to guess at reset/reprocess"; exit 1 ;;
                                   esac
 
                                   echo "accounts [$ACCTS]: bill run $bill_period, billing the period $blob_period"
@@ -319,7 +325,12 @@ spec:
                                       ;;
                                   esac
 
-                                  echo "ARGO_RESULT_OUTPUT=$do_reset:$do_reprocess:$bill_period:$blob_period"
+                                  # The decision as it stands after `force`, as JSON — the outputs
+                                  # read it back by field with sprig.fromJson.
+                                  printf 'ARGO_RESULT_OUTPUT=%s\n' "$(jq -nc \
+                                    --arg reset "$do_reset" --arg reprocess "$do_reprocess" \
+                                    --arg bill "$bill_period" --arg blob "$blob_period" \
+                                    '{do_reset:$reset,do_reprocess:$reprocess,bill_period:$bill,blob_period:$blob}')"
                               env:
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
                                 - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }

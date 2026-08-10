@@ -64,11 +64,11 @@ The table above is about the **next step**. Reading a result off the finished ru
 ```yaml
 outputs:
   artifacts:
-    - name: snapshot
-      from: "{{steps.export-file-snapshot.outputs.artifacts.snapshot}}"
+    - name: result
+      from: "{{steps.check-one-liner.outputs.artifacts.result}}"
 ```
 
-Four templateRefs deep (`flow-billing-bill-account` → `bill-account` → `bill-run` → `export-file-snapshot` → `execute-job`) that is four places to write it and four places to forget it. Worse, it does not survive a `when:` — a parent pulling `from:` a **skipped** step fails to resolve and takes the run down with it, so every optional producer needs a `fromExpression` guard for which there is no null artifact to fall back to.
+Four templateRefs deep (`flow-billing-bill-account` → `bill-account` → `bill-run` → `check-one-liner` → `execute-job`) that is four places to write it and four places to forget it. Worse, it does not survive a `when:` — a parent pulling `from:` a **skipped** step fails to resolve and takes the run down with it, so every optional producer needs a `fromExpression` guard for which there is no null artifact to fall back to.
 
 **So push, don't pull.** `globalName` hoists an output straight onto the Workflow's own `status.outputs` from whatever depth produced it:
 
@@ -80,7 +80,7 @@ outputs:
       globalName: "{{inputs.parameters.job-name}}" # → {{workflow.outputs.artifacts.<job-name>}}
 ```
 
-Nothing in between declares anything, and a step that never ran simply contributes nothing. `step-executor-remote-namespace` already does this, so **every remote Job's `result` lands on the run for free**, filed under its `job-name` — which is the key that already has to be unique per run for the Job itself, so captures cannot collide either. One run's outputs read as a manifest of everything it touched: `check-rebill`, `produce-fwf`, `ledger-snapshot-before`, `ledger-snapshot-after`, `export-file-snapshot`.
+Nothing in between declares anything, and a step that never ran simply contributes nothing. `step-executor-remote-namespace` already does this, so **every remote Job's `result` lands on the run for free**, filed under its `job-name` — which is the key that already has to be unique per run for the Job itself, so captures cannot collide either. One run's outputs read as a manifest of everything it touched: `check-rebill`, `produce-fwf`, `ledger-snapshot-before`, `ledger-snapshot-after`, `check-one-liner`.
 
 Two rules:
 

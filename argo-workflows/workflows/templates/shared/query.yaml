@@ -1,0 +1,505 @@
+# =============================================================================
+# step-query — one query, one Job, no shell
+# =============================================================================
+# Callers supply the query and how to judge it. The scaffolding — deadlines, the
+# service account, the pull secret, the credential wiring — lives here once. One
+# template per store (`pg`, `bq`, `mongo`), differing only in the query and the
+# credential.
+#
+# NO command/args: the executor images set ENTRYPOINT ["/app/executor"] and read
+# every flag from an env var, so a query step is configuration, not a script.
+# There is no `sh -c` for a quoting bug to live in.
+#
+# WHAT THE EXECUTOR DOES, so a caller does not:
+#   assert   --assert / --assert-message, over rowCount, affected, empty, rows, row
+#   wait     --success-expr / --failure-expr, polled on one connection
+#   capture  --result-expr names the value; the executor emits the marker
+#   retry    --retry-on, for a rejection — never for something merely slow
+#
+# ⚠️ ONE STATEMENT, arriving SINGLE-LINE. A newline in a substituted parameter
+# breaks the rendered Job's YAML (see the FIXME in step-executor-remote-namespace).
+# Write readable SQL with a folded scalar — `value: >-` — and YAML joins it first.
+# Several statements in one pod means keeping your own Job and script.
+#
+# ⚠️ Free-text values are `|-` block scalars — query, predicates, assert-message,
+# retry-on, result-expr. Argo substitutes raw text with no escaping, so a value
+# carrying a double quote would close a `value: "{{…}}"` scalar early, in a remote
+# cluster mid-run. policy/job_templates.rego proves it.
+#
+# CREDENTIALS are per-store and never composed; each template says how below.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-query
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Runs one SQL statement in a remote namespace and
+      judges it with the executor's own assert/poll/capture flags. Consumed by
+      the query templates via templateRef.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
+spec:
+  templates:
+    - name: pg
+      inputs:
+        parameters:
+          - { name: query } # ONE statement, single-line — use `value: >-`
+          - { name: job-name } # unique per run per namespace; see execute-job
+          - { name: cluster-name }
+          - { name: target-namespace }
+          - { name: exec, value: "false" } # true for INSERT/UPDATE/DELETE — the cursor path takes only SELECT
+          - { name: format, value: ndjson }
+          - { name: output, value: /tmp/out.ndjson }
+
+          - { name: assert, value: "" }
+          - { name: assert-message, value: "" }
+          - { name: success-expr, value: "" } # set => poll until true
+          - { name: failure-expr, value: "" }
+          - { name: poll-interval, value: "15" }
+          - { name: poll-timeout-ok, value: "false" } # true => a timeout is a finding, not a failure
+          - { name: heartbeat, value: "0" } # seconds between "still waiting" lines
+          - { name: retry-on, value: "" }
+          - { name: attempts, value: "1" }
+          - { name: retry-wait, value: "5" }
+          - { name: result-expr, value: "" } # e.g. row.id, affected, join(map(rows, .id), ",")
+          - { name: result-marker, value: "true" }
+          - { name: max-capture-rows, value: "10000" }
+
+          - { name: connection-string, value: "" } # non-empty wins over dsn-secret
+          - { name: dsn-secret, value: "" }
+          - { name: dsn-key, value: dsn }
+          - { name: pgpassword-secret, value: "" } # for a DSN that omits its password
+          - { name: pgpassword-key, value: password }
+          - { name: db-type, value: postgres } # postgres | cockroachdb
+          # CockroachDB client certs, minted by the in-cluster CA. Set ca-secret
+          # to turn all three on; unset they are omitted rather than blanked.
+          - { name: ca-secret, value: "" }
+          - { name: ca-auth-key, value: auth.key }
+          - { name: ca-address, value: "certificate-authority:8080" }
+          - { name: ca-profile, value: client }
+          # Or take the endpoint and profile from a ConfigMap instead of literals,
+          # which is how energy-platform publishes them. Set ca-config to switch.
+          - { name: ca-config, value: "" }
+          - { name: ca-address-key, value: ca.endpoint }
+          - { name: ca-profile-key, value: ca.node.profile }
+          - { name: vault-sidecar, value: "false" } # Kyverno-injected vault-sidecar-aws, for RDS IAM
+          - {
+              name: query-pg-image,
+              value: "registry.uw.systems/dev-enablement/query-pg:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          # In poll mode this timeout IS the wait, so exec-kube and the Job must
+          # both outlive it.
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" } # false leaves the Job for debugging
+      outputs:
+        # Artifact as well as parameter: a result too large for a parameter still
+        # travels as a file.
+        artifacts:
+          - name: result
+            from: "{{steps.query.outputs.artifacts.result}}"
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.query.outputs.parameters.result}}"
+      steps:
+        - - name: query
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: "{{inputs.parameters.job-name}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        metadata:
+                          annotations:
+                            {{=inputs.parameters['vault-sidecar'] == 'true' ? 'uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws' : 'workflows.argoproj.io/query: step-query'}}
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            # No command or args: the image's ENTRYPOINT is the
+                            # executor and every flag below is its env var.
+                            - name: query
+                              image: {{inputs.parameters.query-pg-image}}
+                              imagePullPolicy: Always
+                              env:
+                                - name: QUERY
+                                  value: |-
+                                    {{inputs.parameters.query}}
+                                - { name: EXEC, value: "{{inputs.parameters.exec}}" }
+                                - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+                                - { name: OUTPUT, value: "{{inputs.parameters.output}}" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                - name: ASSERT
+                                  value: |-
+                                    {{inputs.parameters.assert}}
+                                - name: ASSERT_MESSAGE
+                                  value: |-
+                                    {{inputs.parameters.assert-message}}
+                                - name: SUCCESS_EXPR
+                                  value: |-
+                                    {{inputs.parameters.success-expr}}
+                                - name: FAILURE_EXPR
+                                  value: |-
+                                    {{inputs.parameters.failure-expr}}
+                                - { name: POLL_INTERVAL, value: "{{inputs.parameters.poll-interval}}" }
+                                - { name: POLL_TIMEOUT_OK, value: "{{inputs.parameters.poll-timeout-ok}}" }
+                                - { name: HEARTBEAT, value: "{{inputs.parameters.heartbeat}}" }
+                                - name: RETRY_ON
+                                  value: |-
+                                    {{inputs.parameters.retry-on}}
+                                - { name: ATTEMPTS, value: "{{inputs.parameters.attempts}}" }
+                                - { name: RETRY_WAIT, value: "{{inputs.parameters.retry-wait}}" }
+                                - name: RESULT_EXPR
+                                  value: |-
+                                    {{inputs.parameters.result-expr}}
+                                - { name: RESULT_MARKER, value: "{{inputs.parameters.result-marker}}" }
+                                - { name: MAX_CAPTURE_ROWS, value: "{{inputs.parameters.max-capture-rows}}" }
+                                # Only when something names the value: without an
+                                # expr the driver captures the whole env, which is
+                                # a wrapper rather than a result.
+                                {{=inputs.parameters['result-expr'] != '' ? '- { name: RESULT_PATH, value: /tmp/result }' : '# no capture: --result-expr names the value'}}
+                                - { name: DB_TYPE, value: "{{inputs.parameters.db-type}}" }
+                                # A comment rather than an entry when unused: an empty PGPASSWORD
+                                # is not the same as none, and would stop pgx reaching for IAM.
+                                {{=inputs.parameters['pgpassword-secret'] != '' ? '- { name: PGPASSWORD, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['pgpassword-secret'] + ', key: ' + inputs.parameters['pgpassword-key'] + ' } } }' : '# no PGPASSWORD: the DSN or RDS IAM carries the credential'}}
+                                {{=inputs.parameters['ca-secret'] != '' ? '- { name: CA_AUTH_KEY, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['ca-secret'] + ', key: ' + inputs.parameters['ca-auth-key'] + ' } } }' : '# no CA: not a cockroachdb client-cert connection'}}
+                                {{=inputs.parameters['ca-secret'] == '' ? '#' : (inputs.parameters['ca-config'] != '' ? '- { name: CA_ADDRESS, valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['ca-config'] + ', key: ' + inputs.parameters['ca-address-key'] + ' } } }' : '- { name: CA_ADDRESS, value: "' + inputs.parameters['ca-address'] + '" }')}}
+                                {{=inputs.parameters['ca-secret'] == '' ? '#' : (inputs.parameters['ca-config'] != '' ? '- { name: CA_PROFILE, valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['ca-config'] + ', key: ' + inputs.parameters['ca-profile-key'] + ' } } }' : '- { name: CA_PROFILE, value: "' + inputs.parameters['ca-profile'] + '" }')}}
+                                - name: CONNECTION_STRING
+                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
+
+    # -------------------------------------------------------------------------
+    # bq — the same step against BigQuery. Only the credential differs: a service
+    # account JSON projected at query-bq's default GCP_SERVICE_ACCOUNT_PATH,
+    # which is why nothing names it in env.
+    # -------------------------------------------------------------------------
+    - name: bq
+      inputs:
+        parameters:
+          - { name: query } # ONE statement, single-line — use `value: >-`
+          - { name: job-name }
+          - { name: cluster-name }
+          - { name: target-namespace }
+          - { name: format, value: ndjson }
+          - { name: output, value: /tmp/out.ndjson }
+
+          - { name: assert, value: "" }
+          - { name: assert-message, value: "" }
+          - { name: success-expr, value: "" }
+          - { name: failure-expr, value: "" }
+          - { name: poll-interval, value: "15" }
+          - { name: poll-timeout-ok, value: "false" }
+          - { name: heartbeat, value: "0" }
+          - { name: retry-on, value: "" }
+          - { name: attempts, value: "1" }
+          - { name: retry-wait, value: "5" }
+          - { name: result-expr, value: "" }
+          - { name: result-marker, value: "true" }
+          - { name: max-capture-rows, value: "10000" }
+
+          - { name: gcp-project-id }
+          - { name: gcp-secret }
+          - { name: gcp-secret-key }
+          - { name: gcp-secret-path, value: /app/secrets }
+          - {
+              name: query-bq-image,
+              value: "registry.uw.systems/dev-enablement/query-bq:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" }
+      outputs:
+        # Artifact as well as parameter: a result too large for a parameter still
+        # travels as a file.
+        artifacts:
+          - name: result
+            from: "{{steps.query.outputs.artifacts.result}}"
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.query.outputs.parameters.result}}"
+      steps:
+        - - name: query
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: "{{inputs.parameters.job-name}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          volumes:
+                            - name: gcp-creds
+                              secret:
+                                secretName: {{inputs.parameters.gcp-secret}}
+                                items:
+                                  - key: {{inputs.parameters.gcp-secret-key}}
+                                    path: gcp-secret-account.json
+                          containers:
+                            # No command or args: ENTRYPOINT is the executor.
+                            - name: query
+                              image: {{inputs.parameters.query-bq-image}}
+                              imagePullPolicy: Always
+                              volumeMounts:
+                                - name: gcp-creds
+                                  mountPath: {{inputs.parameters.gcp-secret-path}}
+                                  readOnly: true
+                              env:
+                                - name: QUERY
+                                  value: |-
+                                    {{inputs.parameters.query}}
+                                - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+                                - { name: OUTPUT, value: "{{inputs.parameters.output}}" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                - name: ASSERT
+                                  value: |-
+                                    {{inputs.parameters.assert}}
+                                - name: ASSERT_MESSAGE
+                                  value: |-
+                                    {{inputs.parameters.assert-message}}
+                                - name: SUCCESS_EXPR
+                                  value: |-
+                                    {{inputs.parameters.success-expr}}
+                                - name: FAILURE_EXPR
+                                  value: |-
+                                    {{inputs.parameters.failure-expr}}
+                                - { name: POLL_INTERVAL, value: "{{inputs.parameters.poll-interval}}" }
+                                - { name: POLL_TIMEOUT_OK, value: "{{inputs.parameters.poll-timeout-ok}}" }
+                                - { name: HEARTBEAT, value: "{{inputs.parameters.heartbeat}}" }
+                                - name: RETRY_ON
+                                  value: |-
+                                    {{inputs.parameters.retry-on}}
+                                - { name: ATTEMPTS, value: "{{inputs.parameters.attempts}}" }
+                                - { name: RETRY_WAIT, value: "{{inputs.parameters.retry-wait}}" }
+                                - name: RESULT_EXPR
+                                  value: |-
+                                    {{inputs.parameters.result-expr}}
+                                - { name: RESULT_MARKER, value: "{{inputs.parameters.result-marker}}" }
+                                - { name: MAX_CAPTURE_ROWS, value: "{{inputs.parameters.max-capture-rows}}" }
+                                # Only when something names the value: without an
+                                # expr the driver captures the whole env, which is
+                                # a wrapper rather than a result.
+                                {{=inputs.parameters['result-expr'] != '' ? '- { name: RESULT_PATH, value: /tmp/result }' : '# no capture: --result-expr names the value'}}
+                                - { name: GCP_PROJECT_ID, value: "{{inputs.parameters.gcp-project-id}}" }
+
+    # -------------------------------------------------------------------------
+    # mongo — the same step against MongoDB. `query` is a find FILTER as JSON,
+    # not a statement, and everything downstream of it is identical.
+    #
+    # CREDENTIALS. Whole URI, never composed: `uri` wins when set, otherwise it
+    # is read whole from uri-secret/uri-key — the value the owning service reads.
+    # A store keeping its password in its own Secret key supplies username +
+    # password-secret instead, applied as a credential rather than pasted into
+    # the URI, so nothing has to percent-encode it.
+    # -------------------------------------------------------------------------
+    - name: mongo
+      inputs:
+        parameters:
+          - { name: query } # a find FILTER as JSON, single-line
+          - { name: database }
+          - { name: collection }
+          - { name: job-name }
+          - { name: cluster-name }
+          - { name: target-namespace }
+          - { name: projection, value: "" } # JSON; empty returns whole documents
+          - { name: sort, value: "" } # JSON; field order is significant
+          - { name: limit, value: "0" } # 0 => every match
+          - { name: format, value: ndjson }
+          - { name: output, value: /tmp/out.ndjson }
+
+          - { name: assert, value: "" }
+          - { name: assert-message, value: "" }
+          - { name: success-expr, value: "" } # set => poll until true
+          - { name: failure-expr, value: "" }
+          - { name: poll-interval, value: "15" }
+          - { name: poll-timeout-ok, value: "false" } # true => a timeout is a finding, not a failure
+          - { name: heartbeat, value: "0" } # seconds between "still waiting" lines
+          - { name: retry-on, value: "" }
+          - { name: attempts, value: "1" }
+          - { name: retry-wait, value: "5" }
+          - { name: result-expr, value: "" } # e.g. rows, row.total, len(uniq(map(rows, .accountid)))
+          - { name: result-marker, value: "true" }
+          - { name: max-capture-rows, value: "10000" }
+
+          - { name: uri, value: "" } # non-empty wins over uri-secret
+          - { name: uri-secret, value: "" }
+          - { name: uri-key, value: mongo.url }
+          - { name: username, value: "" } # only for a URI that carries no credentials
+          - { name: password-secret, value: "" }
+          - { name: password-key, value: app.password }
+          - { name: auth-source, value: "" } # empty => the URI's default, else admin
+          - {
+              name: query-mongo-image,
+              value: "registry.uw.systems/dev-enablement/query-mongo:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          # In poll mode this timeout IS the wait, so exec-kube and the Job must
+          # both outlive it.
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" } # false leaves the Job for debugging
+      outputs:
+        # Artifact as well as parameter: a result too large for a parameter still
+        # travels as a file.
+        artifacts:
+          - name: result
+            from: "{{steps.query.outputs.artifacts.result}}"
+        parameters:
+          - name: result
+            valueFrom:
+              parameter: "{{steps.query.outputs.parameters.result}}"
+      steps:
+        - - name: query
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: "{{inputs.parameters.job-name}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          containers:
+                            # No command or args: ENTRYPOINT is the executor.
+                            - name: query
+                              image: {{inputs.parameters.query-mongo-image}}
+                              imagePullPolicy: Always
+                              env:
+                                - name: QUERY
+                                  value: |-
+                                    {{inputs.parameters.query}}
+                                - name: PROJECTION
+                                  value: |-
+                                    {{inputs.parameters.projection}}
+                                - name: SORT
+                                  value: |-
+                                    {{inputs.parameters.sort}}
+                                - { name: DATABASE, value: "{{inputs.parameters.database}}" }
+                                - { name: COLLECTION, value: "{{inputs.parameters.collection}}" }
+                                - { name: LIMIT, value: "{{inputs.parameters.limit}}" }
+                                - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+                                - { name: OUTPUT, value: "{{inputs.parameters.output}}" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                - name: ASSERT
+                                  value: |-
+                                    {{inputs.parameters.assert}}
+                                - name: ASSERT_MESSAGE
+                                  value: |-
+                                    {{inputs.parameters.assert-message}}
+                                - name: SUCCESS_EXPR
+                                  value: |-
+                                    {{inputs.parameters.success-expr}}
+                                - name: FAILURE_EXPR
+                                  value: |-
+                                    {{inputs.parameters.failure-expr}}
+                                - { name: POLL_INTERVAL, value: "{{inputs.parameters.poll-interval}}" }
+                                - { name: POLL_TIMEOUT_OK, value: "{{inputs.parameters.poll-timeout-ok}}" }
+                                - { name: HEARTBEAT, value: "{{inputs.parameters.heartbeat}}" }
+                                - name: RETRY_ON
+                                  value: |-
+                                    {{inputs.parameters.retry-on}}
+                                - { name: ATTEMPTS, value: "{{inputs.parameters.attempts}}" }
+                                - { name: RETRY_WAIT, value: "{{inputs.parameters.retry-wait}}" }
+                                - name: RESULT_EXPR
+                                  value: |-
+                                    {{inputs.parameters.result-expr}}
+                                - { name: RESULT_MARKER, value: "{{inputs.parameters.result-marker}}" }
+                                - { name: MAX_CAPTURE_ROWS, value: "{{inputs.parameters.max-capture-rows}}" }
+                                # Only when something names the value: without an
+                                # expr the driver captures the whole env, which is
+                                # a wrapper rather than a result.
+                                {{=inputs.parameters['result-expr'] != '' ? '- { name: RESULT_PATH, value: /tmp/result }' : '# no capture: --result-expr names the value'}}
+                                # A comment rather than an entry when unused: an
+                                # empty USERNAME would turn on credential auth
+                                # against a URI that carries its own.
+                                {{=inputs.parameters['username'] != '' ? '- { name: USERNAME, value: "' + inputs.parameters['username'] + '" }' : '# no USERNAME: the URI carries the credential'}}
+                                {{=inputs.parameters['password-secret'] != '' ? '- { name: PASSWORD, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['password-secret'] + ', key: ' + inputs.parameters['password-key'] + ' } } }' : '# no PASSWORD: the URI carries the credential'}}
+                                {{=inputs.parameters['auth-source'] != '' ? '- { name: AUTH_SOURCE, value: "' + inputs.parameters['auth-source'] + '" }' : '# no AUTH_SOURCE: the URI default, else admin'}}
+                                - name: URI
+                                  {{=inputs.parameters['uri'] != '' ? 'value: "' + inputs.parameters['uri'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['uri-secret'] + ', key: ' + inputs.parameters['uri-key'] + ' } }'}}
