@@ -281,6 +281,43 @@ spec:
                     value: "{{inputs.parameters.assert-namespace}}",
                   }
 
+        # 4c) HOLD FOR CAPACITY: the last read-only step. Everything below changes
+        #     something.
+        #
+        #     Bill publishes AccountReadyForBillingEvent and polls for the bill;
+        #     bill-composition-engine consumes it. When that consumer is slow, the
+        #     run still resets and re-sends, then times out waiting for a bill
+        #     that the system is not prepared to compose — destructive work done, no bill, account left
+        #     half-way. Holding here turns that into a wait.
+        - - name: hold-for-capacity
+            templateRef: { name: step-consumer-lag-gate, template: gate }
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: group,
+                    value: "billing-bill-composition-engine-billing-engine-events",
+                  }
+                - { name: topic, value: billing-engine-events }
+                # Metrics for the billing domain lives on the finance Prometheus.
+                - {
+                    name: prometheus-url,
+                    value: "https://prometheus-finance.dev.merit.uw.systems",
+                  }
+                - { name: system, value: "the billing system" }
+                - {
+                    name: consequence,
+                    value: "clear this account's bills and re-send its energy readings, then wait for a bill that never arrives — leaving the account half-billed",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
         # 5) RESET: clear what a previous bill run left, so these accounts can be billed
         #    again. Both stores in parallel from dev-merit/billing; dry-run reports row
         #    counts instead of deleting.

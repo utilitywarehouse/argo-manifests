@@ -9,6 +9,7 @@ resources:
   - grpc-call.yaml
   - pause.yaml
   - query.yaml
+  - consumer-lag-gate.yaml
 
 # ---------------------------------------------------------------------------
 # Image pins for the shared/ package templates. Each package (shared, billing,
