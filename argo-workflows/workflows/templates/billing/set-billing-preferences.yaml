@@ -108,19 +108,22 @@ spec:
                 # One statement either way: a dry run counts what it would insert,
                 # a real one inserts and reports what it did. expr strings are
                 # double-quoted so the SQL keeps its own single quotes.
+                #
+                # ⚠️ Parameters are CONCATENATED into the expression with `+`, never
+                # nested as {{...}} inside it. Argo's tag scanner closes a {{= at the
+                # FIRST }} it meets — an inner tag's — and hands expr a string literal
+                # cut in half. Keep every literal on one line: `>-` folds the joins.
                 - name: query
                   value: >-
                     {{=inputs.parameters['dry-run'] == 'true'
-                    ? "WITH ids AS (SELECT btrim(x)::uuid::text AS account_id FROM
-                    unnest(string_to_array('{{inputs.parameters.account-ids}}', ',')) AS t(x)) SELECT
-                    count(*) AS missing FROM ids i LEFT JOIN public.preferences p ON p.account_id =
-                    i.account_id WHERE p.account_id IS NULL"
-                    : "WITH ids AS (SELECT btrim(x)::uuid::text AS account_id FROM
-                    unnest(string_to_array('{{inputs.parameters.account-ids}}', ',')) AS t(x)) INSERT
-                    INTO public.preferences (account_id, email, print, large_print, braille, csv) SELECT
-                    i.account_id, {{inputs.parameters.email}}, {{inputs.parameters.print}},
-                    {{inputs.parameters.large-print}}, {{inputs.parameters.braille}},
-                    {{inputs.parameters.csv}} FROM ids i ON CONFLICT (account_id) DO NOTHING"}}
+                    ? "WITH ids AS (SELECT btrim(x)::uuid::text AS account_id FROM unnest(string_to_array('"
+                    + inputs.parameters['account-ids']
+                    + "', ',')) AS t(x)) SELECT count(*) AS missing FROM ids i LEFT JOIN public.preferences p ON p.account_id = i.account_id WHERE p.account_id IS NULL"
+                    : "WITH ids AS (SELECT btrim(x)::uuid::text AS account_id FROM unnest(string_to_array('"
+                    + inputs.parameters['account-ids']
+                    + "', ',')) AS t(x)) INSERT INTO public.preferences (account_id, email, print, large_print, braille, csv) SELECT i.account_id, "
+                    + inputs.parameters['email'] + ", " + inputs.parameters['print'] + ", " + inputs.parameters['large-print'] + ", " + inputs.parameters['braille'] + ", " + inputs.parameters['csv']
+                    + " FROM ids i ON CONFLICT (account_id) DO NOTHING"}}
                 - name: exec
                   value: "{{=inputs.parameters['dry-run'] == 'true' ? 'false' : 'true'}}"
                 - name: result-expr
