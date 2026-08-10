@@ -12,9 +12,9 @@
 #        │
 #   check-rebill                 read-only: reset needed? energy data missing?
 #        │
-#   snapshot                     verify only: what the adapter holds first
+#   check-adapter-blobs          gate: the account has blobs, and none are broken
 #        │
-#   reset                        destructive: clear the last bill run
+#   reset                        destructive: every bill the account has, in billing
 #        │
 #   reprocess-bills              re-open the blobs, re-send them, wait
 #        │
@@ -35,19 +35,12 @@
 #   bill-run                     Create → Bill → Commit → Export → Fulfil
 #                                  ├─ either side of Commit: the ledger and
 #                                  │  BigQuery's committed transaction log
-#                                  └─ after Export: the finance one-liner file
+#                                  └─ after Export: the finance one-liners
 #
 # VERIFY. Two kinds of run share this pipeline: one that just produces a bill,
 # and one that produces a bill to watch what the other systems do with it.
 # `verify` is which, and it is false by default — the bill is identical either
 # way, so seven extra remote Jobs and a wait on the ledger are a choice.
-#
-# On, it snapshots the adapter's blobs before anything is re-sent, then (inside
-# bill-run) the ledger and BigQuery's transaction log either side of Commit and
-# the finance one-liner export after it. Every one is a snapshot, not a check:
-# none can fail on what it finds, so leaving verify on cannot turn a run red over
-# the bill. Billing's own energy rows need no verify gate — check-rebill logs them
-# on every run.
 #
 # There is no "this account should be untouched" mode. check-rebill knows what
 # billing holds, but that is a fact about billing-rds and the adapter's blobs are
@@ -92,6 +85,11 @@
 # the bill_number lookup, the blobs to re-send and the assert — so an empty
 # bill-period cannot resolve to one month in one step and another elsewhere.
 #
+# reset is the exception: it clears the billing platform account-wide, because
+# that is what frees the period to be billed again. The energy side stays scoped:
+# check-adapter-blobs, reprocess-bills and assert-bills-processed all key on
+# blob-period.
+#
 # The invoice number is produced before produce-fwf consumes it. dry-run gates
 # its two writes exactly as it gates the upload, register and bill-run.
 #
@@ -125,7 +123,7 @@ spec:
       - { name: rebill, value: auto } # auto => reset only if a committed bill blocks the period, reprocess also when billing has no energy data for it; force | off
       - { name: gentrack-bill-numbers, value: "" } # gentrack bill number(s) to re-send, comma-separated (e.g. J40000010621); empty => the period being billed
       - { name: engineer-visit, value: "false" }
-      - { name: verify, value: "false" } # true => also observe the other systems (baselines, ledger snapshots, BigQuery, the finance export)
+      - { name: verify, value: "false" } # true => also observe the other systems (baselines, ledger snapshots, BigQuery, the finance one-liners)
       - { name: log-level, value: info } # one level for the whole pipeline; reaches every dispatched tool
   templates:
     - name: main
@@ -219,6 +217,8 @@ spec:
               parameters:
                 - name: expr
                   value: 'join(uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number)), ",")'
+                # step-query captures rows as a JSON array, not ndjson.
+                - { name: format, value: json }
                 - { name: output-format, value: lines } # emit the comma-joined scalar
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
@@ -248,19 +248,15 @@ spec:
                     value: "{{inputs.parameters.gentrack-bill-numbers}}",
                   }
 
-        # 4b) SNAPSHOT (verify only): what the adapter holds before anything is re-sent.
-        #     Here and not later because reprocess-bills clears processed_at — after it
-        #     the "before" is gone. The ledger's own before/after lives in bill-run,
-        #     either side of the Commit that moves it.
-        #
-        #     Billing's side needs no step: check-rebill above logs every
-        #     energy_platform_services row on every run, verify or not.
-        #
-        #     Does not assert. See the header. Same scope precedence as the assert below.
-        - - name: adapter-blobs-snapshot
-            when: "{{inputs.parameters.verify}} == true"
+        # 4b) CHECK-ADAPTER-BLOBS: gates the account set and fails the run. Runs
+        #     before reprocess-bills clears processed_at. Billing's own side needs
+        #     no step — check-rebill logs every energy_platform_services row.
+        - - name: check-adapter-blobs
             templateRef:
-              { name: step-energy-assert-bills-processed, template: snapshot }
+              {
+                name: step-energy-assert-bills-processed,
+                template: check-adapter-blobs,
+              }
             arguments:
               parameters:
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }

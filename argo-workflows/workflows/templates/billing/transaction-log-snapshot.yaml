@@ -2,8 +2,12 @@
 # transaction log for review. Asserts nothing; only a credentials or query error
 # turns it red. Called either side of Commit, `phase` apart (it names the Job).
 #
-# One query for ALL accounts, split per account when printed: every BigQuery
-# query is billed, so per-account reading is not worth paying N times for.
+# One query for ALL accounts: every BigQuery query is billed, so this is not
+# worth paying N times for. `_account` anchor rows come from the id list rather
+# than the table, so an account with no rows is counted rather than invisible.
+#
+# ⚠️ `row` is an escaped JSON STRING here, where the Postgres snapshots return a
+# nested object — TO_JSON_STRING has no jsonb to return.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -43,23 +47,21 @@ spec:
           - { name: gcp-secret-path, value: /app/secrets }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
-          - {
-              name: query-bq-image,
-              value: "registry.uw.systems/dev-enablement/query-bq:main",
-            }
           - { name: runner-sa, value: default }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
-          - { name: poll-interval, value: "60" } # seconds between checks; each one is a billed query
-          # The Job's deadline and exec-kube's timeout are both composed from the
-          # wait above plus this buffer, so widening the wait cannot outlive them.
+          - { name: poll-interval, value: "60" } # seconds between polls; each one is a billed query
+          # Every account asked for holds a row created at or after `since`.
+          - name: fresh-expr
+            value: "len(uniq(map(filter(rows, .fresh), .account_id))) == len(filter(rows, ._table == '_account'))"
+          - { name: heartbeat, value: "60" } # seconds between "still waiting" lines; 0 silences them
+          # The Job's deadline is the wait plus this buffer, so widening the wait
+          # cannot outlive it.
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
       steps:
         - - name: billing
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            templateRef: { name: step-query, template: bq }
             arguments:
               parameters:
                 - {
@@ -70,108 +72,59 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                # exec-kube must outlive the wait, or it stops managing the Job.
-                - {
-                    name: timeout,
-                    value: "{{=string(duration(inputs.parameters['wait-for-row']) + duration(inputs.parameters['job-buffer']))}}",
-                  }
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                # Two snapshots run in one workflow, into one namespace — so the
-                # Job name has to carry which one this is.
                 - {
                     name: job-name,
                     value: "transaction-log-{{inputs.parameters.phase}}",
                   }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int((duration(inputs.parameters['wait-for-row']) + duration(inputs.parameters['job-buffer'])).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        spec:
-                          serviceAccountName: {{inputs.parameters.runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          volumes:
-                            # Projected at query-bq's default GCP_SERVICE_ACCOUNT_PATH,
-                            # which is why no env var names it.
-                            - name: gcp-creds
-                              secret:
-                                secretName: {{inputs.parameters.gcp-secret}}
-                                items:
-                                  - key: {{inputs.parameters.gcp-secret-key}}
-                                    path: gcp-secret-account.json
-                          containers:
-                            - name: snapshot
-                              image: {{inputs.parameters.query-bq-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              volumeMounts:
-                                - name: gcp-creds
-                                  mountPath: {{inputs.parameters.gcp-secret-path}}
-                                  readOnly: true
-                              args:
-                                - |
-                                  set -eu
-                                  ACCTS="{{inputs.parameters.account-ids}}"
-                                  PHASE="{{inputs.parameters.phase}}"
-                                  SINCE="{{inputs.parameters.since}}"
-                                  TABLE="{{inputs.parameters.table}}"
-                                  WAIT={{=int(duration(inputs.parameters['wait-for-row']).Seconds())}}
-                                  echo "committed transaction log snapshot ($PHASE) for account(s) [$ACCTS], table $TABLE"
-
-                                  # Backticks escaped: the project id's hyphens make them
-                                  # mandatory, and sh would otherwise run the table name.
-                                  SCOPE="account_id IN UNNEST(SPLIT('$ACCTS', ','))"
-
-                                  # A delay so the dump is about this run rather than the lag,
-                                  # not a gate: running out is not an error.
-                                  if [ "$WAIT" -gt 0 ]; then
-                                    echo "waiting up to ${WAIT}s for a row created at or after $SINCE"
-                                    deadline=$(( $(date +%s) + WAIT ))
-                                    while :; do
-                                      /app/executor --format csv --output /tmp/wait.csv \
-                                        --query "SELECT count(*) AS n FROM \`$TABLE\` WHERE $SCOPE AND created_time >= TIMESTAMP('$SINCE')"
-                                      n=$(tail -n 1 /tmp/wait.csv)
-                                      echo "  rows since $SINCE: $n"
-                                      if [ "$n" != "0" ]; then
-                                        break
-                                      fi
-                                      if [ $(date +%s) -ge $deadline ]; then
-                                        echo "  nothing arrived within ${WAIT}s — snapshotting anyway; read the empty dump below as the finding"
-                                        break
-                                      fi
-                                      sleep {{inputs.parameters.poll-interval}}
-                                    done
-                                  fi
-
-                                  /app/executor --format ndjson --output /tmp/txlog.ndjson \
-                                    --query "SELECT * FROM \`$TABLE\` WHERE $SCOPE ORDER BY account_id, created_time"
-
-                                  # Split per account: a uuid is long enough that a fixed
-                                  # substring cannot collide with another column's value.
-                                  for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
-                                    echo
-                                    echo "-- committed_transaction_log ($PHASE, account $ACCT) --"
-                                    if grep -F "$ACCT" /tmp/txlog.ndjson > /tmp/acct.ndjson 2>/dev/null && [ -s /tmp/acct.ndjson ]; then
-                                      cat /tmp/acct.ndjson
-                                      echo "rows: $(wc -l < /tmp/acct.ndjson | tr -d ' ')"
-                                    else
-                                      echo "(no rows)"
-                                    fi
-                                  done
-
-                                  # The same rows again, bracketed. exec-kube captures this
-                                  # block as `result` and strips it from the logs, so the
-                                  # readable dump above is not duplicated.
-                                  echo
-                                  echo ARGO_RESULT_BEGIN
-                                  cat /tmp/txlog.ndjson
-                                  echo ARGO_RESULT_END
-                              env:
-                                - { name: GCP_PROJECT_ID, value: {{inputs.parameters.gcp-project-id}} }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
+                - {
+                    name: gcp-project-id,
+                    value: "{{inputs.parameters.gcp-project-id}}",
+                  }
+                - {
+                    name: gcp-secret,
+                    value: "{{inputs.parameters.gcp-secret}}",
+                  }
+                - {
+                    name: gcp-secret-key,
+                    value: "{{inputs.parameters.gcp-secret-key}}",
+                  }
+                - {
+                    name: gcp-secret-path,
+                    value: "{{inputs.parameters.gcp-secret-path}}",
+                  }
+                - { name: runner-sa, value: "{{inputs.parameters.runner-sa}}" }
+                - {
+                    name: image-pull-secret,
+                    value: "{{inputs.parameters.image-pull-secret}}",
+                  }
+                - { name: format, value: ndjson }
+                - { name: output, value: /tmp/txlog.ndjson }
+                - { name: result-expr, value: "rows" }
+                # Only a non-zero wait polls; a zero timeout would expire before
+                # the first query, so both follow wait-for-row. Every poll is a
+                # billed scan, hence the 60s interval.
+                - name: success-expr
+                  value: "{{=inputs.parameters['wait-for-row'] == '0s' ? '' : inputs.parameters['fresh-expr']}}"
+                - {
+                    name: poll-interval,
+                    value: "{{inputs.parameters.poll-interval}}",
+                  }
+                - { name: heartbeat, value: "{{inputs.parameters.heartbeat}}" }
+                - name: timeout
+                  value: "{{=inputs.parameters['wait-for-row'] == '0s' ? '5m' : inputs.parameters['wait-for-row']}}"
+                - name: job-active-deadline
+                  value: "{{=string(duration(inputs.parameters['wait-for-row'] == '0s' ? '5m' : inputs.parameters['wait-for-row']) + duration(inputs.parameters['job-buffer']))}}"
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: query
+                  value: >-
+                    SELECT '_account' AS _table, account_id, false AS fresh,
+                    TO_JSON_STRING(STRUCT(account_id)) AS row
+                    FROM UNNEST(SPLIT('{{inputs.parameters.account-ids}}', ',')) AS account_id
+                    UNION ALL
+                    SELECT 'committed_transaction_log', t.account_id,
+                    t.created_time >= TIMESTAMP('{{inputs.parameters.since}}'),
+                    TO_JSON_STRING(t)
+                    FROM `{{inputs.parameters.table}}` t
+                    WHERE t.account_id IN UNNEST(SPLIT('{{inputs.parameters.account-ids}}', ','))
+                    ORDER BY 2, 1

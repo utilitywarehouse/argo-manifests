@@ -1,29 +1,26 @@
 # =============================================================================
-# step-energy-resolve-service-identifiers — customer account_id → compiled energy
-# service / gentrack identifier map (from energy-platform `service_snapshot`)
+# step-energy-resolve-service-identifiers — customer account_id → the account's
+# energy supplies, from energy-platform `service_snapshot`
 # =============================================================================
-# Energy-owned, reusable leaf: given a customer account_id, return the account's
-# energy-service supplies as flat ndjson rows, so any workflow can SELECT the
-# properties it needs (gentrack numbers, MPxNs, agreement/customer ids …).
-#
-#   in : account-id  (customer_account_id, uuid)
-#   out: identifiers  — exposed ARTIFACT-FIRST (a file in the S3 artifact repo) plus a
-#        parameter mirror. The producer runs the plainest, fastest query (a flat
-#        SELECT — no server-side JSON assembly) and streams ndjson, one supply per
-#        line, which exec-kube captures verbatim between the ARGO_RESULT_BEGIN/END
-#        markers. Row shape:
+#   in : account-id  (customer_account_id, uuid; one or comma-separated many)
+#   out: identifiers — a JSON ARRAY of supply rows, as both an artifact and a
+#        parameter. Row shape:
 #          {"supply_type","mpxn","gentrack_account_number","gentrack_account_id",
 #           "gentrack_agreement_id","gentrack_customer_id"}
-#        Consumers select all / partial / specific properties downstream with the
-#        `select` executor (expr over `rows`) — e.g. the distinct gentrack numbers
-#        for a fan-out:
-#          uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))
-#        account_id is the input, not repeated per row. An account with no matching
-#        supplies yields an empty result; consumers decide how to handle it. See
-#        docs/data-flow.md for the full data-passing standard.
+#
+# ⚠️ A JSON ARRAY, not ndjson: `result-expr: rows` captures the row set as one
+# value. A downstream `select` needs `format: json`; with the default `ndjson` it
+# parses nothing and returns empty, silently.
+#
+# Consumers pick fields with the `select` executor (expr over `rows`) — e.g. the
+# distinct gentrack numbers for a fan-out:
+#   uniq(map(filter(rows, .gentrack_account_number != nil), .gentrack_account_number))
+# account_id is the input, not repeated per row. An account with no matching
+# supplies yields an empty result; consumers decide what that means. See
+# docs/data-flow.md.
 #
 # Reference-only: the energy stage of the account pipeline, consumed via
-# templateRef by the flow-test-account-select orchestrator (piped account-id in).
+# templateRef by the flow-test-account-select orchestrator.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -32,8 +29,9 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Do NOT submit from the UI (read-only). customer account_id → flat ndjson of the
-      account's energy-service supplies from service_snapshot. Consumed via templateRef.
+      Do NOT submit from the UI (read-only). customer account_id → the account's
+      energy-service supplies from service_snapshot, as a JSON array. Consumed
+      via templateRef.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: energy
@@ -61,17 +59,12 @@ spec:
       - { name: ca-profile-key, value: ca.node.profile } # → CA_PROFILE
       - { name: ca-address-key, value: ca.endpoint } # → CA_ADDRESS
       # common
-      # query-pg-image is a template input only (below), pinned centrally by the
-      # image-versions ConfigMap — not a UI-settable workflow argument.
       - { name: image-pull-secret, value: dockerhub-key }
       - { name: log-level, value: info }
       - { name: timeout, value: 3m }
       - { name: job-active-deadline, value: 5m }
       - { name: job-ttl, value: 24h }
-      # Debug knob: set false to stop exec-kube deleting the remote Job on completion
-      # so it can be inspected (kubectl -n energy-platform on dev-merit). job-ttl still
-      # GCs it afterwards. Default true = normal teardown.
-      - { name: teardown, value: "true" }
+      - { name: teardown, value: "true" } # false leaves the remote Job for inspection; job-ttl still GCs it
   templates:
     - name: resolve
       inputs:
@@ -90,10 +83,6 @@ spec:
           - { name: ca-config, value: ca.config.energy-platform }
           - { name: ca-profile-key, value: ca.node.profile }
           - { name: ca-address-key, value: ca.endpoint }
-          - {
-              name: query-pg-image,
-              value: "registry.uw.systems/dev-enablement/query-pg:main",
-            }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 3m }
@@ -101,23 +90,20 @@ spec:
           - { name: job-ttl, value: 24h }
           - { name: teardown, value: "true" }
       outputs:
-        # Artifact-first: the flat ndjson supplies are exposed as an ARTIFACT (a file
-        # in the S3 artifact repo) so downstream steps can pull it and select all /
-        # partial / specific properties with the `select` executor. The parameter
-        # mirror is kept for small results (a handful of supplies).
+        # Artifact for a `select` step to mount; the parameter mirror is for the
+        # handful-of-supplies case.
         artifacts:
-          - name: identifiers # the flat ndjson supply rows, as a file
+          - name: identifiers
             from: "{{steps.energy-platform.outputs.artifacts.result}}"
         parameters:
           - name: identifiers
             valueFrom:
               parameter: "{{steps.energy-platform.outputs.parameters.result}}"
       steps:
-        # energy-platform: account_id → the account's supplies as flat ndjson
+        # No shell: `>-` folds the SQL to one line, and the rows are both the
+        # captured result and the artifact a downstream `select` pulls.
         - - name: energy-platform
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            templateRef: { name: step-query, template: pg }
             arguments:
               parameters:
                 - {
@@ -128,63 +114,50 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.energy-service-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
                 - { name: job-name, value: resolve-service-identifiers }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        spec:
-                          serviceAccountName: {{inputs.parameters.service-runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          containers:
-                            - name: query
-                              image: {{inputs.parameters.query-pg-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  /app/executor
-                                  echo ARGO_RESULT_BEGIN
-                                  cat /tmp/out.ndjson
-                                  echo ARGO_RESULT_END
-                              env:
-                                - name: QUERY
-                                  value: >-
-                                    SELECT s.supply_type, s.mpxn, s.gentrack_account_number,
-                                           s.gentrack_account_id, s.gentrack_agreement_id,
-                                           s.gentrack_customer_id
-                                    FROM service_snapshot s
-                                    WHERE s.customer_account_id IN (SELECT unnest(string_to_array('{{inputs.parameters.account-id}}', ',')))
-                                      AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
-                                - { name: FORMAT, value: ndjson }
-                                - { name: OUTPUT, value: /tmp/out.ndjson }
-                                - { name: DB_TYPE, value: cockroachdb }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                - name: CONNECTION_STRING
-                                  value: "{{inputs.parameters.service-connection-string}}"
-                                - name: CA_AUTH_KEY
-                                  valueFrom:
-                                    secretKeyRef:
-                                      name: {{inputs.parameters.ca-secret}}
-                                      key: {{inputs.parameters.ca-auth-key}}
-                                - name: CA_PROFILE
-                                  valueFrom:
-                                    configMapKeyRef:
-                                      name: {{inputs.parameters.ca-config}}
-                                      key: {{inputs.parameters.ca-profile-key}}
-                                - name: CA_ADDRESS
-                                  valueFrom:
-                                    configMapKeyRef:
-                                      name: {{inputs.parameters.ca-config}}
-                                      key: {{inputs.parameters.ca-address-key}}
+                - name: query
+                  value: >-
+                    SELECT s.supply_type, s.mpxn, s.gentrack_account_number,
+                    s.gentrack_account_id, s.gentrack_agreement_id,
+                    s.gentrack_customer_id
+                    FROM service_snapshot s
+                    WHERE s.customer_account_id IN (SELECT unnest(string_to_array('{{inputs.parameters.account-id}}', ',')))
+                    AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
+                - { name: format, value: ndjson }
+                - { name: output, value: /tmp/out.ndjson }
+                - { name: result-expr, value: "rows" }
+                - { name: db-type, value: cockroachdb }
+                - {
+                    name: connection-string,
+                    value: "{{inputs.parameters.service-connection-string}}",
+                  }
+                - { name: ca-secret, value: "{{inputs.parameters.ca-secret}}" }
+                - {
+                    name: ca-auth-key,
+                    value: "{{inputs.parameters.ca-auth-key}}",
+                  }
+                - { name: ca-config, value: "{{inputs.parameters.ca-config}}" }
+                - {
+                    name: ca-address-key,
+                    value: "{{inputs.parameters.ca-address-key}}",
+                  }
+                - {
+                    name: ca-profile-key,
+                    value: "{{inputs.parameters.ca-profile-key}}",
+                  }
+                - {
+                    name: runner-sa,
+                    value: "{{inputs.parameters.service-runner-sa}}",
+                  }
+                - {
+                    name: image-pull-secret,
+                    value: "{{inputs.parameters.image-pull-secret}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: job-active-deadline,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }

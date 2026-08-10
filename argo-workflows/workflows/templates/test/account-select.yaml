@@ -104,6 +104,7 @@ spec:
                     name: select-image,
                     value: "{{inputs.parameters.select-image}}",
                   }
+                - { name: format, value: json }
                 - name: expr
                   value: >-
                     [{

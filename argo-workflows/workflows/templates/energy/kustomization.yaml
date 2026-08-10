@@ -7,10 +7,10 @@ resources:
   - resolve-energy-service-identifiers.yaml
 
 # ---------------------------------------------------------------------------
-# Image pins for the energy/ package templates. query-pg is a dev-enablement
-# executor used by both energy/ and account/; since kustomize can't share a
-# generated ConfigMap across sibling packages, it is pinned in each (keep the
-# two in sync). See shared/kustomization.yaml for the per-package rationale.
+# One pin, for reprocess-bills — the only template here still dispatching its own
+# Job. The rest query through step-query, which owns the pin in shared/. Keep
+# this tag in step with shared/: kustomize cannot share a generated ConfigMap
+# across sibling packages.
 # ---------------------------------------------------------------------------
 configMapGenerator:
   - name: energy-image-versions
@@ -18,7 +18,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:35583c85d23d9fcbefc816f52c0ba92cef39ad6a
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:chore-impl-caller-pattern-on-queriers
 generatorOptions:
   disableNameSuffixHash: true
 
@@ -26,19 +26,8 @@ replacements:
   - source:
       { kind: ConfigMap, name: energy-image-versions, fieldPath: data.query-pg }
     targets:
-      - select:
-          { kind: WorkflowTemplate, name: step-energy-assert-bills-processed }
-        fieldPaths:
-          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
-      - select:
-          {
-            kind: WorkflowTemplate,
-            name: step-energy-resolve-service-identifiers,
-          }
-        fieldPaths:
-          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
-      # Only two of this one's four templates query; the wildcard passes over the
-      # composite and the send step rather than failing on them.
+      # The wildcard passes over the templates with no such param rather than
+      # failing on them.
       - select: { kind: WorkflowTemplate, name: step-energy-reprocess-bills }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-pg-image].value

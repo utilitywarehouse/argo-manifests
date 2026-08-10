@@ -4,30 +4,5 @@ kind: Kustomization
 resources:
   - resolve-account.yaml
 
-# ---------------------------------------------------------------------------
-# Image pins for the account/ package templates. query-pg is also used by
-# energy/ (kustomize can't share a ConfigMap across sibling packages), so keep
-# this tag in sync with energy/kustomization.yaml. See shared/kustomization.yaml
-# for the per-package rationale.
-# ---------------------------------------------------------------------------
-configMapGenerator:
-  - name: account-image-versions
-    options:
-      annotations:
-        config.kubernetes.io/local-config: "true"
-    literals:
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:80b1439b0c21d5ae40fc7c600a89f142fe2274d9
-generatorOptions:
-  disableNameSuffixHash: true
-
-replacements:
-  - source:
-      {
-        kind: ConfigMap,
-        name: account-image-versions,
-        fieldPath: data.query-pg,
-      }
-    targets:
-      - select: { kind: WorkflowTemplate, name: step-account-resolve-account }
-        fieldPaths:
-          - spec.templates.*.inputs.parameters.[name=query-pg-image].value
+# No image pins: resolve-account runs its query through step-query, which owns
+# the query-pg pin in shared/kustomization.yaml.

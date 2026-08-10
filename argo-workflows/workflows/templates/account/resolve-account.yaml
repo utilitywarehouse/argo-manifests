@@ -1,18 +1,12 @@
 # =============================================================================
 # resolve-account — account-platform leaf: account number → account_id
 # =============================================================================
-# Single responsibility: look up the customer account_id for a given account
-# number in the account-platform `account_numbers` table (a point lookup on the
-# `number` key), and expose it as the `account-id` parameter.
+#   in : account-number  (one, or comma-separated many)
+#   out: account-id      (uuid; comma-joined when many numbers were given)
 #
-#   in : account-number
-#   out: account-id  (customer_account_id, uuid) — the leaf's `result` parameter
-#
-# This is ONE stage of the account pipeline. The orchestrator
-# (flow-test-account-select) pipes account-id on into step-energy-resolve-service-identifiers
-# to get the account's energy supplies / gentrack identifiers. Kept submittable
-# standalone (a bare account# → account_id lookup is useful on its own) and also
-# consumed via templateRef. See docs/data-flow.md.
+# One stage of the account pipeline: flow-test-account-select pipes account-id
+# into step-energy-resolve-service-identifiers for the account's supplies.
+# Submittable on its own too. See docs/data-flow.md.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -41,24 +35,7 @@ spec:
           - { name: account-number }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
-          - {
-              name: account-connection-string,
-              value: "postgresql://accounts@cockroachdb-proxy:26257/account_api_20250214?sslmode=verify-full",
-            }
-          - { name: account-runner-sa, value: default }
-          - { name: account-ca-secret, value: ca-auth-key }
-          - { name: account-ca-auth-key, value: auth.key }
-          - { name: account-ca-address, value: "certificate-authority:8080" }
-          - { name: account-ca-profile, value: client }
-          - {
-              name: query-pg-image,
-              value: "registry.uw.systems/dev-enablement/query-pg:main",
-            }
-          - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
-          - { name: timeout, value: 3m }
-          - { name: job-active-deadline, value: 5m }
-          - { name: job-ttl, value: 24h }
           - { name: teardown, value: "true" }
       outputs:
         parameters:
@@ -66,11 +43,9 @@ spec:
             valueFrom:
               parameter: "{{steps.account-platform.outputs.parameters.result}}"
       steps:
-        # account-platform: account-number → account_id (point lookup on `number`)
+        # account-platform: account-number → account_id (point lookup on `number`).
         - - name: account-platform
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            templateRef: { name: step-query, template: pg }
             arguments:
               parameters:
                 - {
@@ -81,55 +56,21 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.account-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: job-name, value: resolve-account-id }
+                - name: query
+                  value: >-
+                    SELECT id::string AS id FROM accounts
+                    WHERE account_number IN (SELECT unnest(string_to_array('{{inputs.parameters.account-number}}', ',')))
+                - { name: format, value: csv }
+                - { name: output, value: /tmp/out.csv }
+                - { name: assert, value: "!empty" }
+                - name: assert-message
+                  value: "resolve-account: no accounts rows for account-number(s)={{inputs.parameters.account-number}}"
+                - { name: result-expr, value: 'join(map(rows, .id), ",")' }
+                - { name: db-type, value: cockroachdb }
+                - name: connection-string
+                  value: "postgresql://accounts@cockroachdb-proxy:26257/account_api_20250214?sslmode=verify-full"
+                # cockroachdb wants a client cert; the CA mints one in-cluster.
+                - { name: ca-secret, value: ca-auth-key }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
-                - { name: job-name, value: resolve-account-id }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        spec:
-                          serviceAccountName: {{inputs.parameters.account-runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          containers:
-                            - name: query
-                              image: {{inputs.parameters.query-pg-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  /app/executor
-                                  account_ids=$(tail -n +2 /tmp/out.csv | sed '/^$/d' | tr '\n' ',' | sed 's/,$//')
-                                  if [ -z "$account_ids" ]; then
-                                    echo "resolve-account: no accounts rows for account-number(s)={{inputs.parameters.account-number}}"
-                                    exit 1
-                                  fi
-                                  echo "account_ids=$account_ids"
-                                  echo "ARGO_RESULT_OUTPUT=$account_ids"
-                              env:
-                                - name: QUERY
-                                  value: >-
-                                    SELECT id::string FROM accounts
-                                    WHERE account_number IN (SELECT unnest(string_to_array('{{inputs.parameters.account-number}}', ',')))
-                                - { name: FORMAT, value: csv }
-                                - { name: OUTPUT, value: /tmp/out.csv }
-                                - { name: DB_TYPE, value: cockroachdb }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                - name: CONNECTION_STRING
-                                  value: "{{inputs.parameters.account-connection-string}}"
-                                - name: CA_AUTH_KEY
-                                  valueFrom:
-                                    secretKeyRef:
-                                      name: {{inputs.parameters.account-ca-secret}}
-                                      key: {{inputs.parameters.account-ca-auth-key}}
-                                - { name: CA_ADDRESS, value: "{{inputs.parameters.account-ca-address}}" }
-                                - { name: CA_PROFILE, value: "{{inputs.parameters.account-ca-profile}}" }

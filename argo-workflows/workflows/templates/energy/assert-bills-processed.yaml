@@ -1,31 +1,27 @@
 # =============================================================================
-# assert-bills-processed — did the energy data for these bills reach billing?
+# assert-bills-processed — the energy data for these bills, in billing_adapter_db
 # =============================================================================
-# Both templates read public.billing_period_accounts in billing_adapter_db and
-# build the same scope; `assert` judges it, `snapshot` reads it out.
+# Two gates over public.billing_period_accounts:
 #
-# SCOPE IS A PRECEDENCE — first one set wins, not a combination and not a range.
-# It must stay identical to reprocess-bills', or an assert judges rows the
-# re-send never touched, and a run that re-opened one bill fails because a
-# sibling in the same period is still unprocessed:
+#   check-adapter-blobs  the account set, before anything is re-sent. Every
+#                        period, so damage outside this run still shows.
+#   assert               this run's own data, after the re-send. Scoped.
 #
-#   gentrack-bill-numbers  no such column; the number sits inside file_name
-#                          (BillJ40000010621_1.json), so `position(num in
-#                          file_name) > 0` — not equality, not LIKE (`_` is a
+# SCOPE IS A PRECEDENCE — first one set wins, not a combination, not a range. One
+# SQL CASE, matching reprocess-bills' exactly: judging rows a re-send never
+# touched fails a run whose own bill is fine.
+#
+#   gentrack-bill-numbers  no such column — the number sits inside file_name
+#                          (BillJ40000010621_1.json), hence `position(num in
+#                          file_name) > 0`, not equality and not LIKE (`_` is a
 #                          wildcard)
-#   bill-period            one month of the BLOB's bill_period_from, which runs a
-#                          month behind the bill-run month
-#   neither                every period the account has — the wider check, but
-#                          one unprocessable old blob then blocks a period that
-#                          is fine
+#   bill-period            one month of the BLOB's bill_period_from, a month
+#                          behind the bill-run month
+#   neither                the latest bill period per account
 #
-# Naming numbers narrows what is judged as well as what is re-sent. That is the
-# point when re-billing one bill in isolation, and it is why it has to be an
-# explicit choice: nothing is then asserted about the rest of the period.
-#
-# `assert` only reads processed_at. It cannot see a reset that deleted billing's
-# energy rows and left these blobs marked processed — step-billing-account-state
-# checks for that, against the destination.
+# `assert` reads only processed_at, so it cannot see a reset that deleted
+# billing's energy rows and left these blobs processed. step-billing-account-state
+# checks that, against the destination.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -34,11 +30,11 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      `assert` fails unless the account has at least one billing_period_accounts row
-      in scope and every one is processed. `snapshot` is the same scope read out
-      rather than judged, for the state before a run. Scope is a precedence, the
-      same one reprocess-bills uses: named gentrack bill numbers, else one bill
-      period, else every period the account has.
+      `check-adapter-blobs` fails an account with no blobs, blobs the adapter
+      cannot process, or periods left unprocessed outside the run's scope.
+      `assert` fails unless every row in scope is processed. Scope is a
+      precedence: named gentrack bill numbers, else one bill period, else the
+      latest period per account.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: energy
@@ -51,10 +47,12 @@ spec:
     parameters:
       - { name: external-account-number } # gentrack account number(s), comma-separated (e.g. J20000032681,J20000041234)
       - { name: gentrack-bill-numbers, value: "" } # gentrack bill number(s), comma-separated (e.g. J40000010621); wins over bill-period
-      - { name: bill-period, value: "" } # YYYY-MM of the BLOB's bill_period_from; empty => every period the account has
+      - { name: bill-period, value: "" } # YYYY-MM of the BLOB's bill_period_from; empty => the latest period per account
       - { name: cluster-name } # which cluster the energy RDS is reachable from
       - { name: target-namespace }
   templates:
+    # assert — the verdict. Fails unless something is in scope and all of it is
+    # processed and clean.
     - name: assert
       inputs:
         parameters:
@@ -65,26 +63,17 @@ spec:
               name: connection-string,
               value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
             }
-          - { name: dsn-secret, value: "" }
-          - { name: dsn-key, value: DB_DSN }
           - { name: db-type, value: postgres }
           - { name: cluster-name }
           - { name: target-namespace }
-          - {
-              name: query-pg-image,
-              value: "registry.uw.systems/dev-enablement/query-pg:main",
-            }
           - { name: runner-sa, value: billing-adapter-rds-user }
-          - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 5m }
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
       steps:
         - - name: energy-billing
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            templateRef: { name: step-query, template: pg }
             arguments:
               parameters:
                 - {
@@ -95,77 +84,68 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: job-name, value: assert-bills-processed }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        metadata:
-                          annotations:
-                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
-                        spec:
-                          serviceAccountName: {{inputs.parameters.runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          containers:
-                            - name: query
-                              image: {{inputs.parameters.query-pg-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  ACCTS="{{inputs.parameters.external-account-number}}"
-                                  BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
-                                  PERIOD="{{inputs.parameters.bill-period}}"
+                - {
+                    name: connection-string,
+                    value: "{{inputs.parameters.connection-string}}",
+                  }
+                - { name: db-type, value: "{{inputs.parameters.db-type}}" }
+                - { name: vault-sidecar, value: "true" }
+                - { name: runner-sa, value: "{{inputs.parameters.runner-sa}}" }
+                - { name: format, value: csv }
+                - { name: output, value: /tmp/out.csv }
+                # Named columns: the predicate reads the row by field, so nothing
+                # depends on the order they come back in.
+                - name: query
+                  value: >-
+                    SELECT count(*) AS total,
+                    count(*) FILTER (WHERE processed_at IS NULL) AS unprocessed,
+                    count(*) FILTER (WHERE validation_issues IS NOT NULL) AS invalid,
+                    count(*) FILTER (WHERE processing_issues IS NOT NULL) AS failed
+                    FROM public.billing_period_accounts
+                    WHERE external_account_number IN (SELECT btrim(x) FROM
+                    unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x))
+                    AND CASE
+                    WHEN '{{inputs.parameters.gentrack-bill-numbers}}' <> '' THEN EXISTS
+                    (SELECT 1 FROM unnest(string_to_array('{{inputs.parameters.gentrack-bill-numbers}}', ','))
+                    AS b(num) WHERE position(btrim(b.num) in file_name) > 0)
+                    WHEN '{{inputs.parameters.bill-period}}' <> '' THEN
+                    bill_period_from >= to_date('{{inputs.parameters.bill-period}}', 'YYYY-MM')
+                    AND bill_period_from < (to_date('{{inputs.parameters.bill-period}}', 'YYYY-MM') + interval '1 month')
+                    ELSE (external_account_number, bill_period_from) IN
+                    (SELECT external_account_number, max(bill_period_from)
+                    FROM public.billing_period_accounts
+                    WHERE external_account_number IN (SELECT btrim(x) FROM
+                    unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x))
+                    GROUP BY external_account_number)
+                    END
+                # The terminal state a re-send leaves. Processed but carrying
+                # issues is not a success.
+                - name: assert
+                  value: >-
+                    row.total > 0 && row.unprocessed == 0 &&
+                    row.invalid == 0 && row.failed == 0
+                # Both ways it fails: nothing in scope, or something in scope not
+                # processed.
+                - name: assert-message
+                  value: "{row.total == 0 ? 'nothing in scope for [{{inputs.parameters.external-account-number}}] — no bills to process' : 'the re-send did not settle clean for [{{inputs.parameters.external-account-number}}]: ' + string(row.unprocessed) + ' of ' + string(row.total) + ' unprocessed, ' + string(row.invalid) + ' with validation_issues, ' + string(row.failed) + ' with processing_issues'}"
+                - { name: result-expr, value: "'processed'" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: job-active-deadline,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
 
-                                  # ---- scope (keep identical to reprocess-bills and to `snapshot`) ----
-                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-                                  if [ -n "$BILL_NUMBERS" ]; then
-                                    WHAT="gentrack bill numbers [$BILL_NUMBERS]"
-                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
-                                  elif [ -n "$PERIOD" ]; then
-                                    WHAT="bill period $PERIOD"
-                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
-                                  else
-                                    WHAT="every bill period"
-                                    SCOPE="$ACCT_IN"
-                                  fi
-                                  echo "scope: accounts [$ACCTS], $WHAT"
-
-                                  /app/executor --query "SELECT concat(count(*), ':', count(*) FILTER (WHERE processed_at IS NULL)) AS tally FROM public.billing_period_accounts WHERE $SCOPE" --format csv --output /tmp/out.csv
-                                  tally=$(tail -n 1 /tmp/out.csv)
-                                  total=${tally%%:*}
-                                  unprocessed=${tally##*:}
-                                  echo "total=$total unprocessed=$unprocessed"
-                                  if [ "$total" = "0" ]; then
-                                    echo "no billing_period_accounts rows for [$ACCTS] in $WHAT — there are no bills to process"
-                                    exit 1
-                                  fi
-                                  if [ "$unprocessed" != "0" ]; then
-                                    echo "bills not fully processed for [$ACCTS] in $WHAT ($unprocessed of $total unprocessed)"
-                                    exit 1
-                                  fi
-                                  echo "all $total bill(s) processed for [$ACCTS] in $WHAT"
-                                  echo "ARGO_RESULT_OUTPUT=processed"
-                              env:
-                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                # DSN: literal connection-string (IAM, passwordless) wins; else secretKeyRef.
-                                - name: CONNECTION_STRING
-                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
-
-    # snapshot — the same scope as `assert`, read out rather than judged. Never
-    # fails on content. Must run before reprocess-bills, which clears processed_at.
-    - name: snapshot
+    # check-adapter-blobs — the gate on the account set. Every period the account
+    # has, each row flagged in_scope. Runs before reprocess-bills clears
+    # processed_at.
+    #
+    # Unprocessed IN scope is not damage: a first bill has a blob waiting, and a
+    # re-bill is about to clear processed_at. `assert` judges that, afterwards.
+    # No rows at all is damage — nothing has ever been ingested.
+    - name: check-adapter-blobs
       inputs:
         parameters:
           - { name: external-account-number }
@@ -175,26 +155,17 @@ spec:
               name: connection-string,
               value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
             }
-          - { name: dsn-secret, value: "" }
-          - { name: dsn-key, value: DB_DSN }
           - { name: db-type, value: postgres }
           - { name: cluster-name }
           - { name: target-namespace }
-          - {
-              name: query-pg-image,
-              value: "registry.uw.systems/dev-enablement/query-pg:main",
-            }
           - { name: runner-sa, value: billing-adapter-rds-user }
-          - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 5m }
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
       steps:
         - - name: energy-billing
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            templateRef: { name: step-query, template: pg }
             arguments:
               parameters:
                 - {
@@ -205,76 +176,52 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: job-name, value: check-adapter-blobs }
+                - {
+                    name: connection-string,
+                    value: "{{inputs.parameters.connection-string}}",
+                  }
+                - { name: db-type, value: "{{inputs.parameters.db-type}}" }
+                - { name: vault-sidecar, value: "true" }
+                - { name: runner-sa, value: "{{inputs.parameters.runner-sa}}" }
+                - { name: format, value: ndjson }
+                - { name: output, value: /tmp/bpa.ndjson }
+                - { name: result-expr, value: "rows" }
+                - name: query
+                  value: >-
+                    SELECT bpa.*, (CASE
+                    WHEN '{{inputs.parameters.gentrack-bill-numbers}}' <> '' THEN EXISTS
+                    (SELECT 1 FROM unnest(string_to_array('{{inputs.parameters.gentrack-bill-numbers}}', ','))
+                    AS b(num) WHERE position(btrim(b.num) in file_name) > 0)
+                    WHEN '{{inputs.parameters.bill-period}}' <> '' THEN
+                    bill_period_from >= to_date('{{inputs.parameters.bill-period}}', 'YYYY-MM')
+                    AND bill_period_from < (to_date('{{inputs.parameters.bill-period}}', 'YYYY-MM') + interval '1 month')
+                    ELSE (external_account_number, bill_period_from) IN
+                    (SELECT external_account_number, max(bill_period_from)
+                    FROM public.billing_period_accounts
+                    WHERE external_account_number IN (SELECT btrim(x) FROM
+                    unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x))
+                    GROUP BY external_account_number)
+                    END) AS in_scope
+                    FROM public.billing_period_accounts bpa
+                    WHERE external_account_number IN (SELECT btrim(x) FROM
+                    unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x))
+                    ORDER BY bill_period_from, external_account_number
+                # Out of scope only. An in-scope blob carrying issues is exactly
+                # what reprocess-bills clears and re-sends, so failing here would
+                # block the repair `assert` then judges.
+                - name: assert
+                  value: >-
+                    any(rows, .in_scope) &&
+                    !any(rows, !.in_scope && .processed_at == nil) &&
+                    !any(rows, !.in_scope && .validation_issues != nil) &&
+                    !any(rows, !.in_scope && .processing_issues != nil)
+                - name: assert-message
+                  value: "account [{{inputs.parameters.external-account-number}}]: {empty ? 'no billing_period_accounts rows at all — nothing has ever been ingested' : (!any(rows, .in_scope) ? 'nothing in this run scope — the account has blobs, but none for the period being billed' : 'standing damage outside this run scope — ' + string(len(filter(rows, !.in_scope && .processed_at == nil))) + ' unprocessed, ' + string(len(filter(rows, !.in_scope && .validation_issues != nil))) + ' with validation_issues, ' + string(len(filter(rows, !.in_scope && .processing_issues != nil))) + ' with processing_issues')}"
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
-                - { name: job-name, value: adapter-blobs-snapshot }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        metadata:
-                          annotations:
-                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
-                        spec:
-                          serviceAccountName: {{inputs.parameters.runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          containers:
-                            - name: snapshot
-                              image: {{inputs.parameters.query-pg-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  ACCTS="{{inputs.parameters.external-account-number}}"
-                                  BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
-                                  PERIOD="{{inputs.parameters.bill-period}}"
-
-                                  # Scope kept identical to `assert` above, so this and the
-                                  # verdict it later reaches are about the same set of rows.
-                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-                                  if [ -n "$BILL_NUMBERS" ]; then
-                                    WHAT="gentrack bill numbers [$BILL_NUMBERS]"
-                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
-                                  elif [ -n "$PERIOD" ]; then
-                                    WHAT="bill period $PERIOD"
-                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
-                                  else
-                                    WHAT="every bill period"
-                                    SCOPE="$ACCT_IN"
-                                  fi
-                                  echo "adapter blobs snapshot: accounts [$ACCTS], $WHAT"
-
-                                  /app/executor --format ndjson --output /tmp/bpa.ndjson --query "
-                                    SELECT * FROM public.billing_period_accounts
-                                    WHERE $SCOPE
-                                    ORDER BY bill_period_from, external_account_number"
-
-                                  echo
-                                  echo "-- billing_period_accounts --"
-                                  if [ -s /tmp/bpa.ndjson ]; then
-                                    cat /tmp/bpa.ndjson
-                                    echo "rows: $(wc -l < /tmp/bpa.ndjson | tr -d ' ')"
-                                  else
-                                    echo "(no rows — nothing has been ingested for this scope yet; the assert later in the run is what decides whether that matters)"
-                                  fi
-
-                                  # The same rows again, bracketed. exec-kube captures this
-                                  # block as `result` and strips it from the logs.
-                                  echo
-                                  echo ARGO_RESULT_BEGIN
-                                  cat /tmp/bpa.ndjson
-                                  echo ARGO_RESULT_END
-                              env:
-                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                # DSN: literal connection-string (IAM, passwordless) wins; else secretKeyRef.
-                                - name: CONNECTION_STRING
-                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: job-active-deadline,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }

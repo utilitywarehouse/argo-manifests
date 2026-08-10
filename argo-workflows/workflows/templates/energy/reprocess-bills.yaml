@@ -23,8 +23,9 @@
 # only scoping there is, so send always covers more periods than the SQL scope.
 #
 # SCOPE. First one set wins — a precedence, not a combination, and not a range.
-# unprocess and await must evaluate it identically, or await polls for rows
-# unprocess never touched.
+# It is one SQL CASE, identical in unprocess, await and
+# step-energy-assert-bills-processed: any of them judging different rows than the
+# re-send touched fails a run whose own bill is fine.
 #
 #   gentrack-bill-numbers  no such column; the number sits inside file_name
 #                          (BillJ40000010621_1.json), so `position(num in
@@ -32,7 +33,7 @@
 #                          wildcard)
 #   bill-period            one month of the BLOB's bill_period_from, which runs a
 #                          month behind the bill-run month
-#   neither                max(bill_period_from) per account
+#   neither                the latest bill period per account
 #
 # Reset is not period-aware — it deletes every bill the account has — so a narrow
 # scope leaves earlier periods deleted and not re-sent. Name their bill numbers
@@ -256,17 +257,12 @@ spec:
                                   BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
                                   PERIOD="{{inputs.parameters.bill-period}}"
 
-                                  # ---- scope (keep identical to the await step) ----
-                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-                                  if [ -n "$BILL_NUMBERS" ]; then
-                                    MODE="gentrack bill numbers [$BILL_NUMBERS]"
-                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
-                                  elif [ -n "$PERIOD" ]; then
-                                    MODE="bill period $PERIOD only (not $PERIOD onward)"
-                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
-                                  else
-                                    MODE="latest bill period per account only"
-                                    SCOPE="$ACCT_IN AND (external_account_number, bill_period_from) IN (SELECT external_account_number, max(bill_period_from) FROM public.billing_period_accounts WHERE $ACCT_IN GROUP BY external_account_number)"
+                                  # ---- scope: one CASE, the precedence step-energy-assert-bills-processed
+                                  # applies too. Only the label is chosen here; SQL chooses the rows.
+                                  SCOPE="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x)) AND CASE WHEN '$BILL_NUMBERS' <> '' THEN EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0) WHEN '$PERIOD' <> '' THEN bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month') ELSE (external_account_number, bill_period_from) IN (SELECT external_account_number, max(bill_period_from) FROM public.billing_period_accounts WHERE external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x)) GROUP BY external_account_number) END"
+                                  if [ -n "$BILL_NUMBERS" ]; then MODE="gentrack bill numbers [$BILL_NUMBERS]"
+                                  elif [ -n "$PERIOD" ]; then MODE="bill period $PERIOD only"
+                                  else MODE="latest bill period per account"
                                   fi
                                   echo "scope: accounts [$ACCTS], $MODE"
 
@@ -277,14 +273,13 @@ spec:
                                   /app/executor --query "SELECT external_account_number, bill_period_from, bill_period_to, file_name, processed_at, validation_issues, processing_issues, $EFFECT AS effect FROM public.billing_period_accounts WHERE $SCOPE ORDER BY external_account_number, bill_period_from" --format csv --output /tmp/rows.csv
                                   echo "rows in scope:"; cat /tmp/rows.csv
 
-                                  # Counted separately, not by csv lines: a validation_issues value
-                                  # can carry a newline and would inflate them.
-                                  /app/executor --query "SELECT count(*) AS in_scope FROM public.billing_period_accounts WHERE $SCOPE" --format csv --output /tmp/count.csv
-                                  in_scope=$(tail -n 1 /tmp/count.csv)
-                                  if [ "$in_scope" = "0" ]; then
-                                    echo "no billing_period_accounts rows matched — check the gentrack account numbers and the scope above"
-                                    exit 1
-                                  fi
+                                  # Counted by SQL, not csv lines: a validation_issues value can
+                                  # carry a newline. --assert is the gate.
+                                  /app/executor --query "SELECT count(*) AS in_scope FROM public.billing_period_accounts WHERE $SCOPE" --format csv --output /tmp/count.csv \
+                                    --assert 'row.in_scope > 0' \
+                                    --assert-message "no billing_period_accounts rows matched — check the gentrack account numbers and the scope above" \
+                                    --result-expr 'row.in_scope' --result-path /tmp/in_scope
+                                  in_scope=$(cat /tmp/in_scope)
 
                                   if [ "{{inputs.parameters.dry-run}}" = "true" ]; then
                                     echo "dry-run: $in_scope row(s) would be re-opened and re-sent; nothing changed"
@@ -295,10 +290,11 @@ spec:
                                   # All three, so anything non-NULL after the send is this run's
                                   # verdict. Header covers what clearing them re-admits.
                                   SET="processed_at = NULL, processing_issues = NULL, validation_issues = NULL, updated_at = now()"
-                                  /app/executor --exec --query "UPDATE public.billing_period_accounts SET $SET WHERE $SCOPE" --format csv --output /tmp/out.csv
-                                  affected=$(tail -n 1 /tmp/out.csv)
-                                  echo "un-processed $affected of $in_scope row(s) in scope"
-                                  echo "ARGO_RESULT_OUTPUT=$affected"
+                                  # `affected` is the exec's own count, and the executor emits the
+                                  # result marker.
+                                  /app/executor --exec --query "UPDATE public.billing_period_accounts SET $SET WHERE $SCOPE" --format csv --output /tmp/out.csv \
+                                    --result-expr 'affected' --result-path /tmp/affected --result-marker
+                                  echo "un-processed $(cat /tmp/affected) of $in_scope row(s) in scope"
                               env:
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
                                 - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
@@ -429,6 +425,7 @@ spec:
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: poll-interval, value: "60" } # seconds between polls
+          - { name: heartbeat, value: "60" } # seconds between "still waiting" lines; 0 silences them
           - { name: timeout, value: 60m } # deadline for the whole poll
           - { name: job-active-deadline, value: 65m }
           - { name: job-ttl, value: 24h }
@@ -483,64 +480,57 @@ spec:
                                   BILL_NUMBERS="{{inputs.parameters.gentrack-bill-numbers}}"
                                   PERIOD="{{inputs.parameters.bill-period}}"
 
-                                  # ---- scope (keep identical to the unprocess step) ----
-                                  ACCT_IN="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-                                  if [ -n "$BILL_NUMBERS" ]; then
-                                    MODE="gentrack bill numbers [$BILL_NUMBERS]"
-                                    SCOPE="$ACCT_IN AND EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0)"
-                                  elif [ -n "$PERIOD" ]; then
-                                    MODE="bill period $PERIOD only (not $PERIOD onward)"
-                                    SCOPE="$ACCT_IN AND bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month')"
-                                  else
-                                    MODE="latest bill period per account only"
-                                    SCOPE="$ACCT_IN AND (external_account_number, bill_period_from) IN (SELECT external_account_number, max(bill_period_from) FROM public.billing_period_accounts WHERE $ACCT_IN GROUP BY external_account_number)"
+                                  # ---- scope: one CASE, the precedence step-energy-assert-bills-processed
+                                  # applies too. Only the label is chosen here; SQL chooses the rows.
+                                  SCOPE="external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x)) AND CASE WHEN '$BILL_NUMBERS' <> '' THEN EXISTS (SELECT 1 FROM unnest(string_to_array('$BILL_NUMBERS', ',')) AS b(num) WHERE position(btrim(b.num) in file_name) > 0) WHEN '$PERIOD' <> '' THEN bill_period_from >= to_date('$PERIOD', 'YYYY-MM') AND bill_period_from < (to_date('$PERIOD', 'YYYY-MM') + interval '1 month') ELSE (external_account_number, bill_period_from) IN (SELECT external_account_number, max(bill_period_from) FROM public.billing_period_accounts WHERE external_account_number IN (SELECT btrim(x) FROM unnest(string_to_array('$ACCTS', ',')) AS t(x)) GROUP BY external_account_number) END"
+                                  if [ -n "$BILL_NUMBERS" ]; then MODE="gentrack bill numbers [$BILL_NUMBERS]"
+                                  elif [ -n "$PERIOD" ]; then MODE="bill period $PERIOD only"
+                                  else MODE="latest bill period per account"
                                   fi
                                   echo "scope: accounts [$ACCTS], $MODE"
 
-                                  TALLY="SELECT concat(count(*), ':', count(*) FILTER (WHERE processed_at IS NULL), ':', count(*) FILTER (WHERE validation_issues IS NOT NULL), ':', count(*) FILTER (WHERE processing_issues IS NOT NULL)) AS tally FROM public.billing_period_accounts WHERE $SCOPE"
+                                  # Named columns, not one concat split by position: the predicates
+                                  # below read the row by field, so a column moving cannot swap
+                                  # `invalid` for `failed`.
+                                  TALLY="SELECT count(*) AS total,
+                                         count(*) FILTER (WHERE processed_at IS NULL) AS unprocessed,
+                                         count(*) FILTER (WHERE validation_issues IS NOT NULL) AS invalid,
+                                         count(*) FILTER (WHERE processing_issues IS NOT NULL) AS failed
+                                         FROM public.billing_period_accounts WHERE $SCOPE"
 
-                                  deadline=$(( $(date +%s) + {{=int(duration(inputs.parameters['timeout']).Seconds())}} ))
-                                  attempt=0
-                                  while :; do
-                                    attempt=$((attempt+1))
-                                    /app/executor --query "$TALLY" --format csv --output /tmp/out.csv
-                                    tally=$(tail -n 1 /tmp/out.csv)
-                                    total=$(echo "$tally" | cut -d: -f1)
-                                    unprocessed=$(echo "$tally" | cut -d: -f2)
-                                    invalid=$(echo "$tally" | cut -d: -f3)
-                                    failed=$(echo "$tally" | cut -d: -f4)
-                                    echo "poll $attempt: total=$total unprocessed=$unprocessed validation_issues=$invalid processing_issues=$failed"
+                                  # The whole poll, as two predicates. --failure-expr fails fast:
+                                  # rows carrying issues can never become processed and an empty
+                                  # scope has nothing to wait for, so neither burns the timeout.
+                                  # `if`, not `set -e`, so a failure still explains itself below.
+                                  if /app/executor --query "$TALLY" --format csv --output /tmp/out.csv \
+                                       --success-expr 'row.total > 0 && row.unprocessed == 0' \
+                                       --failure-expr 'row.total == 0 || row.invalid > 0 || row.failed > 0' \
+                                       --poll-interval {{inputs.parameters.poll-interval}} \
+                                       --timeout {{=int(duration(inputs.parameters['timeout']).Seconds())}} \
+                                       --heartbeat {{inputs.parameters.heartbeat}} \
+                                       --result-expr "'processed'" \
+                                       --result-path /tmp/result --result-marker; then
+                                    cat /tmp/out.csv
+                                    exit 0
+                                  fi
 
-                                    if [ "$total" = "0" ]; then
-                                      echo "no billing_period_accounts rows in scope — nothing to wait for"
-                                      exit 1
-                                    fi
-                                    if [ "$invalid" != "0" ]; then
-                                      echo "$invalid row(s) carry validation_issues; the adapter never selects them, so they cannot become processed."
-                                      echo "unprocess cleared this column and only a re-consume from S3 writes it, so the issue is live, not stale."
-                                      /app/executor --query "SELECT external_account_number, bill_period_from, file_name, validation_issues FROM public.billing_period_accounts WHERE $SCOPE AND validation_issues IS NOT NULL" --format csv --output /tmp/bad.csv
-                                      cat /tmp/bad.csv
-                                      exit 1
-                                    fi
-                                    if [ "$failed" != "0" ]; then
-                                      echo "$failed row(s) came back with processing_issues from this run"
-                                      /app/executor --query "SELECT external_account_number, bill_period_from, file_name, processing_issues FROM public.billing_period_accounts WHERE $SCOPE AND processing_issues IS NOT NULL" --format csv --output /tmp/bad.csv
-                                      cat /tmp/bad.csv
-                                      exit 1
-                                    fi
-                                    if [ "$unprocessed" = "0" ]; then
-                                      echo "all $total bill(s) processed"
-                                      echo "ARGO_RESULT_OUTPUT=processed"
-                                      exit 0
-                                    fi
-                                    if [ "$(date +%s)" -ge "$deadline" ]; then
-                                      echo "timed out with $unprocessed of $total still unprocessed"
-                                      echo "past the send's watch window a failed run looks like a slow one — read the Job:"
-                                      echo "  kubectl -n {{inputs.parameters.target-namespace}} logs job/grpc-call-send-billing-data-<workflow-uid[:8]>"
-                                      exit 1
-                                    fi
-                                    sleep {{inputs.parameters.poll-interval}}
-                                  done
+                                  # Failed fast or timed out. The tally says which; the rows say why.
+                                  echo "did not reach processed. tally:"
+                                  cat /tmp/out.csv
+                                  /app/executor --format csv --output /tmp/bad.csv \
+                                    --query "SELECT external_account_number, bill_period_from, file_name, validation_issues, processing_issues
+                                             FROM public.billing_period_accounts
+                                             WHERE $SCOPE AND (validation_issues IS NOT NULL OR processing_issues IS NOT NULL)"
+                                  if [ "$(wc -l < /tmp/bad.csv)" -gt 1 ]; then
+                                    echo "rows the adapter cannot process:"
+                                    cat /tmp/bad.csv
+                                    echo "validation_issues: the adapter never selects these. unprocess cleared the column and"
+                                    echo "only a re-consume from S3 writes it, so the issue is live, not stale."
+                                  else
+                                    echo "nothing blocked — past the send's watch window a failed run looks like a slow one. Read the Job:"
+                                    echo "  kubectl -n {{inputs.parameters.target-namespace}} logs job/grpc-call-send-billing-data-<workflow-uid[:8]>"
+                                  fi
+                                  exit 1
                               env:
                                 - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
                                 - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }

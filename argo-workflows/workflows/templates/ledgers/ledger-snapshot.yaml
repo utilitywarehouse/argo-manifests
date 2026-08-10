@@ -1,9 +1,26 @@
-# ledger-snapshot — dump the accounts' ledgers for review. Asserts nothing; only
-# a connection or query error turns it red. Called either side of Commit, `phase`
-# apart (it names the remote Job, which must differ per dispatch).
+# ledger-snapshot — dump the accounts' ledgers, and judge them. `phase` names the
+# remote Job, which must differ per dispatch.
 #
-# ⚠️ account-ids is a comma-joined STRING. `= '<the whole list>'` on a uuid column
-# errors ("invalid input syntax for type uuid"), it does not return nothing.
+# Seven tables, one UNION ALL. Each row is {_table, account_id, bill_entry, row},
+# `row` being the source row as jsonb — so a table gaining a column changes
+# nothing here. account_id is a top-level column too: ORDER BY needs a real one.
+#
+# ⚠️ ::text on the uuids. pgx returns a bare `uuid` as [16]byte, which the ndjson
+# writer prints as [146,37,46,…]. to_jsonb() converts server-side, so only the
+# top-level column needs the cast.
+#
+# `bill_entry` is the point of the run: a ledger_entry of type 'bill' created at
+# or after `since`, narrowed to one invoice when invoice-number is given. The
+# other entries a commit writes (budget_plan_payment,
+# budget_plan_charges_and_usage) land alongside it and do NOT satisfy it.
+#
+# EVERY account, not the first. Both predicates count accounts against the
+# `_account` rows — one per account asked for, from the ids CTE rather than the
+# tables, so an account with no ledger at all is counted rather than absent.
+#
+# THIS STEP FAILS. Every account must hold a ledger, asserted on both phases, and
+# after commit a bill entry, waited for. A bill that never reaches the ledger is
+# a failed bill run, not a finding.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -12,8 +29,8 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Read-only. Dumps the accounts' ledgers, balances, entries, service splits
-      and any rejections from ledgers-rds, for review — it asserts nothing and
-      fails only on a query error.
+      and any rejections from ledgers-rds. Fails unless every account has a
+      ledger, and after commit a 'bill' entry created since `since`.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
@@ -31,6 +48,7 @@ spec:
         enum: ["manual", "before", "after"]
       - { name: wait-for-entry, value: 0s } # wait this long for an entry newer than `since`, then dump regardless
       - { name: since, value: "1970-01-01T00:00:00Z" }
+      - { name: invoice-number, value: "" } # source_reference of the bill entry; empty => any
       - { name: cluster-name, value: dev-merit }
       - { name: target-namespace, value: ledgers }
 
@@ -42,31 +60,27 @@ spec:
           - { name: phase, value: manual }
           - { name: wait-for-entry, value: 0s }
           - { name: since, value: "1970-01-01T00:00:00Z" }
-          # The whole DSN is one Secret (as the ledgers DI cronjobs read it). It
-          # carries a password, so query-pg skips RDS IAM by itself.
-          - { name: connection-string, value: "" } # non-empty wins over dsn-secret
+          - { name: invoice-number, value: "" } # narrows the bill entry to one invoice; empty => any
+          # One Secret holds the whole DSN; its password makes query-pg skip
+          # RDS IAM.
           - { name: dsn-secret, value: rds-readonly }
           - { name: dsn-key, value: dsn }
-          - { name: db-type, value: postgres }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: ledgers }
-          - {
-              name: query-pg-image,
-              value: "registry.uw.systems/dev-enablement/query-pg:main",
-            }
-          - { name: runner-sa, value: default }
-          - { name: image-pull-secret, value: dockerhub-key }
-          - { name: log-level, value: info }
+          # Named so the conditionals below stay legible.
+          - name: ledger-expr # every account has a ledger — asserted pre-commit
+            value: "len(uniq(map(filter(rows, ._table == 'ledger'), .account_id))) == len(filter(rows, ._table == '_account'))"
+          - name: bill-expr # every account has its bill entry — waited for post-commit
+            value: "len(uniq(map(filter(rows, .bill_entry), .account_id))) == len(filter(rows, ._table == '_account'))"
           - { name: poll-interval, value: "20" }
-          # The Job's deadline and exec-kube's timeout are both composed from the
-          # wait above plus this buffer, so widening the wait cannot outlive them.
+          - { name: heartbeat, value: "60" }
+          - { name: log-level, value: info }
+          # The Job's deadline is the wait plus this buffer.
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
       steps:
         - - name: ledgers
-            templateRef:
-              name: step-executor-remote-namespace
-              template: execute-job
+            templateRef: { name: step-query, template: pg }
             arguments:
               parameters:
                 - {
@@ -77,119 +91,81 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                # exec-kube must outlive the wait, or it stops managing the Job.
-                - {
-                    name: timeout,
-                    value: "{{=string(duration(inputs.parameters['wait-for-entry']) + duration(inputs.parameters['job-buffer']))}}",
-                  }
-                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - {
                     name: job-name,
                     value: "ledger-snapshot-{{inputs.parameters.phase}}",
                   }
-                - name: job-template
-                  value: |
-                    apiVersion: batch/v1
-                    kind: Job
-                    spec:
-                      backoffLimit: 0
-                      activeDeadlineSeconds: {{=int((duration(inputs.parameters['wait-for-entry']) + duration(inputs.parameters['job-buffer'])).Seconds())}}
-                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
-                      template:
-                        spec:
-                          serviceAccountName: {{inputs.parameters.runner-sa}}
-                          imagePullSecrets:
-                            - name: {{inputs.parameters.image-pull-secret}}
-                          restartPolicy: Never
-                          containers:
-                            - name: snapshot
-                              image: {{inputs.parameters.query-pg-image}}
-                              imagePullPolicy: Always
-                              command: [sh, -c]
-                              args:
-                                - |
-                                  set -eu
-                                  ACCTS="{{inputs.parameters.account-ids}}"
-                                  SINCE="{{inputs.parameters.since}}"
-                                  WAIT={{=int(duration(inputs.parameters['wait-for-entry']).Seconds())}}
-                                  mkdir -p /tmp/snap
-                                  echo "ledger snapshot ({{inputs.parameters.phase}}) for [$ACCTS]"
-
-                                  IN_ACCTS="IN (SELECT btrim(x)::uuid FROM unnest(string_to_array('$ACCTS', ',')) AS t(x))"
-
-                                  # A delay so the dump is about this run rather than the lag,
-                                  # not a gate: running out is not an error.
-                                  if [ "$WAIT" -gt 0 ]; then
-                                    deadline=$(( $(date +%s) + WAIT ))
-                                    while :; do
-                                      /app/executor --format csv --output /tmp/wait.csv --query "
-                                        SELECT count(*) AS n
-                                        FROM public.ledger_entry le
-                                        JOIN public.ledger l ON l.id = le.ledger_id
-                                        WHERE l.account_id $IN_ACCTS AND le.created_at >= '$SINCE'"
-                                      n=$(tail -n 1 /tmp/wait.csv)
-                                      echo "entries since $SINCE: $n"
-                                      if [ "$n" != "0" ]; then break; fi
-                                      if [ $(date +%s) -ge $deadline ]; then
-                                        echo "none within ${WAIT}s — snapshotting anyway; the empty ledger_entry section is the finding"
-                                        break
-                                      fi
-                                      sleep {{inputs.parameters.poll-interval}}
-                                    done
-                                  fi
-
-                                  # One query per table for ALL accounts, split per account when
-                                  # printed. account_id is on every row so both the reading below
-                                  # and anything consuming the payload can separate them.
-                                  TABLES="ledger ledger_balance ledger_entry service_split_ledger rejected_entry ledger_creation_failure"
-                                  q() { /app/executor --query "$2" --format ndjson --output "/tmp/snap/$1.ndjson"; }
-
-                                  q ledger "SELECT 'ledger' AS _table, l.*
-                                    FROM public.ledger l
-                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, l.id"
-
-                                  q ledger_balance "SELECT 'ledger_balance' AS _table, l.account_id, lb.*
-                                    FROM public.ledger_balance lb
-                                    JOIN public.ledger l ON l.id = lb.ledger_id
-                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, lb.ledger_id"
-
-                                  q ledger_entry "SELECT 'ledger_entry' AS _table, l.account_id, le.*
-                                    FROM public.ledger_entry le
-                                    JOIN public.ledger l ON l.id = le.ledger_id
-                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, le.created_at, le.id"
-
-                                  q service_split_ledger "SELECT 'service_split_ledger' AS _table, l.account_id, sl.*
-                                    FROM public.service_split_ledger sl
-                                    JOIN public.ledger_entry le ON le.id = sl.ledger_entry_id
-                                    JOIN public.ledger l ON l.id = le.ledger_id
-                                    WHERE l.account_id $IN_ACCTS ORDER BY l.account_id, sl.created_at, sl.id"
-
-                                  q rejected_entry "SELECT 'rejected_entry' AS _table, re.*
-                                    FROM public.rejected_entry re
-                                    WHERE re.account_id $IN_ACCTS ORDER BY re.account_id, re.created_at"
-
-                                  q ledger_creation_failure "SELECT 'ledger_creation_failure' AS _table, f.*
-                                    FROM public.ledger_creation_failure f
-                                    WHERE f.account_id $IN_ACCTS ORDER BY f.account_id, f.failed_at"
-
-                                  for ACCT in $(echo "$ACCTS" | tr ',' ' '); do
-                                    echo
-                                    echo "===== account $ACCT ====="
-                                    for t in $TABLES; do
-                                      echo "-- $t --"
-                                      if ! grep -F "$ACCT" "/tmp/snap/$t.ndjson"; then echo "(no rows)"; fi
-                                    done
-                                  done
-
-                                  # exec-kube captures this block as `result` and strips it from
-                                  # the logs. Own directory: an unscoped /tmp glob would sweep up
-                                  # anything a later query happens to leave there.
-                                  echo
-                                  echo ARGO_RESULT_BEGIN
-                                  cat /tmp/snap/*.ndjson
-                                  echo ARGO_RESULT_END
-                              env:
-                                - { name: DB_TYPE, value: {{inputs.parameters.db-type}} }
-                                - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
-                                - name: CONNECTION_STRING
-                                  {{=inputs.parameters['connection-string'] != '' ? 'value: "' + inputs.parameters['connection-string'] + '"' : 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['dsn-secret'] + ', key: ' + inputs.parameters['dsn-key'] + ' } }'}}
+                - {
+                    name: dsn-secret,
+                    value: "{{inputs.parameters.dsn-secret}}",
+                  }
+                - { name: dsn-key, value: "{{inputs.parameters.dsn-key}}" }
+                # Only the un-polled phase asserts: the driver skips --assert in
+                # poll mode, where the bill entry implies a ledger anyway.
+                - name: assert
+                  value: "{{=inputs.parameters['wait-for-entry'] == '0s' ? inputs.parameters['ledger-expr'] : ''}}"
+                - name: assert-message
+                  value: >-
+                    the ledger does not hold what this bill run requires: every
+                    account needs a ledger, and after commit a 'bill' entry
+                    created since `since`. {rowCount} rows dumped — read the
+                    _account rows with no ledger or no bill entry beside them.
+                - { name: format, value: ndjson }
+                - { name: output, value: /tmp/snap.ndjson }
+                # The dump is the result, emitted once after the poll settles.
+                - { name: result-expr, value: "rows" }
+                # Only a non-zero wait polls; a zero timeout would expire before
+                # the first query, so both follow wait-for-entry. A wait that runs
+                # out fails: the bill never reached the ledger.
+                - name: success-expr
+                  value: "{{=inputs.parameters['wait-for-entry'] == '0s' ? '' : inputs.parameters['bill-expr']}}"
+                - {
+                    name: poll-interval,
+                    value: "{{inputs.parameters.poll-interval}}",
+                  }
+                - { name: heartbeat, value: "{{inputs.parameters.heartbeat}}" }
+                - name: timeout
+                  value: "{{=inputs.parameters['wait-for-entry'] == '0s' ? '5m' : inputs.parameters['wait-for-entry']}}"
+                - name: job-active-deadline
+                  value: "{{=string(duration(inputs.parameters['wait-for-entry'] == '0s' ? '5m' : inputs.parameters['wait-for-entry']) + duration(inputs.parameters['job-buffer']))}}"
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: query
+                  value: >-
+                    WITH ids AS (SELECT btrim(x)::uuid AS account_id FROM
+                    unnest(string_to_array('{{inputs.parameters.account-ids}}', ',')) AS t(x)),
+                    since AS (SELECT '{{inputs.parameters.since}}'::timestamptz AS ts)
+                    SELECT '_account' AS _table, i.account_id::text AS account_id,
+                    false AS bill_entry, to_jsonb(i) AS row
+                    FROM ids i
+                    UNION ALL
+                    SELECT 'ledger', l.account_id::text,
+                    false, to_jsonb(l)
+                    FROM public.ledger l JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'ledger_balance', l.account_id::text, false, to_jsonb(lb)
+                    FROM public.ledger_balance lb
+                    JOIN public.ledger l ON l.id = lb.ledger_id
+                    JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'ledger_entry', l.account_id::text,
+                    le.type = 'bill' AND le.created_at >= (SELECT ts FROM since)
+                    AND ('{{inputs.parameters.invoice-number}}' = ''
+                    OR le.source_reference = '{{inputs.parameters.invoice-number}}'),
+                    to_jsonb(le)
+                    FROM public.ledger_entry le
+                    JOIN public.ledger l ON l.id = le.ledger_id
+                    JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'service_split_ledger', l.account_id::text, false, to_jsonb(sl)
+                    FROM public.service_split_ledger sl
+                    JOIN public.ledger_entry le ON le.id = sl.ledger_entry_id
+                    JOIN public.ledger l ON l.id = le.ledger_id
+                    JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'rejected_entry', re.account_id::text, false, to_jsonb(re)
+                    FROM public.rejected_entry re JOIN ids i ON i.account_id = re.account_id
+                    UNION ALL
+                    SELECT 'ledger_creation_failure', f.account_id::text, false, to_jsonb(f)
+                    FROM public.ledger_creation_failure f JOIN ids i ON i.account_id = f.account_id
+                    ORDER BY 2, 1

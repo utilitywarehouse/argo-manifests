@@ -33,7 +33,7 @@ spec:
       - name: engineer-visit
         value: "false"
         enum: ["true", "false"]
-      # true => also observe the ledger, BigQuery and the finance export. Same bill either way
+      # true => also observe the ledger, BigQuery and the finance one-liners. Same bill either way
       - name: verify
         value: "false"
         enum: ["true", "false"]
