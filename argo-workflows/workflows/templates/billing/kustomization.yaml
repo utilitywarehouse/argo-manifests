@@ -27,7 +27,7 @@ configMapGenerator:
       - set-invoice-number=registry.uw.systems/billing/set-invoice-number:chore-mono-script-classification
       - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
       - select=registry.uw.systems/dev-enablement/select:main
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:chore-impl-caller-pattern-on-queriers
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:c88de2439b9d08d9a30b9b024dea51af5637c6b7
 generatorOptions:
   disableNameSuffixHash: true
 
