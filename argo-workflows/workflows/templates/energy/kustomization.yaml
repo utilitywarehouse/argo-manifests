@@ -18,7 +18,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:c88de2439b9d08d9a30b9b024dea51af5637c6b7
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:main
 generatorOptions:
   disableNameSuffixHash: true
 
