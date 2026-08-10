@@ -1,0 +1,168 @@
+# =============================================================================
+# consumer-lag-gate — hold a run until a Kafka consumer can keep up
+# =============================================================================
+# THE RULE: proceed once the busiest partition's backlog would clear in under
+# `max-eta` minutes. Hold up to `wait` for that; refuse if it never happens.
+#
+#   ETA = max partition lag / (consumption per minute / partitions)
+#   consumption = messages produced + net lag drain
+#
+# RATE, NOT LAG. Measured on dev-merit: a healthy consumer runs 6-10k/min, a
+# degraded one 400/min. The same 60k backlog is 8 minutes or 2.5 hours, and lag
+# alone cannot tell them apart — a wedged consumer reads FLAT, not high.
+#
+# max partition, not sum: an event lands on ONE partition, and a single stuck
+# partition hides inside a healthy total. Zero lag gives zero ETA, so an idle
+# consumer's low rate does not read as a stall.
+#
+# HOLDS, THEN REFUSES. A burst delays a run rather than killing it; only a hold
+# that runs out fails, and by then nothing has been changed. Put it upstream of
+# anything destructive — downstream the damage is already done.
+#
+# WHICH PROMETHEUS. One per domain, and they do not share series — which is why
+# `prometheus-url` has no default. Ask each for your group before wiring it up:
+#
+#   count(consumer_group_lag{group="<your-group>"})
+#
+# Only one will answer. Billing's, for instance, is on finance and on none of
+# shared/energy/telecom.
+#
+# Go through the INGRESS host, not the in-cluster Service: sys-mon accepts
+# in-cluster ingress only from sys-mon and sys-prom, so
+# prometheus-*.sys-mon.svc is refused from anywhere else. The ingress host is
+# reachable from a Job (verified from billing/ on dev-merit).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-consumer-lag-gate
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Read-only. Proceeds once the group's busiest partition would clear in
+      under `max-eta` minutes at its current consumption rate; holds up to
+      `wait` for that. A hold that runs out fails the run BEFORE it changes
+      anything — a refusal to start, not a broken run.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
+spec:
+  entrypoint: gate
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: group } # Kafka consumer group
+      - { name: topic } # the topic it consumes, for the produced-messages rate
+      - { name: max-eta, value: "15" } # minutes; hold until the backlog clears faster than this
+      - { name: wait, value: 15m } # how long to hold before refusing
+      - { name: prometheus-url } # no default: this template has no domain
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace } # must have egress to Prometheus
+  templates:
+    - name: gate
+      inputs:
+        parameters:
+          - { name: group }
+          - { name: topic }
+          - { name: max-eta, value: "15" }
+          - { name: wait, value: 15m }
+          # The two halves of the message a submitter reads. Plain words, no
+          # Kafka: name the system they think they are using, and what starting
+          # anyway would do to their account. Defaults are deliberately vague —
+          # a caller knows its own domain and should say so.
+          - { name: system, value: "the system this run depends on" }
+          - {
+              name: consequence,
+              value: "make its changes and then wait for something that never arrives, leaving the run half-finished",
+            }
+          # Set half the wait or less: a hold that never re-reads cannot notice
+          # the backlog clearing.
+          - { name: poll-interval, value: 30s }
+          - { name: heartbeat, value: 60s } # the "still holding" line; 0s silences it
+          - { name: prometheus-url } # no default: this template has no domain
+          - { name: cluster-name, value: dev-merit }
+          - { name: target-namespace }
+          - { name: runner-sa, value: default }
+          - { name: log-level, value: info }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: eta # minutes, as measured on the poll that let the run through
+            valueFrom:
+              parameter: "{{steps.prometheus.outputs.parameters.result}}"
+      steps:
+        - - name: prometheus
+            templateRef: { name: step-http-call, template: call }
+            arguments:
+              parameters:
+                - { name: op-name, value: consumer-lag-gate }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: runner-sa, value: "{{inputs.parameters.runner-sa}}" }
+                - {
+                    name: url,
+                    value: "{{inputs.parameters.prometheus-url}}/api/v1/query",
+                  }
+                - { name: method, value: POST }
+                - {
+                    name: extra-headers,
+                    value: "Content-Type: application/x-www-form-urlencoded",
+                  }
+                # The ETA, in minutes. Percent-encoded because a form body cannot
+                # carry the raw spaces, quotes and `=`. Decoded:
+                #
+                #   max(consumer_group_lag{group="G"})
+                #   / clamp_min((
+                #       sum(rate(kafka_server_BrokerTopicMetrics_Count{
+                #         topic="T", name="MessagesInPerSec"}[10m]))*60
+                #     - sum(deriv(consumer_group_lag{group="G"}[10m]))*60
+                #     ) / count(consumer_group_lag{group="G"}), 1)
+                #   or vector(999)
+                #
+                # clamp_min stops a dead consumer dividing by zero; `or vector(999)`
+                # makes missing metrics read as "cannot clear", not as zero.
+                - name: payload
+                  value: >-
+                    query=max%28consumer_group_lag%7Bgroup%3D%22{{inputs.parameters.group}}%22%7D%29%20%2F%20clamp_min%28%28%20sum%28rate%28kafka_server_BrokerTopicMetrics_Count%7Btopic%3D%22{{inputs.parameters.topic}}%22%2Cname%3D%22MessagesInPerSec%22%7D%5B10m%5D%29%29%2A60%20-%20sum%28deriv%28consumer_group_lag%7Bgroup%3D%22{{inputs.parameters.group}}%22%7D%5B10m%5D%29%29%2A60%20%29%20%2F%20count%28consumer_group_lag%7Bgroup%3D%22{{inputs.parameters.group}}%22%7D%29%2C%201%29%20or%20vector%28999%29
+                # THE RULE. Prometheus returns the scalar as a STRING, so float()
+                # both sides — "9" sorts above "15".
+                - name: success-expr
+                  value: >-
+                    float(response.body.data.result[0].value[1]) <
+                    float("{{inputs.parameters.max-eta}}")
+                # What the submitter reads, on a RED node. It must say "safe" in
+                # the first line: a red node reads as breakage, and every sentence
+                # after that is read through it. No Kafka, no partitions, no
+                # consumer groups — the group name, the query and the measured
+                # value are in this step's own logs for whoever debugs it.
+                # round(): the raw scalar is 82.35714285.
+                - name: assert-message
+                  value: >-
+                    Nothing has run and nothing has changed - this is a safety
+                    check, not a failure. Right now {{inputs.parameters.system}}
+                    is busy: about
+                    {round(float(response.body.data.result[0].value[1]))}
+                    minutes of work is queued, and a run only starts when that is
+                    under {{inputs.parameters.max-eta}} minutes. Starting now
+                    would {{inputs.parameters.consequence}}. We held off for
+                    {{inputs.parameters.wait}} to see if it would clear. There is
+                    nothing to undo — please try again in a little while.
+                - {
+                    name: result-expr,
+                    value: "response.body.data.result[0].value[1]",
+                  }
+                - {
+                    name: poll-interval,
+                    value: "{{inputs.parameters.poll-interval}}",
+                  }
+                - { name: heartbeat, value: "{{inputs.parameters.heartbeat}}" }
+                - { name: timeout, value: "{{inputs.parameters.wait}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
