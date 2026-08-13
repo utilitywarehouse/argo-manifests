@@ -4,8 +4,8 @@
 # =============================================================================
 #   in : source                    where the gentrack identifiers come from
 #        gentrack-account-numbers  comma-separated; required for `manual`
-#        output-expr               what the `mapped` parameter should contain
-#   out: mapped            (parameter) shaped by output-expr
+#        output                    shape of the `mapped` parameter
+#   out: mapped            (parameter) the uw account numbers, shaped by output
 #        gentrack-accounts (artifact)  ndjson, one row per account:
 #                                      {uw_account_id, gentrack_account_number}
 #
@@ -14,9 +14,13 @@
 #
 #   manual          the numbers you paste, resolved against energy-platform
 #   energy-billing  accounts with a bill, from account_services in
-#                   billing_adapter_db (RDS) — ~16k on dev-merit
-#   energy-platform every gentrack identifier there is, from service_snapshot in
-#                   the energy-platform CockroachDB
+#                   billing_adapter_db (RDS) — 16,081 on dev-merit
+#   energy-platform gentrack identifiers known to energy, from service_snapshot
+#                   in the energy-platform CockroachDB — 5,105 on dev-merit
+#
+# The two do not nest: energy-billing currently holds three times more than
+# energy-platform, so neither is a superset. Pick by the question you are
+# asking, and expect different answers.
 #
 # Both sources already carry the account id next to the gentrack number, so a
 # run against one has nothing to gain from also querying the other. Richer
@@ -47,8 +51,8 @@ metadata:
       Read-only. Maps gentrack account numbers to uw account ids and numbers.
       Source them from a list you paste (`manual`), from every account that has
       a bill (`energy-billing`), or from every gentrack identifier there is
-      (`energy-platform`). `output-expr` shapes the result — quoted,
-      comma-separated account numbers by default, ready to paste into a query.
+      (`energy-platform`). `output` shapes the result — quoted, comma-separated
+      account numbers by default, ready to paste into a query.
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
@@ -62,24 +66,29 @@ spec:
       - name: source
         value: energy-billing
         enum: [manual, energy-billing, energy-platform]
-      # e.g. "J20000000201,J20000000202". Required for `manual`; narrows the
-      # other two when set.
-      - { name: gentrack-account-numbers, value: "" }
-      # An expr over the resolved rows, each with .uw_account_id and
-      # .uw_account_number. Quote with ' rather than " — see `mapped` below.
-      #
-      #   quoted (default)  join(map(rows, "'" + .uw_account_number + "'"), ",")
-      #   bare              join(map(rows, .uw_account_number), ",")
-      #   newline           join(map(rows, .uw_account_number), "\n")
-      #   id=number         join(map(rows, .uw_account_id + "=" + .uw_account_number), ",")
-      - name: output-expr
-        value: >-
-          join(map(rows, "'" + .uw_account_number + "'"), ",")
-      # Ids per chunk, not number of chunks — a fixed count would grow the
-      # chunks with the population and blow the parameter limit again. 1,000 is
-      # ~37KB. Keep it under step-query's 10,000 max-capture-rows.
-      - { name: chunk-size, value: "1000" }
-      - { name: log-level, value: info }
+        description: >-
+          Where the gentrack account numbers come from. manual = the list you
+          paste below. energy-billing = every account that has a bill.
+          energy-platform = every gentrack identifier energy knows about.
+      - name: gentrack-account-numbers
+        value: ""
+        description: >-
+          Comma-separated, no spaces or quotes, e.g.
+          J20000000201,J20000000202 — required when source is manual, and
+          narrows the other two sources when set. Leave empty to take the whole
+          population.
+      - name: output
+        value: quoted-csv
+        enum: [quoted-csv, csv, lines, id-and-number]
+        description: >-
+          Shape of the `mapped` output. quoted-csv gives '123','456' to drop
+          into an IN (...); csv gives 123,456; lines gives one per line;
+          id-and-number gives uuid=123 pairs. The full mapping including the
+          gentrack number is in the gentrack-accounts artifact.
+      - name: log-level
+        value: info
+        enum: [trace, debug, info, warn, error]
+        description: Verbosity of the remote query Jobs.
       - { name: timeout, value: 5m }
       - { name: teardown, value: "true" }
   templates:
@@ -90,10 +99,35 @@ spec:
             value: energy-billing
             enum: [manual, energy-billing, energy-platform]
           - { name: gentrack-account-numbers, value: "" }
-          - name: output-expr
+          - name: output
+            value: quoted-csv
+            enum: [quoted-csv, csv, lines, id-and-number]
+
+          # Not workflow arguments: mechanics, not choices. The output exprs are
+          # named here so `output` can stay an enum — a free-text expr is an
+          # easy way to break a run.
+          - name: expr-quoted-csv
             value: >-
               join(map(rows, "'" + .uw_account_number + "'"), ",")
+          - name: expr-csv
+            value: >-
+              join(map(rows, .uw_account_number), ",")
+          - name: expr-lines
+            value: >-
+              join(map(rows, .uw_account_number), "\n")
+          - name: expr-id-and-number
+            value: >-
+              join(map(rows, .uw_account_id + "=" + .uw_account_number), ",")
+
+          # Ids per chunk, not number of chunks — a fixed count would grow the
+          # chunks with the population and blow the parameter limit again.
+          # 1,000 ids is ~37KB. Keep it under max-capture-rows below.
           - { name: chunk-size, value: "1000" }
+          # Rows held to evaluate assert/result-expr. Setting either triggers
+          # the capture whatever the expression needs, so this must clear the
+          # whole population: 16,081 for energy-billing and 5,105 for
+          # energy-platform on dev-merit. The 10,000 default fails the run.
+          - { name: max-capture-rows, value: "200000" }
 
           # --- energy-billing ---------------------------------------------
           - { name: billing-cluster-name, value: dev-merit }
@@ -172,7 +206,9 @@ spec:
               name: select-image,
               value: "registry.uw.systems/dev-enablement/select:main",
             }
-          - { name: log-level, value: info }
+          - name: log-level
+            value: info
+            enum: [trace, debug, info, warn, error]
           - { name: timeout, value: 5m }
           - { name: teardown, value: "true" }
       outputs:
@@ -180,10 +216,10 @@ spec:
           - name: gentrack-accounts
             from: "{{steps.resolve-gentrack.outputs.artifacts.result}}"
         parameters:
-          # output-expr applied per chunk, then concatenated. The fan-out
+          # The output expr applied per chunk, then concatenated. The fan-out
           # aggregates as ["'1','2'","'3'"], so stripping the brackets and the
-          # double quotes delimiting each element joins them — which is why
-          # output-expr must not quote with ".
+          # double quotes delimiting each element joins them — which is why no
+          # output option quotes with ".
           - name: mapped
             valueFrom:
               expression: >-
@@ -248,9 +284,11 @@ spec:
                 - { name: assert, value: "!empty" }
                 - name: assert-message
                   value: "flow-gentrack-account-map: source={{inputs.parameters.source}} resolved nothing for gentrack-account-numbers='{{inputs.parameters.gentrack-account-numbers}}' (source=manual requires a non-empty list)"
-                # rowCount is exact without holding rows, so the query
-                # streams however large the source is.
                 - { name: result-expr, value: "rowCount" }
+                - {
+                    name: max-capture-rows,
+                    value: "{{inputs.parameters.max-capture-rows}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
@@ -299,7 +337,7 @@ spec:
                     value: "{{inputs.parameters.account-namespace}}",
                   }
                 - { name: job-name, value: "resolve-numbers-{{item.index}}" }
-                # Both identifiers, so output-expr can shape either.
+                # Both identifiers, so any output option can be built.
                 - name: query
                   value: >-
                     SELECT id::string AS uw_account_id,
@@ -308,10 +346,9 @@ spec:
                     WHERE id IN (SELECT unnest(string_to_array('{{item}}', ','))::uuid)
                 - { name: format, value: json } # a `rows` expr needs json
                 - { name: output, value: /tmp/numbers.json }
-                - {
-                    name: result-expr,
-                    value: "{{inputs.parameters.output-expr}}",
-                  }
+                - name: result-expr
+                  value: "{{=inputs.parameters.output == 'csv' ? inputs.parameters['expr-csv'] : inputs.parameters.output == 'lines' ? inputs.parameters['expr-lines'] : inputs.parameters.output == 'id-and-number' ? inputs.parameters['expr-id-and-number'] : inputs.parameters['expr-quoted-csv']}}"
+
                 - { name: db-type, value: cockroachdb }
                 - {
                     name: connection-string,
