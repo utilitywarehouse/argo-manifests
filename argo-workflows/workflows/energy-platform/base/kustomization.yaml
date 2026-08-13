@@ -6,3 +6,4 @@ resources:
   - data-export-energy-meterpoints.yaml
   - data-export-energy-services.yaml
   - data-export-energy-services-event-store.yaml
+  - flow-gentrack-account-map.yaml

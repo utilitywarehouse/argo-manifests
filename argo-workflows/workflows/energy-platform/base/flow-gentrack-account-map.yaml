@@ -1,0 +1,358 @@
+# =============================================================================
+# flow-gentrack-account-map — gentrack account number → account_id → uw account
+# number
+# =============================================================================
+#   in : source                    where the gentrack identifiers come from
+#        gentrack-account-numbers  comma-separated; required for `manual`
+#        output-expr               what the `mapped` parameter should contain
+#   out: mapped            (parameter) shaped by output-expr
+#        gentrack-accounts (artifact)  ndjson, one row per account:
+#                                      {uw_account_id, gentrack_account_number}
+#
+# SOURCES. Only the first hop changes; resolving to account_id and then to the
+# uw account number is the same whichever you pick.
+#
+#   manual          the numbers you paste, resolved against energy-platform
+#   energy-billing  accounts with a bill, from account_services in
+#                   billing_adapter_db (RDS) — ~16k on dev-merit
+#   energy-platform every gentrack identifier there is, from service_snapshot in
+#                   the energy-platform CockroachDB
+#
+# Both sources already carry the account id next to the gentrack number, so a
+# run against one has nothing to gain from also querying the other. Richer
+# per-service fields belong in the BigQuery lookup this feeds.
+#
+# BATCHING. ~16k account ids comma-joined is ~590KB, and step-query hands its
+# statement to the remote Job as an env var, past the per-variable limit. There
+# is no query-file input, so the ids must be inline in the SQL and an artifact
+# cannot carry them. Hop 1 tags each row with a bucket, hop 2 folds those into
+# fixed-size id strings (1,000 ids ≈ 37KB measured), hop 3 fans out. A short
+# manual list is one chunk.
+#
+# The alternative — dump `accounts` whole and join client-side — was measured
+# and rejected: 3,051,799 rows on dev-aws, so a ~200MB artifact and a full scan
+# of a shared CockroachDB on every run. The batched lookup is a primary key
+# lookup join (accounts@accounts_pkey), which is why 1,000 ids per chunk is
+# cheap. Do not "simplify" this into one big query.
+#
+# The population never travels as a parameter — it leaves hop 1 as the artifact.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: flow-gentrack-account-map
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Read-only. Maps gentrack account numbers to uw account ids and numbers.
+      Source them from a list you paste (`manual`), from every account that has
+      a bill (`energy-billing`), or from every gentrack identifier there is
+      (`energy-platform`). `output-expr` shapes the result — quoted,
+      comma-separated account numbers by default, ready to paste into a query.
+  labels:
+    app.kubernetes.io/component: flow
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: energy-billing
+spec:
+  entrypoint: resolve
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - name: source
+        value: energy-billing
+        enum: [manual, energy-billing, energy-platform]
+      # e.g. "J20000000201,J20000000202". Required for `manual`; narrows the
+      # other two when set.
+      - { name: gentrack-account-numbers, value: "" }
+      # An expr over the resolved rows, each with .uw_account_id and
+      # .uw_account_number. Quote with ' rather than " — see `mapped` below.
+      #
+      #   quoted (default)  join(map(rows, "'" + .uw_account_number + "'"), ",")
+      #   bare              join(map(rows, .uw_account_number), ",")
+      #   newline           join(map(rows, .uw_account_number), "\n")
+      #   id=number         join(map(rows, .uw_account_id + "=" + .uw_account_number), ",")
+      - name: output-expr
+        value: >-
+          join(map(rows, "'" + .uw_account_number + "'"), ",")
+      # Ids per chunk, not number of chunks — a fixed count would grow the
+      # chunks with the population and blow the parameter limit again. 1,000 is
+      # ~37KB. Keep it under step-query's 10,000 max-capture-rows.
+      - { name: chunk-size, value: "1000" }
+      - { name: log-level, value: info }
+      - { name: timeout, value: 5m }
+      - { name: teardown, value: "true" }
+  templates:
+    - name: resolve
+      inputs:
+        parameters:
+          - name: source
+            value: energy-billing
+            enum: [manual, energy-billing, energy-platform]
+          - { name: gentrack-account-numbers, value: "" }
+          - name: output-expr
+            value: >-
+              join(map(rows, "'" + .uw_account_number + "'"), ",")
+          - { name: chunk-size, value: "1000" }
+
+          # --- energy-billing ---------------------------------------------
+          - { name: billing-cluster-name, value: dev-merit }
+          - { name: billing-namespace, value: energy-billing }
+          - {
+              name: billing-connection-string,
+              value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
+            }
+          - { name: billing-runner-sa, value: billing-adapter-rds-user }
+          # EXISTS, not a join: billing_period_accounts is one row per account
+          # per bill period. The bucket sits outside the DISTINCT because a
+          # window function is evaluated before it.
+          - name: billing-query
+            value: >-
+              SELECT uw_account_id, gentrack_account_number,
+              floor((row_number() OVER (ORDER BY uw_account_id) - 1)
+              / {{inputs.parameters.chunk-size}}.0)::int AS bucket
+              FROM (
+              SELECT DISTINCT a.account_id AS uw_account_id,
+              a.external_account_number AS gentrack_account_number
+              FROM public.account_services a
+              WHERE NULLIF(a.account_id, '') IS NOT NULL
+              AND EXISTS (SELECT 1 FROM public.billing_period_accounts bpa
+              WHERE bpa.external_account_number = a.external_account_number)
+              AND ('{{inputs.parameters.gentrack-account-numbers}}' = ''
+              OR a.external_account_number IN
+              (SELECT unnest(string_to_array('{{inputs.parameters.gentrack-account-numbers}}', ','))))
+              ) t
+
+          # --- energy-platform --------------------------------------------
+          - { name: energy-cluster-name, value: dev-merit }
+          - { name: energy-namespace, value: energy-platform }
+          - {
+              name: energy-connection-string,
+              value: "postgres://root@cockroachdb-proxy-moist.energy-platform.svc:26257/services?sslmode=verify-full",
+            }
+          - { name: energy-runner-sa, value: default }
+          - { name: energy-ca-secret, value: ca.auth.keys.energy-platform }
+          - { name: energy-ca-auth-key, value: moist.auth.key }
+          - { name: energy-ca-config, value: ca.config.energy-platform }
+          - { name: energy-ca-profile-key, value: ca.node.profile }
+          - { name: energy-ca-address-key, value: ca.endpoint }
+          - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
+          # The `source <> manual OR numbers <> ''` term stops a manual run with
+          # an empty list falling into the empty-means-everything branch and
+          # returning the whole table; it yields no rows and the assert fires.
+          - name: energy-query
+            value: >-
+              SELECT uw_account_id, gentrack_account_number,
+              floor((row_number() OVER (ORDER BY uw_account_id) - 1)
+              / {{inputs.parameters.chunk-size}}.0)::int AS bucket
+              FROM (
+              SELECT DISTINCT s.customer_account_id::string AS uw_account_id,
+              s.gentrack_account_number
+              FROM service_snapshot s
+              WHERE s.gentrack_account_number IS NOT NULL
+              AND s.customer_account_id IS NOT NULL
+              AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
+              AND ('{{inputs.parameters.source}}' <> 'manual'
+              OR '{{inputs.parameters.gentrack-account-numbers}}' <> '')
+              AND ('{{inputs.parameters.gentrack-account-numbers}}' = ''
+              OR s.gentrack_account_number IN
+              (SELECT unnest(string_to_array('{{inputs.parameters.gentrack-account-numbers}}', ','))))
+              ) t
+
+          # --- account-platform -------------------------------------------
+          - { name: account-cluster-name, value: dev-aws }
+          - { name: account-namespace, value: account-platform }
+          - {
+              name: account-connection-string,
+              value: "postgresql://accounts@cockroachdb-proxy:26257/account_api_20250214?sslmode=verify-full",
+            }
+          - { name: account-ca-secret, value: ca-auth-key }
+
+          - {
+              name: select-image,
+              value: "registry.uw.systems/dev-enablement/select:main",
+            }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: teardown, value: "true" }
+      outputs:
+        artifacts:
+          - name: gentrack-accounts
+            from: "{{steps.resolve-gentrack.outputs.artifacts.result}}"
+        parameters:
+          # output-expr applied per chunk, then concatenated. The fan-out
+          # aggregates as ["'1','2'","'3'"], so stripping the brackets and the
+          # double quotes delimiting each element joins them — which is why
+          # output-expr must not quote with ".
+          - name: mapped
+            valueFrom:
+              expression: >-
+                sprig.replace("\"", "",
+                  sprig.replace("]", "",
+                    sprig.replace("[", "",
+                      steps['resolve-account-numbers'].outputs.parameters.result)))
+          # The raw per-chunk array, if the expression above ever misbehaves.
+          - name: mapped-chunked
+            valueFrom:
+              parameter: "{{steps.resolve-account-numbers.outputs.parameters.result}}"
+          # (account_id, gentrack) pairs; above the account count where one
+          # gentrack number carries more than one account_id.
+          - name: pair-count
+            valueFrom:
+              parameter: "{{steps.resolve-gentrack.outputs.parameters.result}}"
+      steps:
+        # 1) gentrack → account_id, from the chosen source. One step: the source
+        #    only changes where the query runs and what it says, so everything
+        #    downstream is source-agnostic.
+        - - name: resolve-gentrack
+            templateRef: { name: step-query, template: pg }
+            arguments:
+              parameters:
+                - name: cluster-name
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-cluster-name'] : inputs.parameters['energy-cluster-name']}}"
+                - name: target-namespace
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-namespace'] : inputs.parameters['energy-namespace']}}"
+                - { name: job-name, value: resolve-gentrack }
+                - name: query
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-query'] : inputs.parameters['energy-query']}}"
+                - name: db-type
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? 'postgres' : 'cockroachdb'}}"
+                - name: connection-string
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-connection-string'] : inputs.parameters['energy-connection-string']}}"
+                - name: runner-sa
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-runner-sa'] : inputs.parameters['energy-runner-sa']}}"
+                # RDS IAM for billing; CockroachDB uses a client cert, and an
+                # empty ca-secret leaves that wiring off.
+                - name: vault-sidecar
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? 'true' : 'false'}}"
+                - name: ca-secret
+                  value: "{{=inputs.parameters.source == 'energy-billing' ? '' : inputs.parameters['energy-ca-secret']}}"
+                - {
+                    name: ca-auth-key,
+                    value: "{{inputs.parameters.energy-ca-auth-key}}",
+                  }
+                - {
+                    name: ca-config,
+                    value: "{{inputs.parameters.energy-ca-config}}",
+                  }
+                - {
+                    name: ca-profile-key,
+                    value: "{{inputs.parameters.energy-ca-profile-key}}",
+                  }
+                - {
+                    name: ca-address-key,
+                    value: "{{inputs.parameters.energy-ca-address-key}}",
+                  }
+                - { name: format, value: ndjson }
+                - { name: output, value: /tmp/gentrack-accounts.ndjson }
+                - { name: assert, value: "!empty" }
+                - name: assert-message
+                  value: "flow-gentrack-account-map: source={{inputs.parameters.source}} resolved nothing for gentrack-account-numbers='{{inputs.parameters.gentrack-account-numbers}}' (source=manual requires a non-empty list)"
+                # rowCount is exact without holding rows, so the query
+                # streams however large the source is.
+                - { name: result-expr, value: "rowCount" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+
+        # 2) Fold the buckets into comma-joined id lists. Reads the artifact, so
+        #    it neither cares which source produced it nor re-queries.
+        - - name: chunk-account-ids
+            template: select
+            arguments:
+              artifacts:
+                - {
+                    name: input,
+                    from: "{{steps.resolve-gentrack.outputs.artifacts.result}}",
+                  }
+              parameters:
+                - {
+                    name: select-image,
+                    value: "{{inputs.parameters.select-image}}",
+                  }
+                # step-query captures rows as a JSON array, not ndjson.
+                - { name: format, value: json }
+                # groupBy/values, not filter: in `map(uniq(map(rows, .bucket)),
+                # join(map(filter(rows, .bucket == #), ...), ","))` the inner #
+                # shadows the outer one and every element comes back empty, with
+                # no error.
+                - name: expr
+                  value: >-
+                    map(values(groupBy(rows, .bucket)), join(map(#, .uw_account_id), ","))
+                - { name: output-format, value: json }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+
+        # 3) account_id → uw account number, one Job per chunk. An id with no row
+        #    is dropped rather than failing the chunk; compare against
+        #    pair-count.
+        - - name: resolve-account-numbers
+            templateRef: { name: step-query, template: pg }
+            withParam: "{{steps.chunk-account-ids.outputs.parameters.result}}"
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.account-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.account-namespace}}",
+                  }
+                - { name: job-name, value: "resolve-numbers-{{item.index}}" }
+                # Both identifiers, so output-expr can shape either.
+                - name: query
+                  value: >-
+                    SELECT id::string AS uw_account_id,
+                    account_number AS uw_account_number
+                    FROM accounts
+                    WHERE id IN (SELECT unnest(string_to_array('{{item}}', ','))::uuid)
+                - { name: format, value: json } # a `rows` expr needs json
+                - { name: output, value: /tmp/numbers.json }
+                - {
+                    name: result-expr,
+                    value: "{{inputs.parameters.output-expr}}",
+                  }
+                - { name: db-type, value: cockroachdb }
+                - {
+                    name: connection-string,
+                    value: "{{inputs.parameters.account-connection-string}}",
+                  }
+                - {
+                    name: ca-secret,
+                    value: "{{inputs.parameters.account-ca-secret}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+
+    - name: select
+      inputs:
+        artifacts:
+          - { name: input, path: /tmp/in.ndjson }
+        parameters:
+          - {
+              name: select-image,
+              value: "registry.uw.systems/dev-enablement/select:main",
+            }
+          - { name: expr }
+          - { name: format, value: ndjson }
+          - { name: output-format, value: json }
+          - { name: log-level, value: info }
+      container:
+        image: "{{inputs.parameters.select-image}}"
+        env:
+          - { name: INPUT, value: /tmp/in.ndjson }
+          - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+          - { name: SELECT, value: "{{inputs.parameters.expr}}" }
+          - { name: OUTPUT, value: /tmp/out }
+          - {
+              name: OUTPUT_FORMAT,
+              value: "{{inputs.parameters.output-format}}",
+            }
+          - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+      outputs:
+        parameters:
+          - name: result
+            valueFrom:
+              path: /tmp/out
+              default: ""
