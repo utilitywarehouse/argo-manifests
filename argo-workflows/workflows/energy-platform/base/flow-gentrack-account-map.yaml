@@ -6,7 +6,7 @@
 #        gentrack-account-numbers  comma-separated; required for `manual`
 #        output                    shape of the `mapped` parameter
 #   out: mapped            (parameter) the uw account numbers, shaped by output
-#        gentrack-accounts (artifact)  ndjson, one row per account:
+#        gentrack-accounts (artifact)  JSON array, one entry per account:
 #                                      {uw_account_id, gentrack_account_number}
 #
 # SOURCES. Only the first hop changes; resolving to account_id and then to the
@@ -39,7 +39,9 @@
 # lookup join (accounts@accounts_pkey), which is why 1,000 ids per chunk is
 # cheap. Do not "simplify" this into one big query.
 #
-# The population never travels as a parameter — it leaves hop 1 as the artifact.
+# A remote Job returns only its captured result — the `output` file stays in the
+# pod — so hop 1's result-expr is `rows` and that capture is the population.
+# max-capture-rows must therefore clear it, and the 10,000 default will not.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -213,6 +215,8 @@ spec:
           - { name: teardown, value: "true" }
       outputs:
         artifacts:
+          # JSON array of {uw_account_id, gentrack_account_number, bucket}.
+          # `jq -c '.[]'` if you need ndjson for a BigQuery load.
           - name: gentrack-accounts
             from: "{{steps.resolve-gentrack.outputs.artifacts.result}}"
         parameters:
@@ -231,11 +235,6 @@ spec:
           - name: mapped-chunked
             valueFrom:
               parameter: "{{steps.resolve-account-numbers.outputs.parameters.result}}"
-          # (account_id, gentrack) pairs; above the account count where one
-          # gentrack number carries more than one account_id.
-          - name: pair-count
-            valueFrom:
-              parameter: "{{steps.resolve-gentrack.outputs.parameters.result}}"
       steps:
         # 1) gentrack → account_id, from the chosen source. One step: the source
         #    only changes where the query runs and what it says, so everything
@@ -279,12 +278,15 @@ spec:
                     name: ca-address-key,
                     value: "{{inputs.parameters.energy-ca-address-key}}",
                   }
-                - { name: format, value: ndjson }
-                - { name: output, value: /tmp/gentrack-accounts.ndjson }
+                - { name: format, value: json }
+                - { name: output, value: /tmp/gentrack-accounts.json }
                 - { name: assert, value: "!empty" }
                 - name: assert-message
                   value: "flow-gentrack-account-map: source={{inputs.parameters.source}} resolved nothing for gentrack-account-numbers='{{inputs.parameters.gentrack-account-numbers}}' (source=manual requires a non-empty list)"
-                - { name: result-expr, value: "rowCount" }
+                # `rows`, not rowCount: the remote Job only returns its captured
+                # result, so this expression IS how the population gets out. The
+                # `output` file above stays in the pod.
+                - { name: result-expr, value: "rows" }
                 - {
                     name: max-capture-rows,
                     value: "{{inputs.parameters.max-capture-rows}}",
@@ -308,21 +310,29 @@ spec:
                     name: select-image,
                     value: "{{inputs.parameters.select-image}}",
                   }
-                # step-query captures rows as a JSON array, not ndjson.
+                # json, because the artifact is hop 1's captured `rows` — a
+                # JSON array — not its output file.
                 - { name: format, value: json }
+                # Objects, not bare strings: the fan-out needs {{item.index}}
+                # for a unique job-name — execute-job's uid suffix is the same
+                # for every step of a run, so a shared name collides.
+                #
+                # The map literal needs its own parens or expr rejects the ':'.
                 # groupBy/values, not filter: in `map(uniq(map(rows, .bucket)),
                 # join(map(filter(rows, .bucket == #), ...), ","))` the inner #
                 # shadows the outer one and every element comes back empty, with
-                # no error.
+                # no error. sortBy because values() over a map is unordered.
                 - name: expr
                   value: >-
-                    map(values(groupBy(rows, .bucket)), join(map(#, .uw_account_id), ","))
+                    sortBy(map(values(groupBy(rows, .bucket)), ({index:
+                    #[0].bucket, ids: join(map(#, .uw_account_id), ",")})),
+                    .index)
                 - { name: output-format, value: json }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
         # 3) account_id → uw account number, one Job per chunk. An id with no row
-        #    is dropped rather than failing the chunk; compare against
-        #    pair-count.
+        #    is dropped rather than failing the chunk; compare the output
+        #    against the gentrack-accounts artifact if the count matters.
         - - name: resolve-account-numbers
             templateRef: { name: step-query, template: pg }
             withParam: "{{steps.chunk-account-ids.outputs.parameters.result}}"
@@ -343,7 +353,7 @@ spec:
                     SELECT id::string AS uw_account_id,
                     account_number AS uw_account_number
                     FROM accounts
-                    WHERE id IN (SELECT unnest(string_to_array('{{item}}', ','))::uuid)
+                    WHERE id IN (SELECT unnest(string_to_array('{{item.ids}}', ','))::uuid)
                 - { name: format, value: json } # a `rows` expr needs json
                 - { name: output, value: /tmp/numbers.json }
                 - name: result-expr
