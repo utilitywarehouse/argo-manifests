@@ -1,47 +1,49 @@
 # =============================================================================
-# flow-gentrack-account-map — gentrack account number → account_id → uw account
-# number
+# flow-gentrack-account-map — gentrack account number → uw account id and number
 # =============================================================================
-#   in : source                    where the gentrack identifiers come from
-#        gentrack-account-numbers  comma-separated; required for `manual`
+#   in : source                    which system's view of the accounts to use
+#        gentrack-account-numbers  comma-separated; empty takes the whole source
+#        with-bills                also report which of them have a bill
 #        output                    shape of the `mapped` parameter
 #   out: mapped            (parameter) the uw account numbers, shaped by output
-#        gentrack-accounts (artifact)  JSON array, one entry per account:
-#                                      {uw_account_id, gentrack_account_number}
+#        billed            (parameter) gentrack numbers that have a bill; empty
+#                                      unless with-bills is true
+#        gentrack-accounts (artifact)  JSON array, one entry per account
 #
-# SOURCES. Only the first hop changes; resolving to account_id and then to the
-# uw account number is the same whichever you pick.
+# SOURCES. Both are real, correlated views of the same population, measured on
+# dev-merit: service_snapshot holds 111,870 gentrack numbers, the migration
+# table 111,463, and 499 of a 500-number sample appear in both. Pick either;
+# they do not meaningfully differ.
 #
-#   manual          the numbers you paste, resolved against energy-platform
-#   energy-billing  accounts with a bill, from account_services in
-#                   billing_adapter_db (RDS) — 16,081 on dev-merit
-#   energy-platform gentrack identifiers known to energy, from service_snapshot
-#                   in the energy-platform CockroachDB — 5,105 on dev-merit
+#   service-snapshot  energy-platform CockroachDB. Carries customer_account_id,
+#                     which IS the uw_account_id.
+#   migration         gentrack-migration Postgres. Carries uw_account_number
+#                     directly, alongside the migration statuses.
 #
-# The two do not nest: energy-billing currently holds three times more than
-# energy-platform, so neither is a superset. Pick by the question you are
-# asking, and expect different answers.
+# Each source has one identifier and not the other, which is why the
+# account-platform hop stays: it fills in whichever is missing, keyed by id for
+# service-snapshot and by account number for migration.
 #
-# Both sources already carry the account id next to the gentrack number, so a
-# run against one has nothing to gain from also querying the other. Richer
-# per-service fields belong in the BigQuery lookup this feeds.
+# NOT A SOURCE: energy-billing. `account_services` holds 131,178 gentrack
+# numbers, but roughly a fifth have an account_id that does not exist in
+# account-platform at all — dev seed data with no real account behind it. It is
+# a fact to check against, which is what `with-bills` does, not a place to take
+# accounts from.
 #
-# BATCHING. ~16k account ids comma-joined is ~590KB, and step-query hands its
-# statement to the remote Job as an env var, past the per-variable limit. There
-# is no query-file input, so the ids must be inline in the SQL and an artifact
-# cannot carry them. Hop 1 tags each row with a bucket, hop 2 folds those into
-# fixed-size id strings (1,000 ids ≈ 37KB measured), hop 3 fans out. A short
-# manual list is one chunk.
-#
-# The alternative — dump `accounts` whole and join client-side — was measured
-# and rejected: 3,051,799 rows on dev-aws, so a ~200MB artifact and a full scan
-# of a shared CockroachDB on every run. The batched lookup is a primary key
-# lookup join (accounts@accounts_pkey), which is why 1,000 ids per chunk is
-# cheap. Do not "simplify" this into one big query.
+# BATCHING. Comma-joining ~111k ids is far past what a parameter can carry, and
+# step-query hands its statement to the remote Job as an env var. There is no
+# query-file input, so the ids must be inline in the SQL and an artifact cannot
+# carry them. Hop 1 tags each row with a bucket, hop 2 folds those into
+# fixed-size lists (1,000 ids ≈ 37KB measured), later hops fan out. A short
+# pasted list is one chunk.
 #
 # A remote Job returns only its captured result — the `output` file stays in the
 # pod — so hop 1's result-expr is `rows` and that capture is the population.
 # max-capture-rows must therefore clear it, and the 10,000 default will not.
+#
+# EXPECT FEWER RESULTS THAN INPUTS. An id with no row in account-platform is
+# dropped rather than failing the run, so `mapped` can be shorter than the
+# source. Compare it against the gentrack-accounts artifact.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -50,43 +52,45 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      Read-only. Maps gentrack account numbers to uw account ids and numbers.
-      Source them from a list you paste (`manual`), from every account that has
-      a bill (`energy-billing`), or from every gentrack identifier there is
-      (`energy-platform`). `output` shapes the result — quoted, comma-separated
-      account numbers by default, ready to paste into a query.
+      Read-only. Maps gentrack account numbers to uw account ids and numbers,
+      from energy's service_snapshot or the gentrack migration table. Paste a
+      list to resolve a few, or leave it empty for the whole population. Turn on
+      with-bills to also report which of them energy-billing holds a bill for.
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
-    data.uw.systems/system: energy-billing
+    data.uw.systems/system: energy-platform
 spec:
   entrypoint: resolve
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
       - name: source
-        value: energy-billing
-        enum: [manual, energy-billing, energy-platform]
+        value: service-snapshot
+        enum: [service-snapshot, migration]
         description: >-
-          Where the gentrack account numbers come from. manual = the list you
-          paste below. energy-billing = every account that has a bill.
-          energy-platform = every gentrack identifier energy knows about.
+          Which system's accounts to map. service-snapshot = energy-platform's
+          view, carries the uw account id. migration = the gentrack migration
+          table, carries the uw account number. They cover the same population.
       - name: gentrack-account-numbers
         value: ""
         description: >-
           Comma-separated, no spaces or quotes, e.g.
-          J20000000201,J20000000202 — required when source is manual, and
-          narrows the other two sources when set. Leave empty to take the whole
-          population.
+          J20000022403,J20000022430 — leave empty to take the whole source.
+      - name: with-bills
+        value: "false"
+        enum: ["false", "true"]
+        description: >-
+          Also ask energy-billing which of the accounts have a bill, reported in
+          the `billed` output. Off by default because it is an extra pass.
       - name: output
         value: quoted-csv
         enum: [quoted-csv, csv, lines, id-and-number]
         description: >-
           Shape of the `mapped` output. quoted-csv gives '123','456' to drop
           into an IN (...); csv gives 123,456; lines gives one per line;
-          id-and-number gives uuid=123 pairs. The full mapping including the
-          gentrack number is in the gentrack-accounts artifact.
+          id-and-number gives uuid=123 pairs.
       - name: log-level
         value: info
         enum: [trace, debug, info, warn, error]
@@ -98,9 +102,12 @@ spec:
       inputs:
         parameters:
           - name: source
-            value: energy-billing
-            enum: [manual, energy-billing, energy-platform]
+            value: service-snapshot
+            enum: [service-snapshot, migration]
           - { name: gentrack-account-numbers, value: "" }
+          - name: with-bills
+            value: "false"
+            enum: ["false", "true"]
           - name: output
             value: quoted-csv
             enum: [quoted-csv, csv, lines, id-and-number]
@@ -127,39 +134,14 @@ spec:
           - { name: chunk-size, value: "1000" }
           # Rows held to evaluate assert/result-expr. Setting either triggers
           # the capture whatever the expression needs, so this must clear the
-          # whole population: 16,081 for energy-billing and 5,105 for
-          # energy-platform on dev-merit. The 10,000 default fails the run.
-          - { name: max-capture-rows, value: "200000" }
+          # whole source: ~111k on dev-merit. The 10,000 default fails the run.
+          - { name: max-capture-rows, value: "500000" }
 
-          # --- energy-billing ---------------------------------------------
-          - { name: billing-cluster-name, value: dev-merit }
-          - { name: billing-namespace, value: energy-billing }
-          - {
-              name: billing-connection-string,
-              value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
-            }
-          - { name: billing-runner-sa, value: billing-adapter-rds-user }
-          # EXISTS, not a join: billing_period_accounts is one row per account
-          # per bill period. The bucket sits outside the DISTINCT because a
-          # window function is evaluated before it.
-          - name: billing-query
-            value: >-
-              SELECT uw_account_id, gentrack_account_number,
-              floor((row_number() OVER (ORDER BY uw_account_id) - 1)
-              / {{inputs.parameters.chunk-size}}.0)::int AS bucket
-              FROM (
-              SELECT DISTINCT a.account_id AS uw_account_id,
-              a.external_account_number AS gentrack_account_number
-              FROM public.account_services a
-              WHERE NULLIF(a.account_id, '') IS NOT NULL
-              AND EXISTS (SELECT 1 FROM public.billing_period_accounts bpa
-              WHERE bpa.external_account_number = a.external_account_number)
-              AND ('{{inputs.parameters.gentrack-account-numbers}}' = ''
-              OR a.external_account_number IN
-              (SELECT unnest(string_to_array('{{inputs.parameters.gentrack-account-numbers}}', ','))))
-              ) t
-
-          # --- energy-platform --------------------------------------------
+          # --- service-snapshot (energy-platform CockroachDB) ---------------
+          # Deliberately no energy_billing_platform filter: only 5,082 of the
+          # 111,870 rows carrying a gentrack number are flagged GENTRACK, so
+          # filtering on it discards 95% of the population. A service can hold a
+          # gentrack number before its billing platform flips.
           - { name: energy-cluster-name, value: dev-merit }
           - { name: energy-namespace, value: energy-platform }
           - {
@@ -172,13 +154,9 @@ spec:
           - { name: energy-ca-config, value: ca.config.energy-platform }
           - { name: energy-ca-profile-key, value: ca.node.profile }
           - { name: energy-ca-address-key, value: ca.endpoint }
-          - { name: billing-platform, value: ENERGY_BILLING_PLATFORM_GENTRACK }
-          # The `source <> manual OR numbers <> ''` term stops a manual run with
-          # an empty list falling into the empty-means-everything branch and
-          # returning the whole table; it yields no rows and the assert fires.
           - name: energy-query
             value: >-
-              SELECT uw_account_id, gentrack_account_number,
+              SELECT uw_account_id, '' AS uw_account_number, gentrack_account_number,
               floor((row_number() OVER (ORDER BY uw_account_id) - 1)
               / {{inputs.parameters.chunk-size}}.0)::int AS bucket
               FROM (
@@ -187,15 +165,37 @@ spec:
               FROM service_snapshot s
               WHERE s.gentrack_account_number IS NOT NULL
               AND s.customer_account_id IS NOT NULL
-              AND s.energy_billing_platform = '{{inputs.parameters.billing-platform}}'
-              AND ('{{inputs.parameters.source}}' <> 'manual'
-              OR '{{inputs.parameters.gentrack-account-numbers}}' <> '')
               AND ('{{inputs.parameters.gentrack-account-numbers}}' = ''
               OR s.gentrack_account_number IN
               (SELECT unnest(string_to_array('{{inputs.parameters.gentrack-account-numbers}}', ','))))
               ) t
 
-          # --- account-platform -------------------------------------------
+          # --- migration (gentrack-migration Postgres) ----------------------
+          # One row per meterpoint, hence the DISTINCT.
+          - { name: migration-cluster-name, value: dev-merit }
+          - { name: migration-namespace, value: energy-platform }
+          # The whole DSN comes from the namespace's own secret rather than
+          # being restated here — connection-string is left empty so dsn-secret
+          # wins.
+          - { name: migration-dsn-secret, value: gentrack-migration-secrets }
+          - { name: migration-dsn-key, value: dsn }
+          - { name: migration-runner-sa, value: default }
+          - name: migration-query
+            value: >-
+              SELECT '' AS uw_account_id, uw_account_number, gentrack_account_number,
+              floor((row_number() OVER (ORDER BY uw_account_number) - 1)
+              / {{inputs.parameters.chunk-size}}.0)::int AS bucket
+              FROM (
+              SELECT DISTINCT m.uw_account_number, m.gentrack_account_number
+              FROM customer_gentrack_migration_status m
+              WHERE NULLIF(m.gentrack_account_number, '') IS NOT NULL
+              AND NULLIF(m.uw_account_number, '') IS NOT NULL
+              AND ('{{inputs.parameters.gentrack-account-numbers}}' = ''
+              OR m.gentrack_account_number IN
+              (SELECT unnest(string_to_array('{{inputs.parameters.gentrack-account-numbers}}', ','))))
+              ) t
+
+          # --- account-platform: fills in the identifier the source lacks ----
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
           - {
@@ -203,6 +203,15 @@ spec:
               value: "postgresql://accounts@cockroachdb-proxy:26257/account_api_20250214?sslmode=verify-full",
             }
           - { name: account-ca-secret, value: ca-auth-key }
+
+          # --- energy-billing: the bills check only -------------------------
+          - { name: billing-cluster-name, value: dev-merit }
+          - { name: billing-namespace, value: energy-billing }
+          - {
+              name: billing-connection-string,
+              value: "postgres://billing_adapter_role@energy-rds.c4jv4shioc7c.eu-west-1.rds.amazonaws.com:5432/billing_adapter_db?sslmode=require",
+            }
+          - { name: billing-runner-sa, value: billing-adapter-rds-user }
 
           - {
               name: select-image,
@@ -215,8 +224,9 @@ spec:
           - { name: teardown, value: "true" }
       outputs:
         artifacts:
-          # JSON array of {uw_account_id, gentrack_account_number, bucket}.
-          # `jq -c '.[]'` if you need ndjson for a BigQuery load.
+          # JSON array of {uw_account_id, uw_account_number,
+          # gentrack_account_number, bucket} as the source knew them — one of
+          # the two identifiers is blank until the account-platform hop.
           - name: gentrack-accounts
             from: "{{steps.resolve-gentrack.outputs.artifacts.result}}"
         parameters:
@@ -231,37 +241,49 @@ spec:
                   sprig.replace("]", "",
                     sprig.replace("[", "",
                       steps['resolve-account-numbers'].outputs.parameters.result)))
-          # The raw per-chunk array, if the expression above ever misbehaves.
           - name: mapped-chunked
             valueFrom:
               parameter: "{{steps.resolve-account-numbers.outputs.parameters.result}}"
+          # Empty unless with-bills ran.
+          - name: billed
+            valueFrom:
+              expression: >-
+                sprig.replace("\"", "",
+                  sprig.replace("]", "",
+                    sprig.replace("[", "",
+                      steps['check-bills'].outputs.parameters.result)))
+              default: ""
       steps:
-        # 1) gentrack → account_id, from the chosen source. One step: the source
-        #    only changes where the query runs and what it says, so everything
-        #    downstream is source-agnostic.
+        # 1) gentrack → whichever uw identifier the source holds. One step: the
+        #    source only changes where the query runs and what it says, so
+        #    everything downstream is source-agnostic.
         - - name: resolve-gentrack
             templateRef: { name: step-query, template: pg }
             arguments:
               parameters:
                 - name: cluster-name
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-cluster-name'] : inputs.parameters['energy-cluster-name']}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? inputs.parameters['migration-cluster-name'] : inputs.parameters['energy-cluster-name']}}"
                 - name: target-namespace
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-namespace'] : inputs.parameters['energy-namespace']}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? inputs.parameters['migration-namespace'] : inputs.parameters['energy-namespace']}}"
                 - { name: job-name, value: resolve-gentrack }
                 - name: query
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-query'] : inputs.parameters['energy-query']}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? inputs.parameters['migration-query'] : inputs.parameters['energy-query']}}"
                 - name: db-type
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? 'postgres' : 'cockroachdb'}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? 'postgres' : 'cockroachdb'}}"
                 - name: connection-string
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-connection-string'] : inputs.parameters['energy-connection-string']}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? '' : inputs.parameters['energy-connection-string']}}"
+                - name: dsn-secret
+                  value: "{{=inputs.parameters.source == 'migration' ? inputs.parameters['migration-dsn-secret'] : ''}}"
+                - {
+                    name: dsn-key,
+                    value: "{{inputs.parameters.migration-dsn-key}}",
+                  }
                 - name: runner-sa
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? inputs.parameters['billing-runner-sa'] : inputs.parameters['energy-runner-sa']}}"
-                # RDS IAM for billing; CockroachDB uses a client cert, and an
-                # empty ca-secret leaves that wiring off.
-                - name: vault-sidecar
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? 'true' : 'false'}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? inputs.parameters['migration-runner-sa'] : inputs.parameters['energy-runner-sa']}}"
+                # CockroachDB authenticates with a client cert; an empty
+                # ca-secret leaves that wiring off for the Postgres source.
                 - name: ca-secret
-                  value: "{{=inputs.parameters.source == 'energy-billing' ? '' : inputs.parameters['energy-ca-secret']}}"
+                  value: "{{=inputs.parameters.source == 'migration' ? '' : inputs.parameters['energy-ca-secret']}}"
                 - {
                     name: ca-auth-key,
                     value: "{{inputs.parameters.energy-ca-auth-key}}",
@@ -282,10 +304,9 @@ spec:
                 - { name: output, value: /tmp/gentrack-accounts.json }
                 - { name: assert, value: "!empty" }
                 - name: assert-message
-                  value: "flow-gentrack-account-map: source={{inputs.parameters.source}} resolved nothing for gentrack-account-numbers='{{inputs.parameters.gentrack-account-numbers}}' (source=manual requires a non-empty list)"
-                # `rows`, not rowCount: the remote Job only returns its captured
-                # result, so this expression IS how the population gets out. The
-                # `output` file above stays in the pod.
+                  value: "flow-gentrack-account-map: source={{inputs.parameters.source}} resolved nothing for gentrack-account-numbers='{{inputs.parameters.gentrack-account-numbers}}'"
+                # `rows`, not a count: the remote Job only returns its captured
+                # result, so this expression IS how the population gets out.
                 - { name: result-expr, value: "rows" }
                 - {
                     name: max-capture-rows,
@@ -295,9 +316,14 @@ spec:
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
 
-        # 2) Fold the buckets into comma-joined id lists. Reads the artifact, so
-        #    it neither cares which source produced it nor re-queries.
-        - - name: chunk-account-ids
+        # 2) Fold the buckets into per-chunk lists. Reads the artifact, so it
+        #    neither cares which source produced it nor re-queries.
+        #
+        #    `keys` is whichever identifier the source supplied — account ids
+        #    from service-snapshot, account numbers from migration — and drives
+        #    the account-platform lookup. `gentracks` rides along for the bills
+        #    check.
+        - - name: chunk-keys
             template: select
             arguments:
               artifacts:
@@ -310,8 +336,7 @@ spec:
                     name: select-image,
                     value: "{{inputs.parameters.select-image}}",
                   }
-                # json, because the artifact is hop 1's captured `rows` — a
-                # JSON array — not its output file.
+                # json, because the artifact is hop 1's captured `rows`.
                 - { name: format, value: json }
                 # Objects, not bare strings: the fan-out needs {{item.index}}
                 # for a unique job-name — execute-job's uid suffix is the same
@@ -325,17 +350,17 @@ spec:
                 - name: expr
                   value: >-
                     sortBy(map(values(groupBy(rows, .bucket)), ({index:
-                    #[0].bucket, ids: join(map(#, .uw_account_id), ",")})),
-                    .index)
+                    #[0].bucket, keys: join(map(#, .uw_account_id != "" ?
+                    .uw_account_id : .uw_account_number), ","), gentracks:
+                    join(map(#, .gentrack_account_number), ",")})), .index)
                 - { name: output-format, value: json }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
 
-        # 3) account_id → uw account number, one Job per chunk. An id with no row
-        #    is dropped rather than failing the chunk; compare the output
-        #    against the gentrack-accounts artifact if the count matters.
+        # 3) account-platform fills in the identifier the source lacked, keyed
+        #    by whichever one it had. One Job per chunk.
         - - name: resolve-account-numbers
             templateRef: { name: step-query, template: pg }
-            withParam: "{{steps.chunk-account-ids.outputs.parameters.result}}"
+            withParam: "{{steps.chunk-keys.outputs.parameters.result}}"
             arguments:
               parameters:
                 - {
@@ -347,18 +372,22 @@ spec:
                     value: "{{inputs.parameters.account-namespace}}",
                   }
                 - { name: job-name, value: "resolve-numbers-{{item.index}}" }
-                # Both identifiers, so any output option can be built.
                 - name: query
                   value: >-
                     SELECT id::string AS uw_account_id,
                     account_number AS uw_account_number
                     FROM accounts
-                    WHERE id IN (SELECT unnest(string_to_array('{{item.ids}}', ','))::uuid)
-                - { name: format, value: json } # a `rows` expr needs json
+                    WHERE {{=inputs.parameters.source == 'migration' ? 'account_number' : 'id'}}
+                    IN (SELECT unnest(string_to_array('{{item.keys}}', ','))
+                    {{=inputs.parameters.source == 'migration' ? '' : '::uuid'}})
+                - { name: format, value: json }
                 - { name: output, value: /tmp/numbers.json }
                 - name: result-expr
                   value: "{{=inputs.parameters.output == 'csv' ? inputs.parameters['expr-csv'] : inputs.parameters.output == 'lines' ? inputs.parameters['expr-lines'] : inputs.parameters.output == 'id-and-number' ? inputs.parameters['expr-id-and-number'] : inputs.parameters['expr-quoted-csv']}}"
-
+                - {
+                    name: max-capture-rows,
+                    value: "{{inputs.parameters.max-capture-rows}}",
+                  }
                 - { name: db-type, value: cockroachdb }
                 - {
                     name: connection-string,
@@ -367,6 +396,57 @@ spec:
                 - {
                     name: ca-secret,
                     value: "{{inputs.parameters.account-ca-secret}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+
+        # 4) Optional: which of them energy-billing holds a bill for. Reported
+        #    rather than filtered — the answer lives in a third database, and
+        #    intersecting it with `mapped` would need a join this framework has
+        #    no step for. Both come back as comma lists.
+        - - name: check-bills
+            templateRef: { name: step-query, template: pg }
+            when: "{{inputs.parameters.with-bills}} == true"
+            withParam: "{{steps.chunk-keys.outputs.parameters.result}}"
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+                - { name: job-name, value: "check-bills-{{item.index}}" }
+                - name: query
+                  value: >-
+                    SELECT DISTINCT external_account_number AS gentrack_account_number
+                    FROM public.billing_period_accounts
+                    WHERE external_account_number IN
+                    (SELECT unnest(string_to_array('{{item.gentracks}}', ',')))
+                - { name: format, value: json }
+                - { name: output, value: /tmp/billed.json }
+                - {
+                    name: result-expr,
+                    value: 'join(map(rows, .gentrack_account_number), ",")',
+                  }
+                - {
+                    name: max-capture-rows,
+                    value: "{{inputs.parameters.max-capture-rows}}",
+                  }
+                - { name: db-type, value: postgres }
+                - {
+                    name: connection-string,
+                    value: "{{inputs.parameters.billing-connection-string}}",
+                  }
+                # RDS IAM: no password in the DSN. The sidecar and the SA's
+                # aws-role mint the token.
+                - { name: vault-sidecar, value: "true" }
+                - {
+                    name: runner-sa,
+                    value: "{{inputs.parameters.billing-runner-sa}}",
                   }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
