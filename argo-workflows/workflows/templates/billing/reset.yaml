@@ -36,6 +36,13 @@
 # account_number with NO period filter: it deletes EVERY bill the account has.
 # Right for a test account being re-billed, wrong where earlier periods matter.
 #
+# DNS. Go fires the A and AAAA queries in parallel out of one socket, and
+# conntrack's DNAT race drops one of them — the lookup then stalls 10s and reports
+# the trailing search suffix's NXDOMAIN, so lost packets read as `no such host`
+# against a Service that is perfectly healthy. `single-request-reopen` serialises
+# the two so they cannot collide; the rest keeps a retry aimed at the right suffix.
+# STOPGAP: belongs in exec-kube, which is the only thing that sees every Job.
+#
 # Reference-only: consumed by step-billing-bill-account via templateRef.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
@@ -219,6 +226,13 @@ spec:
                           imagePullSecrets:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
+                          # See DNS at the top of this file.
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
                           containers:
                             - name: reset-bills-for-account-rds
                               image: {{inputs.parameters.reset-image}}
@@ -322,6 +336,13 @@ spec:
                           imagePullSecrets:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
+                          # See DNS at the top of this file.
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
                           containers:
                             - name: reset-bills-for-account-crdb
                               image: {{inputs.parameters.reset-image}}
@@ -431,6 +452,13 @@ spec:
                           imagePullSecrets:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
+                          # See DNS at the top of this file.
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
                           containers:
                             - name: reset-bills-for-account-payment-details
                               image: {{inputs.parameters.reset-image}}

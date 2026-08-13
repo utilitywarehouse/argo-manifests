@@ -10,6 +10,14 @@ data:
       podMetadata:
         annotations:
           uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
+      # DNS. A lost UDP packet to kube-dns is what `wget: bad address
+      # 'vault-ca-cert.sys-vault:8100'` is — the vault-credentials init above,
+      # failing in a flat 5s against a healthy Service.
+      podSpecPatch: |
+        dnsConfig:
+          options:
+            - { name: attempts, value: "5" }
+            - { name: single-request-reopen }
       ttlStrategy:
         secondsAfterCompletion: 3600
         secondsAfterSuccess: 3600

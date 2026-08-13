@@ -517,6 +517,16 @@ spec:
                           imagePullSecrets:
                             - name: {{inputs.parameters.image-pull-secret}}
                           restartPolicy: Never
+                          # Same lost DNS packet as DNS in billing/reset.yaml, which
+                          # spells it out. grpc-go suppresses the NXDOMAIN, so it
+                          # arrives as `produced zero addresses` and never says DNS at
+                          # all — the ~10s stall before it is the tell.
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
                           containers:
                             - name: bill-run
                               image: {{inputs.parameters.bill-run-image}}
