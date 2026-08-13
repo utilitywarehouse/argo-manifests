@@ -163,6 +163,10 @@ spec:
           - { name: timeout, value: 5m }
           - { name: job-active-deadline, value: 7m }
           - { name: job-ttl, value: 24h }
+      outputs:
+        artifacts:
+          - name: blobs
+            from: "{{steps.energy-billing.outputs.artifacts.result}}"
       steps:
         - - name: energy-billing
             templateRef: { name: step-query, template: pg }
@@ -186,10 +190,11 @@ spec:
                 - { name: runner-sa, value: "{{inputs.parameters.runner-sa}}" }
                 - { name: format, value: ndjson }
                 - { name: output, value: /tmp/bpa.ndjson }
-                - { name: result-expr, value: "rows" }
+                - name: result-expr
+                  value: "map(filter(rows, .in_scope), .payload)"
                 - name: query
                   value: >-
-                    SELECT bpa.*, (CASE
+                    WITH scoped AS (SELECT bpa.*, (CASE
                     WHEN '{{inputs.parameters.gentrack-bill-numbers}}' <> '' THEN EXISTS
                     (SELECT 1 FROM unnest(string_to_array('{{inputs.parameters.gentrack-bill-numbers}}', ','))
                     AS b(num) WHERE position(btrim(b.num) in file_name) > 0)
@@ -205,7 +210,13 @@ spec:
                     END) AS in_scope
                     FROM public.billing_period_accounts bpa
                     WHERE external_account_number IN (SELECT btrim(x) FROM
-                    unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x))
+                    unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x)))
+                    SELECT external_account_number, bill_period_from, bill_period_to,
+                    file_name, bill_run_id, date_generated, last_modified,
+                    created_at, updated_at, processed_at,
+                    validation_issues, processing_issues, in_scope,
+                    CASE WHEN in_scope THEN payload END AS payload
+                    FROM scoped
                     ORDER BY bill_period_from, external_account_number
                 # Out of scope only. An in-scope blob carrying issues is exactly
                 # what reprocess-bills clears and re-sends, so failing here would

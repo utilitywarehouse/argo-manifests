@@ -123,7 +123,7 @@ spec:
         artifacts:
           # The Job's whole log stream, which carries the energy rows printed
           # below — exec-kube strips only the ARGO_RESULT_ line from it.
-          - name: logs
+          - name: energy-rows
             from: "{{steps.billing.outputs.artifacts.logs}}"
         parameters:
           - name: do-reset

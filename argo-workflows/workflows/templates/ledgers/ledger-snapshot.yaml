@@ -78,6 +78,10 @@ spec:
           # The Job's deadline is the wait plus this buffer.
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
+      outputs:
+        artifacts:
+          - name: ledger-{{inputs.parameters.phase}}
+            from: "{{steps.ledgers.outputs.artifacts.result}}"
       steps:
         - - name: ledgers
             templateRef: { name: step-query, template: pg }

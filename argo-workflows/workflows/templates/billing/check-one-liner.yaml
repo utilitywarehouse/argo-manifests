@@ -66,6 +66,9 @@ spec:
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
       outputs:
+        artifacts:
+          - name: one-liners
+            from: "{{steps.one-liners.outputs.artifacts.result}}"
         parameters:
           - name: result # the per-account one-liners, as JSON
             valueFrom:

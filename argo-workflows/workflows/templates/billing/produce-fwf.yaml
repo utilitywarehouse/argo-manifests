@@ -92,6 +92,9 @@ spec:
           - { name: job-active-deadline, value: 12m }
           - { name: job-ttl, value: 24h }
       outputs:
+        artifacts:
+          - name: fwf
+            from: "{{steps.billing.outputs.artifacts.result}}"
         parameters:
           - name: filename # segment name, WITHOUT the .snappy suffix
             valueFrom:

@@ -59,6 +59,10 @@ spec:
           # cannot outlive it.
           - { name: job-buffer, value: 5m }
           - { name: job-ttl, value: 24h }
+      outputs:
+        artifacts:
+          - name: transaction-log-{{inputs.parameters.phase}}
+            from: "{{steps.billing.outputs.artifacts.result}}"
       steps:
         - - name: billing
             templateRef: { name: step-query, template: bq }
