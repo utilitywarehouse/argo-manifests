@@ -100,8 +100,8 @@ spec:
                   value: >-
                     SELECT count(*) AS total,
                     count(*) FILTER (WHERE processed_at IS NULL) AS unprocessed,
-                    count(*) FILTER (WHERE validation_issues IS NOT NULL) AS invalid,
-                    count(*) FILTER (WHERE processing_issues IS NOT NULL) AS failed
+                    count(*) FILTER (WHERE nullif(btrim(validation_issues), '') IS NOT NULL) AS invalid,
+                    count(*) FILTER (WHERE nullif(btrim(processing_issues), '') IS NOT NULL) AS failed
                     FROM public.billing_period_accounts
                     WHERE external_account_number IN (SELECT btrim(x) FROM
                     unnest(string_to_array('{{inputs.parameters.external-account-number}}', ',')) AS t(x))
@@ -214,10 +214,10 @@ spec:
                   value: >-
                     any(rows, .in_scope) &&
                     !any(rows, !.in_scope && .processed_at == nil) &&
-                    !any(rows, !.in_scope && .validation_issues != nil) &&
-                    !any(rows, !.in_scope && .processing_issues != nil)
+                    !any(rows, !.in_scope && .validation_issues != nil && .validation_issues != '') &&
+                    !any(rows, !.in_scope && .processing_issues != nil && .processing_issues != '')
                 - name: assert-message
-                  value: "account [{{inputs.parameters.external-account-number}}]: {empty ? 'no billing_period_accounts rows at all — nothing has ever been ingested' : (!any(rows, .in_scope) ? 'nothing in this run scope — the account has blobs, but none for the period being billed' : 'standing damage outside this run scope — ' + string(len(filter(rows, !.in_scope && .processed_at == nil))) + ' unprocessed, ' + string(len(filter(rows, !.in_scope && .validation_issues != nil))) + ' with validation_issues, ' + string(len(filter(rows, !.in_scope && .processing_issues != nil))) + ' with processing_issues')}"
+                  value: "account [{{inputs.parameters.external-account-number}}]: {empty ? 'no billing_period_accounts rows at all — nothing has ever been ingested' : (!any(rows, .in_scope) ? 'nothing in this run scope — the account has blobs, but none for the period being billed' : 'standing damage outside this run scope — ' + string(len(filter(rows, !.in_scope && .processed_at == nil))) + ' unprocessed, ' + string(len(filter(rows, !.in_scope && .validation_issues != nil && .validation_issues != ''))) + ' with validation_issues, ' + string(len(filter(rows, !.in_scope && .processing_issues != nil && .processing_issues != ''))) + ' with processing_issues')}"
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - {
