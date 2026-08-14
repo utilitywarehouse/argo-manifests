@@ -1,12 +1,18 @@
 # =============================================================================
-# resolve-account — account-platform leaf: account number → account_id
+# resolve-account — account number → account_id, DERIVED not looked up
 # =============================================================================
 #   in : account-number  (one, or comma-separated many)
 #   out: account-id      (uuid; comma-joined when many numbers were given)
 #
-# One stage of the account pipeline: flow-test-account-select pipes account-id
-# into step-energy-resolve-service-identifiers for the account's supplies.
-# Submittable on its own too. See docs/data-flow.md.
+# The id is a pure function of the number — uuidv5(uuidv5(nil, "customer"),
+# account_number), the same derivation teams/billing/pkg/account uses — so this
+# computes it and cannot miss an account. No single store has every account:
+# legacy_account holds 326,775 account_api does not, account_api 134 the other
+# way, and account_api_20250214 (which this used to read) is a snapshot frozen
+# 2025-02-20, 515,235 behind.
+#
+# `require-exists` turns the existence columns into a gate. It is off by default:
+# the id does not depend on the account existing.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -15,8 +21,9 @@ metadata:
   namespace: qe-argo-workflows
   annotations:
     workflows.argoproj.io/description: >-
-      account-platform lookup: account-number → account_id (the `account-id` param).
-      Submittable, and consumed via templateRef by the account pipeline.
+      account-number → account_id, derived as the UUIDv5 account-platform mints
+      rather than looked up, so it cannot miss an account. Reports whether the
+      account exists; `require-exists` makes that a gate.
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: qe
@@ -27,7 +34,7 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: account-number } # one, or comma-separated many (number IN (...))
+      - { name: account-number }
   templates:
     - name: resolve
       inputs:
@@ -35,15 +42,16 @@ spec:
           - { name: account-number }
           - { name: account-cluster-name, value: dev-aws }
           - { name: account-namespace, value: account-platform }
+          - { name: namespace, value: "customer" }
+          - { name: require-exists, value: "false" }
           - { name: log-level, value: info }
           - { name: teardown, value: "true" }
       outputs:
         parameters:
-          - name: account-id # customer_account_id; comma-joined when many numbers were given
+          - name: account-id
             valueFrom:
               parameter: "{{steps.account-platform.outputs.parameters.result}}"
       steps:
-        # account-platform: account-number → account_id (point lookup on `number`).
         - - name: account-platform
             templateRef: { name: step-query, template: pg }
             arguments:
@@ -57,20 +65,28 @@ spec:
                     value: "{{inputs.parameters.account-namespace}}",
                   }
                 - { name: job-name, value: resolve-account-id }
+                # CASE short-circuits, so legacy_account — no index on
+                # account_number, ~10s scan — is only read when account_api misses.
                 - name: query
                   value: >-
-                    SELECT id::string AS id FROM accounts
-                    WHERE account_number IN (SELECT unnest(string_to_array('{{inputs.parameters.account-number}}', ',')))
+                    SELECT n AS account_number,
+                    uuid_generate_v5(uuid_generate_v5(uuid_nil(), '{{inputs.parameters.namespace}}'), n)::string AS id,
+                    EXISTS (SELECT 1 FROM accounts a WHERE a.account_number::string = n) AS in_account_api,
+                    CASE WHEN EXISTS (SELECT 1 FROM accounts a WHERE a.account_number::string = n)
+                    THEN true
+                    ELSE EXISTS (SELECT 1 FROM legacy_account.legacy_account l WHERE l.account_number = n)
+                    END AS exists_anywhere
+                    FROM unnest(string_to_array('{{inputs.parameters.account-number}}', ',')) AS n
+                - name: assert
+                  value: "{{=inputs.parameters['require-exists'] == 'true' ? 'all(rows, .exists_anywhere)' : ''}}"
+                - name: assert-message
+                  value: "no such account in account_api or legacy_account: {join(map(filter(rows, !.exists_anywhere), .account_number), ', ')}"
                 - { name: format, value: csv }
                 - { name: output, value: /tmp/out.csv }
-                - { name: assert, value: "!empty" }
-                - name: assert-message
-                  value: "resolve-account: no accounts rows for account-number(s)={{inputs.parameters.account-number}}"
                 - { name: result-expr, value: 'join(map(rows, .id), ",")' }
                 - { name: db-type, value: cockroachdb }
                 - name: connection-string
-                  value: "postgresql://accounts@cockroachdb-proxy:26257/account_api_20250214?sslmode=verify-full"
-                # cockroachdb wants a client cert; the CA mints one in-cluster.
+                  value: "postgresql://accounts@cockroachdb-proxy:26257/account_api?sslmode=verify-full"
                 - { name: ca-secret, value: ca-auth-key }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
