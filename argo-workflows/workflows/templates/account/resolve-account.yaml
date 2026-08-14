@@ -78,7 +78,7 @@ spec:
                     END AS exists_anywhere
                     FROM unnest(string_to_array('{{inputs.parameters.account-number}}', ',')) AS n
                 - name: assert
-                  value: "{{=inputs.parameters['require-exists'] == 'true' ? 'all(rows, .exists_anywhere)' : ''}}"
+                  value: "{{=inputs.parameters['require-exists'] == 'true' ? 'all(rows, .exists_anywhere)' : 'true'}}"
                 - name: assert-message
                   value: "no such account in account_api or legacy_account: {join(map(filter(rows, !.exists_anywhere), .account_number), ', ')}"
                 - { name: format, value: csv }
