@@ -494,8 +494,8 @@ spec:
                                   # `invalid` for `failed`.
                                   TALLY="SELECT count(*) AS total,
                                          count(*) FILTER (WHERE processed_at IS NULL) AS unprocessed,
-                                         count(*) FILTER (WHERE validation_issues IS NOT NULL) AS invalid,
-                                         count(*) FILTER (WHERE processing_issues IS NOT NULL) AS failed
+                                         count(*) FILTER (WHERE nullif(btrim(validation_issues), '') IS NOT NULL) AS invalid,
+                                         count(*) FILTER (WHERE nullif(btrim(processing_issues), '') IS NOT NULL) AS failed
                                          FROM public.billing_period_accounts WHERE $SCOPE"
 
                                   # The whole poll, as two predicates. --failure-expr fails fast:
@@ -520,7 +520,7 @@ spec:
                                   /app/executor --format csv --output /tmp/bad.csv \
                                     --query "SELECT external_account_number, bill_period_from, file_name, validation_issues, processing_issues
                                              FROM public.billing_period_accounts
-                                             WHERE $SCOPE AND (validation_issues IS NOT NULL OR processing_issues IS NOT NULL)"
+                                             WHERE $SCOPE AND (nullif(btrim(validation_issues), '') IS NOT NULL OR nullif(btrim(processing_issues), '') IS NOT NULL)"
                                   if [ "$(wc -l < /tmp/bad.csv)" -gt 1 ]; then
                                     echo "rows the adapter cannot process:"
                                     cat /tmp/bad.csv
