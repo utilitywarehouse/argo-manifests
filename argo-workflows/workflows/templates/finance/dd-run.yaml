@@ -173,9 +173,9 @@ spec:
                 - name: message
                   value: >-
                     UPLOADED, NOT PROCESSED — the file name is the produce-file
-                    node's result, and its fabricate container logged the
-                    transaction_id each line will be booked as. Resuming books
-                    them into the transaction log.
+                    node's result, and that node lists every line it wrote with
+                    the transaction_id it will be booked as. Resuming books them
+                    into the transaction log.
 
         - - name: process
             when: "{{inputs.parameters.dry-run}} != true"
@@ -199,7 +199,7 @@ spec:
         # The ledger assert is "every account holds a payment entry" — it does
         # not pin the entry to THIS run. The transaction log's wait does.
         - - name: ledger-snapshot
-            when: "{{inputs.parameters.verify}} == true and {{inputs.parameters.dry-run}} != true"
+            when: "{{inputs.parameters.verify}} == true && {{inputs.parameters.dry-run}} != true"
             templateRef:
               { name: step-ledgers-ledger-snapshot, template: snapshot }
             arguments:
@@ -221,7 +221,7 @@ spec:
                   }
 
           - name: transaction-log-snapshot
-            when: "{{inputs.parameters.verify}} == true and {{inputs.parameters.dry-run}} != true"
+            when: "{{inputs.parameters.verify}} == true && {{inputs.parameters.dry-run}} != true"
             templateRef:
               {
                 name: step-billing-transaction-log-snapshot,
@@ -459,7 +459,10 @@ spec:
                                   else
                                     cp /work/numbers.txt /work/accounts.txt
                                   fi
-                                  /svc file --input /work/accounts.txt > /work/name
+                                  # exec-kube captures the main container only, so the
+                                  # diagnostics are kept for the upload container to print.
+                                  /svc file --input /work/accounts.txt > /work/name 2> /work/fabricate.log
+                                  cat /work/fabricate.log >&2
                                   echo "fabricated $(cat /work/name)"
                               env:
                                 - { name: INPUT, value: /work/accounts.txt }
@@ -485,6 +488,7 @@ spec:
                               args:
                                 - |
                                   set -eu
+                                  cat /work/fabricate.log >&2
                                   name=$(cat /work/name)
                                   if [ "{{inputs.parameters.dry-run}}" = "true" ]; then
                                     echo "dry-run: fabricated $name, skipping the upload"
@@ -573,6 +577,7 @@ spec:
                                 - |
                                   set -eu
                                   /svc process --file "{{inputs.parameters.file}}"
+                                  echo "ARGO_RESULT_OUTPUT={{inputs.parameters.file}}"
                               env:
                                 - { name: FILE, value: "{{inputs.parameters.file}}" }
                                 - { name: FABRICATOR_ADDRESS, value: "{{inputs.parameters.fabricator-address}}" }
