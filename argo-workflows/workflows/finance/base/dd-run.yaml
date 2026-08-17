@@ -1,0 +1,75 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: flow-finance-dd-run
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Collect one or more billed accounts by direct debit in dev
+  labels:
+    app.kubernetes.io/component: flow
+    workflows.argoproj.io/creator: payments
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: finance
+    data.uw.systems/capability: dd-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-numbers } # UW customer account number(s), comma-separated — accounts that already have a bill
+      # default safe: preflight + fabricate only. No invoice moves, nothing is uploaded, nothing is booked
+      - name: dry-run
+        value: "true"
+        enum: ["true", "false"]
+      - name: validation-mode # attended pauses before the bucket and before processing
+        value: "attended"
+        enum: ["attended", "unattended"]
+      - { name: invoice-id, value: "" } # one account only; needed when it has two invoices due the same day
+      # Empty takes each account's own invoice plus adjustments, which is the usual
+      # run. An amount here needs no invoice at all
+      - { name: amount, value: "" }
+      - name: type # empty lets the amount's sign decide
+        value: ""
+        enum: ["", "collection", "refund"]
+      # true => also wait for the payment in the ledger and BigQuery's transaction log
+      - name: verify
+        value: "false"
+        enum: ["true", "false"]
+      - name: log-level
+        value: "info"
+        enum: ["info", "debug"]
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: dry-run, value: "true" }
+          - { name: validation-mode, value: attended }
+          - { name: invoice-id, value: "" }
+          - { name: amount, value: "" }
+          - { name: type, value: "" }
+          - { name: verify, value: "false" }
+          - { name: log-level, value: info }
+      steps:
+        - - name: dd-run
+            templateRef: { name: step-finance-dd-run, template: main }
+            arguments:
+              parameters:
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: validation-mode,
+                    value: "{{inputs.parameters.validation-mode}}",
+                  }
+                - {
+                    name: invoice-id,
+                    value: "{{inputs.parameters.invoice-id}}",
+                  }
+                - { name: amount, value: "{{inputs.parameters.amount}}" }
+                - { name: type, value: "{{inputs.parameters.type}}" }
+                - { name: verify, value: "{{inputs.parameters.verify}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
