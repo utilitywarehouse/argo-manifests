@@ -1,0 +1,580 @@
+# =============================================================================
+# dd-run — collect a bill by direct debit in dev-aws/finance
+# =============================================================================
+#   preflight     `dd-run request --dry-run`: the invoice, and the account ids
+#   request       moves the due date, starts a scheduler run, waits for the event
+#   PAUSE
+#   produce-file  `dd-run file` -> emptyDir, then upload-s3 -> the file name
+#   PAUSE
+#   process       the uploaded file becomes transactions
+#   verify        the ledger and BigQuery's transaction log, on `verify=true`
+#
+# S3 CREDENTIALS. The upload Job borrows `dd-files-s3-uploader`, the service
+# account that writes this bucket in the first place: its
+# `vault.uw.systems/aws-role` names the role, and the pod annotation
+# `uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws` makes Kyverno
+# inject the vault-credentials-agent that serves it on
+# AWS_CONTAINER_CREDENTIALS_FULL_URI. Both are required — the SA alone gets
+# nothing.
+#
+# ⚠️ A scheduler run is NOT scoped to these accounts: it raises every unprocessed
+# invoice due in its window.
+#
+# ⚠️ The file name decides the transaction ids and the tx log drops ids it has
+# seen, so a name is minted per run and `process` must be given that one.
+#
+# Reference-only: consumed by flow-finance-dd-run.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-finance-dd-run
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI (use the flow-finance-dd-run artefact). Collect a
+      billed account by direct debit in dev: request the payment, fabricate and
+      upload the file, and have it booked as transactions.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: payments
+    workflows.argoproj.io/invocation: reference-only
+    data.uw.systems/system: finance
+    data.uw.systems/capability: dd-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      - { name: account-numbers } # UW account number(s), comma-separated
+      - { name: validation-mode, value: attended }
+      - { name: dry-run, value: "true" } # true => preflight + fabricate only
+      - { name: verify, value: "false" }
+      - { name: invoice-id, value: "" } # one account only; needed when it has two invoices due the same day
+      - { name: amount, value: "" } # empty => each account's invoice plus adjustments
+      - { name: type, value: "" } # collection | refund; empty => the amount's sign
+      - { name: log-level, value: info }
+  templates:
+    - name: main
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: validation-mode, value: attended }
+          - { name: dry-run, value: "true" }
+          - { name: verify, value: "false" }
+          - { name: invoice-id, value: "" }
+          - { name: amount, value: "" }
+          - { name: type, value: "" }
+          - { name: log-level, value: info }
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: finance }
+          - { name: ledgers-cluster-name, value: dev-merit }
+          - { name: ledgers-namespace, value: ledgers }
+          - { name: billing-cluster-name, value: dev-merit }
+          - { name: billing-namespace, value: billing }
+      steps:
+        # Read-only, and the last step that is. Its result is
+        # `<accountIDs>;<invoiceIDs>`, both comma-joined in input order: the
+        # verify steps take the first half, produce-file the second, so the file
+        # carries the invoice whose payment was requested.
+        - - name: preflight
+            template: request
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: invoice-id,
+                    value: "{{inputs.parameters.invoice-id}}",
+                  }
+                - { name: dry-run, value: "true" }
+                - { name: job-name, value: dd-run-preflight }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        - - name: request
+            when: "{{inputs.parameters.dry-run}} != true"
+            template: request
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: invoice-id,
+                    value: "{{inputs.parameters.invoice-id}}",
+                  }
+                - { name: dry-run, value: "false" }
+                - { name: job-name, value: dd-run-request }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        - - name: pause-before-produce-file
+            templateRef: { name: step-pause, template: pause }
+            arguments:
+              parameters:
+                - name: active
+                  value: "{{inputs.parameters.validation-mode}}"
+                - name: message
+                  value: >-
+                    PAYMENT REQUESTED, BEFORE THE BUCKET — check the request node
+                    for the collection_method the engine settled on:
+                    direct_debit collects, direct_credit refunds,
+                    non_direct_debit means no direct debit file will collect it.
+                    The event is in Kibana under invoice-payment-events. Resuming
+                    fabricates the file and, unless dry-run, uploads it.
+
+        - - name: produce-file
+            template: produce-file
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - name: resolved # <accountIDs>;<invoiceIDs>; the shell takes the second half
+                  value: "{{steps.preflight.outputs.parameters.resolved}}"
+                - { name: amount, value: "{{inputs.parameters.amount}}" }
+                - { name: type, value: "{{inputs.parameters.type}}" }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        - - name: pause-before-process
+            templateRef: { name: step-pause, template: pause }
+            arguments:
+              parameters:
+                - name: active
+                  value: "{{inputs.parameters.validation-mode}}"
+                - name: message
+                  value: >-
+                    UPLOADED, NOT PROCESSED — the file name is the produce-file
+                    node's result, and its fabricate container logged the
+                    transaction_id each line will be booked as. Resuming books
+                    them into the transaction log.
+
+        - - name: process
+            when: "{{inputs.parameters.dry-run}} != true"
+            template: process
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: file,
+                    value: "{{steps.produce-file.outputs.parameters.filename}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
+        # The ledger assert is "every account holds a payment entry" — it does
+        # not pin the entry to THIS run. The transaction log's wait does.
+        - - name: ledger-snapshot
+            when: "{{inputs.parameters.verify}} == true and {{inputs.parameters.dry-run}} != true"
+            templateRef:
+              { name: step-ledgers-ledger-snapshot, template: snapshot }
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: account-ids
+                  value: "{{=split(steps.preflight.outputs.parameters.resolved, ';')[0]}}"
+                - { name: phase, value: dd-run }
+                - { name: wait-for-entry, value: 5m }
+                - name: bill-expr
+                  value: "len(uniq(map(filter(rows, ._table == 'ledger_entry' and .row.type == 'payment'), .account_id))) == len(filter(rows, ._table == '_account'))"
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.ledgers-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.ledgers-namespace}}",
+                  }
+
+          - name: transaction-log-snapshot
+            when: "{{inputs.parameters.verify}} == true and {{inputs.parameters.dry-run}} != true"
+            templateRef:
+              {
+                name: step-billing-transaction-log-snapshot,
+                template: snapshot,
+              }
+            arguments:
+              parameters:
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: account-ids
+                  value: "{{=split(steps.preflight.outputs.parameters.resolved, ';')[0]}}"
+                - { name: phase, value: dd-run }
+                - { name: wait-for-row, value: 5m }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.billing-cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.billing-namespace}}",
+                  }
+
+    # -------------------------------------------------------------------------
+    # request — `dd-run request`; dry-run makes it the preflight. Emits
+    # `<accountIDs>;<invoiceIDs>` on stdout, its logs on stderr.
+    # -------------------------------------------------------------------------
+    - name: request
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: invoice-id, value: "" }
+          - { name: dry-run, value: "true" }
+          - { name: job-name }
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: finance }
+          - {
+              name: dd-run-image,
+              value: "registry.uw.systems/payments/dd-run:main",
+            }
+          - {
+              name: mongo-address,
+              value: "mongodb://invoice-payment-engine-mongo-cluster.finance.svc.cluster.aws:27017",
+            }
+          - { name: mongo-db, value: app }
+          - { name: mongo-username, value: app }
+          - { name: mongo-secret, value: invoice-payment-engine-mongo-cluster }
+          - { name: mongo-password-key, value: app.password }
+          - {
+              name: scheduler-address,
+              value: "invoice-payment-engine-scheduler:8090",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 15m }
+          - { name: job-active-deadline, value: 17m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: resolved # <accountIDs>;<invoiceIDs>
+            valueFrom:
+              parameter: "{{steps.finance.outputs.parameters.result}}"
+      steps:
+        - - name: finance
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: "{{inputs.parameters.job-name}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          # See DNS at the top of billing/reset.yaml.
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
+                          containers:
+                            - name: dd-run-request
+                              image: {{inputs.parameters.dd-run-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /tmp/accounts.txt
+                                  /svc request --input /tmp/accounts.txt --dry-run={{inputs.parameters.dry-run}} > /tmp/resolved
+                                  echo "ARGO_RESULT_OUTPUT=$(cat /tmp/resolved)"
+                              env:
+                                - { name: INPUT, value: /tmp/accounts.txt }
+                                - { name: INVOICE_ID, value: "{{inputs.parameters.invoice-id}}" }
+                                - { name: MONGO_ADDRESS, value: "{{inputs.parameters.mongo-address}}" }
+                                - { name: MONGO_DB, value: "{{inputs.parameters.mongo-db}}" }
+                                - { name: MONGO_USERNAME, value: "{{inputs.parameters.mongo-username}}" }
+                                - name: MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.mongo-secret}}
+                                      key: {{inputs.parameters.mongo-password-key}}
+                                - { name: SCHEDULER_ADDRESS, value: "{{inputs.parameters.scheduler-address}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+
+    # -------------------------------------------------------------------------
+    # produce-file — fabricate into an emptyDir, then upload it. One Job, because
+    # exec-kube captures a Job's output but cannot pass a file between two.
+    #
+    # The pod annotation and the service account are BOTH what get AWS
+    # credentials here; see S3 CREDENTIALS at the top.
+    # -------------------------------------------------------------------------
+    - name: produce-file
+      inputs:
+        parameters:
+          - { name: account-numbers }
+          - { name: resolved, value: "" }
+          - { name: amount, value: "" }
+          - { name: type, value: "" }
+          - { name: dry-run, value: "false" }
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: finance }
+          - {
+              name: dd-run-image,
+              value: "registry.uw.systems/payments/dd-run:main",
+            }
+          - {
+              name: upload-s3-image,
+              value: "registry.uw.systems/dev-enablement/upload-s3:main",
+            }
+          - {
+              name: mongo-address,
+              value: "mongodb://invoice-payment-engine-mongo-cluster.finance.svc.cluster.aws:27017",
+            }
+          - { name: mongo-db, value: app }
+          - { name: mongo-username, value: app }
+          - { name: mongo-secret, value: invoice-payment-engine-mongo-cluster }
+          - { name: mongo-password-key, value: app.password }
+          - { name: bucket, value: uw-dev-finance-direct-debit-files }
+          - { name: sse, value: AES256 }
+          - { name: aws-region, value: eu-west-1 }
+          - { name: runner-sa, value: dd-files-s3-uploader }
+          - { name: vault-sidecar, value: vault-sidecar-aws }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 12m }
+          - { name: job-ttl, value: 24h }
+      outputs:
+        parameters:
+          - name: filename
+            valueFrom:
+              parameter: "{{steps.finance.outputs.parameters.result}}"
+      steps:
+        - - name: finance
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: dd-run-produce-file }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        metadata:
+                          annotations:
+                            # Kyverno reads this and injects the
+                            # vault-credentials-agent that serves the SA's AWS role.
+                            uw.systems/kyverno-inject-sidecar-request: {{inputs.parameters.vault-sidecar}}
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
+                          volumes:
+                            - name: work
+                              emptyDir: {}
+                          initContainers:
+                            - name: fabricate
+                              image: {{inputs.parameters.dd-run-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /work/numbers.txt
+                                  printf '%s' "{{inputs.parameters.resolved}}" | cut -d';' -f2 | tr ',' '\n' | sed '/^$/d' > /work/invoices.txt
+                                  # Column 2 pins each account to the invoice the
+                                  # preflight resolved; without it `file` resolves again.
+                                  if [ -s /work/invoices.txt ]; then
+                                    paste /work/numbers.txt /work/invoices.txt > /work/accounts.txt
+                                  else
+                                    cp /work/numbers.txt /work/accounts.txt
+                                  fi
+                                  /svc file --input /work/accounts.txt > /work/name
+                                  echo "fabricated $(cat /work/name)"
+                              env:
+                                - { name: INPUT, value: /work/accounts.txt }
+                                - { name: OUTPUT_DIR, value: /work }
+                                - { name: AMOUNT, value: "{{inputs.parameters.amount}}" }
+                                - { name: TYPE, value: "{{inputs.parameters.type}}" }
+                                - { name: MONGO_ADDRESS, value: "{{inputs.parameters.mongo-address}}" }
+                                - { name: MONGO_DB, value: "{{inputs.parameters.mongo-db}}" }
+                                - { name: MONGO_USERNAME, value: "{{inputs.parameters.mongo-username}}" }
+                                - name: MONGO_PASSWORD
+                                  valueFrom:
+                                    secretKeyRef:
+                                      name: {{inputs.parameters.mongo-secret}}
+                                      key: {{inputs.parameters.mongo-password-key}}
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                              volumeMounts:
+                                - { name: work, mountPath: /work }
+                          containers:
+                            - name: upload
+                              image: {{inputs.parameters.upload-s3-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  name=$(cat /work/name)
+                                  if [ "{{inputs.parameters.dry-run}}" = "true" ]; then
+                                    echo "dry-run: fabricated $name, skipping the upload"
+                                  else
+                                    FILE="/work/$name" KEY="$name" /app/executor
+                                  fi
+                                  echo "ARGO_RESULT_OUTPUT=$name"
+                              env:
+                                - { name: BUCKET, value: "{{inputs.parameters.bucket}}" }
+                                - { name: SSE, value: "{{inputs.parameters.sse}}" }
+                                # No keys: the injected agent serves the SA's role
+                                # and the SDK reads AWS_CONTAINER_CREDENTIALS_FULL_URI.
+                                - { name: AWS_REGION, value: "{{inputs.parameters.aws-region}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                              volumeMounts:
+                                - { name: work, mountPath: /work }
+
+    # -------------------------------------------------------------------------
+    # process — one call. The fabricator reads the object from the bucket itself.
+    # -------------------------------------------------------------------------
+    - name: process
+      inputs:
+        parameters:
+          - { name: file }
+          - { name: cluster-name, value: dev-aws }
+          - { name: target-namespace, value: finance }
+          - {
+              name: dd-run-image,
+              value: "registry.uw.systems/payments/dd-run:main",
+            }
+          - {
+              name: fabricator-address,
+              value: "dd-transaction-fabricator:8090",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 5m }
+          - { name: job-active-deadline, value: 7m }
+          - { name: job-ttl, value: 24h }
+      steps:
+        - - name: finance
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: dd-run-process }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          dnsConfig:
+                            options:
+                              - { name: single-request-reopen }
+                              - { name: ndots, value: "1" }
+                              - { name: timeout, value: "2" }
+                              - { name: attempts, value: "3" }
+                          containers:
+                            - name: dd-run-process
+                              image: {{inputs.parameters.dd-run-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  /svc process --file "{{inputs.parameters.file}}"
+                              env:
+                                - { name: FILE, value: "{{inputs.parameters.file}}" }
+                                - { name: FABRICATOR_ADDRESS, value: "{{inputs.parameters.fabricator-address}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }

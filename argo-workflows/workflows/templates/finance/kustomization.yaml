@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - dd-run.yaml
+
+configMapGenerator:
+  - name: finance-image-versions
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - dd-run=registry.uw.systems/payments/dd-run:chore-payment-wkfl-scripts
+      - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
+generatorOptions:
+  disableNameSuffixHash: true
+
+replacements:
+  - source:
+      { kind: ConfigMap, name: finance-image-versions, fieldPath: data.dd-run }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-finance-dd-run }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=dd-run-image].value
+  - source:
+      {
+        kind: ConfigMap,
+        name: finance-image-versions,
+        fieldPath: data.upload-s3,
+      }
+    targets:
+      - select: { kind: WorkflowTemplate, name: step-finance-dd-run }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=upload-s3-image].value

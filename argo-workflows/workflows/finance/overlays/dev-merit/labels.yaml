@@ -1,0 +1,6 @@
+- op: add
+  path: /metadata/labels/data.uw.systems~1cluster
+  value: dev-aws
+- op: add
+  path: /metadata/labels/data.uw.systems~1namespace
+  value: finance
