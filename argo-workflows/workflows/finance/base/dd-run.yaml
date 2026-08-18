@@ -36,6 +36,7 @@ spec:
       - name: verify
         value: "false"
         enum: ["true", "false"]
+      - { name: verify-wait, value: 10m } # how long verify waits for the payment to reach the ledger and the tx log
       - name: log-level
         value: "info"
         enum: ["info", "debug"]
@@ -50,6 +51,7 @@ spec:
           - { name: amount, value: "" }
           - { name: type, value: "" }
           - { name: verify, value: "false" }
+          - { name: verify-wait, value: 10m }
           - { name: log-level, value: info }
       steps:
         - - name: dd-run
@@ -72,4 +74,8 @@ spec:
                 - { name: amount, value: "{{inputs.parameters.amount}}" }
                 - { name: type, value: "{{inputs.parameters.type}}" }
                 - { name: verify, value: "{{inputs.parameters.verify}}" }
+                - {
+                    name: verify-wait,
+                    value: "{{inputs.parameters.verify-wait}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }

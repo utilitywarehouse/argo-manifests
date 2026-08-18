@@ -9,10 +9,11 @@
 # writer prints as [146,37,46,…]. to_jsonb() converts server-side, so only the
 # top-level column needs the cast.
 #
-# `bill_entry` is the point of the run: a ledger_entry of type 'bill' created at
-# or after `since`, narrowed to one invoice when invoice-number is given. The
-# other entries a commit writes (budget_plan_payment,
-# budget_plan_charges_and_usage) land alongside it and do NOT satisfy it.
+# `bill_entry` is the point of the run: a ledger_entry of type `entry-type`
+# ('bill' after a commit, 'payment' after a collection) created at or after
+# `since`, narrowed to one invoice when invoice-number is given. The other
+# entries a commit writes (budget_plan_payment, budget_plan_charges_and_usage)
+# land alongside it and do NOT satisfy it.
 #
 # EVERY account, not the first. Both predicates count accounts against the
 # `_account` rows — one per account asked for, from the ids CTE rather than the
@@ -60,7 +61,8 @@ spec:
           - { name: phase, value: manual }
           - { name: wait-for-entry, value: 0s }
           - { name: since, value: "1970-01-01T00:00:00Z" }
-          - { name: invoice-number, value: "" } # narrows the bill entry to one invoice; empty => any
+          - { name: entry-type, value: bill } # the ledger_entry type to wait for: bill after a commit, payment after a collection
+          - { name: invoice-number, value: "" } # narrows the entry to one invoice; empty => any
           # One Secret holds the whole DSN; its password makes query-pg skip
           # RDS IAM.
           - { name: dsn-secret, value: rds-readonly }
@@ -70,7 +72,7 @@ spec:
           # Named so the conditionals below stay legible.
           - name: ledger-expr # every account has a ledger — asserted pre-commit
             value: "len(uniq(map(filter(rows, ._table == 'ledger'), .account_id))) == len(filter(rows, ._table == '_account'))"
-          - name: bill-expr # every account has its bill entry — waited for post-commit
+          - name: bill-expr # every account has its `entry-type` entry — waited for post-commit
             value: "len(uniq(map(filter(rows, .bill_entry), .account_id))) == len(filter(rows, ._table == '_account'))"
           - { name: poll-interval, value: "20" }
           - { name: heartbeat, value: "60" }
@@ -106,10 +108,11 @@ spec:
                   value: "{{=inputs.parameters['wait-for-entry'] == '0s' ? inputs.parameters['ledger-expr'] : ''}}"
                 - name: assert-message
                   value: >-
-                    the ledger does not hold what this bill run requires: every
-                    account needs a ledger, and after commit a 'bill' entry
-                    created since `since`. {rowCount} rows dumped — read the
-                    _account rows with no ledger or no bill entry beside them.
+                    the ledger does not hold what this run requires: every
+                    account needs a ledger, and a
+                    '{{inputs.parameters.entry-type}}' entry created since
+                    `since`. {rowCount} rows dumped — read the _account rows
+                    with no ledger or no such entry beside them.
                 - { name: format, value: ndjson }
                 - { name: output, value: /tmp/snap.ndjson }
                 # The dump is the result, emitted once after the poll settles.
@@ -149,7 +152,7 @@ spec:
                     JOIN ids i ON i.account_id = l.account_id
                     UNION ALL
                     SELECT 'ledger_entry', l.account_id::text,
-                    le.type = 'bill' AND le.created_at >= (SELECT ts FROM since)
+                    le.type = '{{inputs.parameters.entry-type}}' AND le.created_at >= (SELECT ts FROM since)
                     AND ('{{inputs.parameters.invoice-number}}' = ''
                     OR le.source_reference = '{{inputs.parameters.invoice-number}}'),
                     to_jsonb(le)
