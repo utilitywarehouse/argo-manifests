@@ -17,11 +17,21 @@
 # AWS_CONTAINER_CREDENTIALS_FULL_URI. Both are required — the SA alone gets
 # nothing.
 #
-# ⚠️ A scheduler run is NOT scoped to these accounts: it raises every unprocessed
-# invoice due in its window.
+# The scheduler run is scoped to the invoices `request` resolved: it names them
+# on Trigger, so it raises those and leaves the rest of the window alone. It
+# takes no entry in the engine's run log either, so it holds no monthly DD run
+# up and Resume cannot inherit it and sweep the window unasked.
+#
+# ⚠️ It is still refused while a window somebody else left unfinished is
+# outstanding, the same as any other run.
 #
 # ⚠️ The file name decides the transaction ids and the tx log drops ids it has
 # seen, so a name is minted per run and `process` must be given that one.
+#
+# UNATTENDED. The pauses are all that `validation-mode: unattended` drops; every
+# wait is inside a step. `request` waits for the engine to raise the event, and
+# the verify steps wait `verify-wait` for an entry or row created since the
+# workflow started — which is what makes them a gate rather than a dump.
 #
 # Reference-only: consumed by flow-finance-dd-run.
 # =============================================================================
@@ -50,6 +60,7 @@ spec:
       - { name: validation-mode, value: attended }
       - { name: dry-run, value: "true" } # true => preflight + fabricate only
       - { name: verify, value: "false" }
+      - { name: verify-wait, value: 10m } # how long the verify steps wait for the payment to land
       - { name: invoice-id, value: "" } # one account only; needed when it has two invoices due the same day
       - { name: amount, value: "" } # empty => each account's invoice plus adjustments
       - { name: type, value: "" } # collection | refund; empty => the amount's sign
@@ -62,6 +73,7 @@ spec:
           - { name: validation-mode, value: attended }
           - { name: dry-run, value: "true" }
           - { name: verify, value: "false" }
+          - { name: verify-wait, value: 10m }
           - { name: invoice-id, value: "" }
           - { name: amount, value: "" }
           - { name: type, value: "" }
@@ -73,6 +85,36 @@ spec:
           - { name: billing-cluster-name, value: dev-merit }
           - { name: billing-namespace, value: billing }
       steps:
+        # The engine reads an account and a balance for every invoice it
+        # raises, and aborts the whole run when either is missing — after
+        # Trigger has already answered OK. This fills them in first; on a dry
+        # run it only reports what is missing, which is what preflight would
+        # then fail on.
+        - - name: setup
+            template: request
+            arguments:
+              parameters:
+                - { name: command, value: setup }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: account-numbers,
+                    value: "{{inputs.parameters.account-numbers}}",
+                  }
+                - {
+                    name: invoice-id,
+                    value: "{{inputs.parameters.invoice-id}}",
+                  }
+                - { name: dry-run, value: "{{inputs.parameters.dry-run}}" }
+                - { name: job-name, value: dd-run-setup }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+
         # Read-only, and the last step that is. Its result is
         # `<accountIDs>;<invoiceIDs>`, both comma-joined in input order: the
         # verify steps take the first half, produce-file the second, so the file
@@ -208,9 +250,15 @@ spec:
                 - name: account-ids
                   value: "{{=split(steps.preflight.outputs.parameters.resolved, ';')[0]}}"
                 - { name: phase, value: dd-run }
-                - { name: wait-for-entry, value: 5m }
-                - name: bill-expr
-                  value: "len(uniq(map(filter(rows, ._table == 'ledger_entry' and .row.type == 'payment'), .account_id))) == len(filter(rows, ._table == '_account'))"
+                - { name: entry-type, value: payment }
+                - {
+                    name: wait-for-entry,
+                    value: "{{inputs.parameters.verify-wait}}",
+                  }
+                - {
+                    name: since,
+                    value: "{{workflow.creationTimestamp.RFC3339}}",
+                  }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.ledgers-cluster-name}}",
@@ -233,7 +281,14 @@ spec:
                 - name: account-ids
                   value: "{{=split(steps.preflight.outputs.parameters.resolved, ';')[0]}}"
                 - { name: phase, value: dd-run }
-                - { name: wait-for-row, value: 5m }
+                - {
+                    name: wait-for-row,
+                    value: "{{inputs.parameters.verify-wait}}",
+                  }
+                - {
+                    name: since,
+                    value: "{{workflow.creationTimestamp.RFC3339}}",
+                  }
                 - {
                     name: cluster-name,
                     value: "{{inputs.parameters.billing-cluster-name}}",
@@ -244,12 +299,17 @@ spec:
                   }
 
     # -------------------------------------------------------------------------
-    # request — `dd-run request`; dry-run makes it the preflight. Emits
-    # `<accountIDs>;<invoiceIDs>` on stdout, its logs on stderr.
+    # request — one `dd-run` command against the engine's mongo, named by
+    # `command`: `setup` fills in the reference data, `request` asks for the
+    # payment and dry-run makes it the preflight.
+    #
+    # `request` emits `<accountIDs>;<invoiceIDs>` on stdout, its logs on stderr;
+    # `setup` reports on stderr and emits nothing.
     # -------------------------------------------------------------------------
     - name: request
       inputs:
         parameters:
+          - { name: command, value: request }
           - { name: account-numbers }
           - { name: invoice-id, value: "" }
           - { name: dry-run, value: "true" }
@@ -323,7 +383,7 @@ spec:
                               - { name: timeout, value: "2" }
                               - { name: attempts, value: "3" }
                           containers:
-                            - name: dd-run-request
+                            - name: dd-run-{{inputs.parameters.command}}
                               image: {{inputs.parameters.dd-run-image}}
                               imagePullPolicy: Always
                               command: [sh, -c]
@@ -331,7 +391,7 @@ spec:
                                 - |
                                   set -eu
                                   printf '%s' "{{inputs.parameters.account-numbers}}" | tr ',' '\n' > /tmp/accounts.txt
-                                  /svc request --input /tmp/accounts.txt --dry-run={{inputs.parameters.dry-run}} > /tmp/resolved
+                                  /svc {{inputs.parameters.command}} --input /tmp/accounts.txt --dry-run={{inputs.parameters.dry-run}} > /tmp/resolved
                                   echo "ARGO_RESULT_OUTPUT=$(cat /tmp/resolved)"
                               env:
                                 - { name: INPUT, value: /tmp/accounts.txt }
