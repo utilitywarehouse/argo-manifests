@@ -1,6 +1,6 @@
 include ../../conventions.mk
 
-PKG=finance
+PKG=qe
 
 # Only the overlay is deployable; base alone has no environment.
 KUSTOMIZE_DIR=overlays/dev-aws
