@@ -32,6 +32,7 @@ spec:
         - { name: system-key, value: customer_support_accounts }
         - { name: label, value: customer-support-accounts-export }
         - { name: adapter-driver, value: elasticsearch }
+        - { name: image-pull-secret, value: docker-registry-key }
         - { name: adapter-dsn, value: "http://elasticsearch:9200" }
         - { name: entities, value: "account_v4" }
 
@@ -51,10 +52,9 @@ spec:
         # seed an environment from: identity, the account name and number, the
         # correspondence address and email, the staff flag, and dates of birth.
         #
-        # Two are left out. `comment` is 1.9M free-text support notes with no
-        # seeding value and the highest chance of holding something nobody meant
-        # to export. `account_holders.*` is mapped but empty — zero documents
-        # populate it — so excluding it costs nothing at all.
+        # Two are left out.
+        # `comment` is 1.9M free-text support notes.
+        # `account_holders.*` is mapped but empty
         - {
             name: fields,
             value: "id,number,name,is_staff,correspondence_email,correspondence_address.*,date_of_birth_1,date_of_birth_2",

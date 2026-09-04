@@ -32,10 +32,7 @@ spec:
         - { name: system-key, value: crm_services }
         - { name: label, value: crm-services-export }
         - { name: adapter-driver, value: elasticsearch }
-
-        # No credential to fetch: these clusters run with xpack.security
-        # disabled, and the address is the in-namespace service. A literal DSN
-        # keeps the namespace from having to hold a secret that says nothing.
+        - { name: image-pull-secret, value: docker-registry-key }
         - {
             name: adapter-dsn,
             value: "http://services-gateway-elasticsearch:9200",
