@@ -1,0 +1,213 @@
+# =============================================================================
+# flow-test-data-rebuild — compose the account documents, then index them
+# =============================================================================
+# Both steps run as Jobs in dev-aws/qe. Loading has to: Elasticsearch is a
+# headless service this cluster cannot reach. Composing does not have to, but
+# runs there anyway so the S3 credentials live in one namespace — the one that
+# already holds the data — and this one orchestrates without holding any.
+#
+# Nothing here knows what the document contains. The composition SQL is
+# published by test-data-ui and names its inputs as variables; the caller
+# resolves them and passes them in `vars`.
+#
+# Needs, in dev-aws/qe:
+#   secret/duckdb-s3      key id + secret for the qe-dev-duckdb user. A static
+#                         key because DuckDB reads credentials from the
+#                         environment and has no container provider, so the
+#                         vault sidecar cannot serve it.
+#   the job-executor bundle, and its token harvested here as dev-aws-qe.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: flow-test-data-rebuild
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Compose the test-account documents from the latest exports and index them.
+      Submitted by test-data-ui, which resolves the exports and supplies `vars`.
+  labels:
+    app.kubernetes.io/component: flow
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
+    data.uw.systems/system: test-data
+    data.uw.systems/capability: test-accounts
+spec:
+  entrypoint: rebuild
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      # One JSON object: a source name to its read pattern, plus `limit`.
+      # Resolved by the caller, because only it knows which export is newest.
+      - name: vars
+      - {
+          name: query,
+          value: "s3://uw-dev-qe-test-data/config/test-data/compose.sql",
+        }
+      - { name: composed, value: "s3://uw-dev-qe-test-data/composite.ndjson" }
+      - { name: alias, value: test-accounts }
+      - { name: id-field, value: account_id }
+      - { name: shards, value: "3" }
+      - { name: replicas, value: "1" }
+      # Below the pod's memory limit, so DuckDB spills rather than being killed.
+      - { name: memory-limit, value: 6GB }
+      - { name: compose-timeout, value: 90m }
+      - { name: load-timeout, value: 2h }
+      - { name: cluster-name, value: dev-aws }
+      - { name: target-namespace, value: qe }
+      - { name: aws-secret, value: duckdb-s3 }
+      - { name: log-level, value: info }
+      - { name: image-pull-secret, value: dockerhub-key }
+
+  templates:
+    - name: rebuild
+      steps:
+        - - name: compose
+            template: compose
+        - - name: load
+            template: load
+
+    - name: compose
+      inputs:
+        parameters:
+          # Pinned by kustomize; see the replacements in this package.
+          - {
+              name: query-duckdb-image,
+              value: "registry.uw.systems/dev-enablement/query-duckdb:main",
+            }
+      steps:
+        - - name: compose
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
+                # Unique across every execute-job this workflow makes.
+                - { name: job-name, value: test-data-compose-accounts }
+                - {
+                    name: timeout,
+                    value: "{{workflow.parameters.compose-timeout}}",
+                  }
+                - {
+                    name: log-level,
+                    value: "{{workflow.parameters.log-level}}",
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      template:
+                        spec:
+                          restartPolicy: Never
+                          imagePullSecrets:
+                            - name: {{workflow.parameters.image-pull-secret}}
+                          containers:
+                            - name: compose
+                              image: {{inputs.parameters.query-duckdb-image}}
+                              env:
+                                - { name: QUERY, value: "{{workflow.parameters.query}}" }
+                                - { name: VARS, value: "{{workflow.parameters.vars}}" }
+                                - { name: OUTPUT, value: "{{workflow.parameters.composed}}" }
+                                - { name: FORMAT, value: ndjson }
+                                - { name: WORK_DIR, value: /scratch }
+                                - { name: DUCKDB_MEMORY_LIMIT, value: "{{workflow.parameters.memory-limit}}" }
+                                - { name: LOG_LEVEL, value: "{{workflow.parameters.log-level}}" }
+                                - name: AWS_ACCESS_KEY_ID
+                                  valueFrom: { secretKeyRef: { name: {{workflow.parameters.aws-secret}}, key: AWS_ACCESS_KEY_ID } }
+                                - name: AWS_SECRET_ACCESS_KEY
+                                  valueFrom: { secretKeyRef: { name: {{workflow.parameters.aws-secret}}, key: AWS_SECRET_ACCESS_KEY } }
+                                - { name: AWS_REGION, value: eu-west-1 }
+                              resources:
+                                requests: { cpu: "2", memory: 8Gi, ephemeral-storage: 60Gi }
+                                limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 60Gi }
+                              volumeMounts:
+                                - { name: scratch, mountPath: /scratch }
+                          volumes:
+                            # DuckDB's spill: a join across the exports does not
+                            # fit in memory. Sized with the container's
+                            # ephemeral-storage limit, which the namespace
+                            # LimitRange otherwise defaults to 1Gi — an eviction,
+                            # not a slowdown.
+                            - name: scratch
+                              emptyDir: { sizeLimit: 60Gi }
+
+    - name: load
+      inputs:
+        parameters:
+          - {
+              name: load-es-image,
+              value: "registry.uw.systems/dev-enablement/load-es:main",
+            }
+      steps:
+        - - name: load
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
+                - { name: job-name, value: test-data-index-accounts }
+                - {
+                    name: timeout,
+                    value: "{{workflow.parameters.load-timeout}}",
+                  }
+                - {
+                    name: log-level,
+                    value: "{{workflow.parameters.log-level}}",
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      template:
+                        spec:
+                          restartPolicy: Never
+                          imagePullSecrets:
+                            - name: {{workflow.parameters.image-pull-secret}}
+                          containers:
+                            - name: load
+                              image: {{inputs.parameters.load-es-image}}
+                              env:
+                                - { name: INPUT, value: "{{workflow.parameters.composed}}" }
+                                - { name: HOST, value: "http://elasticsearch:9200" }
+                                - { name: ALIAS, value: "{{workflow.parameters.alias}}" }
+                                - { name: ID_FIELD, value: "{{workflow.parameters.id-field}}" }
+                                - { name: INDEX_SHARDS, value: "{{workflow.parameters.shards}}" }
+                                - { name: INDEX_REPLICAS, value: "{{workflow.parameters.replicas}}" }
+                                - { name: WORK_DIR, value: /scratch }
+                                - { name: TIMEOUT, value: "{{workflow.parameters.load-timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{workflow.parameters.log-level}}" }
+                                - name: AWS_ACCESS_KEY_ID
+                                  valueFrom: { secretKeyRef: { name: {{workflow.parameters.aws-secret}}, key: AWS_ACCESS_KEY_ID } }
+                                - name: AWS_SECRET_ACCESS_KEY
+                                  valueFrom: { secretKeyRef: { name: {{workflow.parameters.aws-secret}}, key: AWS_SECRET_ACCESS_KEY } }
+                                - { name: AWS_REGION, value: eu-west-1 }
+                              resources:
+                                requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 40Gi }
+                                limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 40Gi }
+                              volumeMounts:
+                                - { name: scratch, mountPath: /scratch }
+                          volumes:
+                            # The composed documents are cached here: fetched
+                            # once, read twice.
+                            - name: scratch
+                              emptyDir: { sizeLimit: 40Gi }

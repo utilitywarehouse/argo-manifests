@@ -1,6 +1,6 @@
-# dev-merit overlay for base/data-export-crm-services.yaml
+# dev-aws overlay for base/data-export-crm-services.yaml
 #
-# Argo runs on dev-merit; the source is on dev-aws. cluster-name resolves the
+# Named for the cluster the work lands on. Argo runs on dev-merit; cluster-name resolves the
 # CA, the job-executor token and the API server together, so the Job is created
 # in the namespace that can actually reach the index.
 - op: add

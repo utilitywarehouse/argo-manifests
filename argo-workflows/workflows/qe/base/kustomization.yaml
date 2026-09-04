@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - test-data-rebuild.yaml
+
+# ---------------------------------------------------------------------------
+# Image pins for this package. Same shape as shared/: a local-config ConfigMap
+# and replacements onto template INPUT parameters, which kustomize's `images:`
+# transformer cannot reach because they are Argo expressions inside a Job
+# heredoc rather than resolvable image fields.
+#
+# On a branch, not a SHA: neither executor has been through CI yet. Move to a
+# main SHA once they have.
+# ---------------------------------------------------------------------------
+configMapGenerator:
+  - name: qe-image-versions
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:feat-test-data-ui
+      - load-es=registry.uw.systems/dev-enablement/load-es:feat-test-data-ui
+generatorOptions:
+  disableNameSuffixHash: true
+
+replacements:
+  - source:
+      { kind: ConfigMap, name: qe-image-versions, fieldPath: data.query-duckdb }
+    targets:
+      - select: { kind: WorkflowTemplate, name: flow-test-data-rebuild }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=query-duckdb-image].value
+        options: { create: false }
+  - source:
+      { kind: ConfigMap, name: qe-image-versions, fieldPath: data.load-es }
+    targets:
+      - select: { kind: WorkflowTemplate, name: flow-test-data-rebuild }
+        fieldPaths:
+          - spec.templates.*.inputs.parameters.[name=load-es-image].value
+        options: { create: false }
