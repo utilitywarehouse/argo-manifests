@@ -40,7 +40,10 @@ spec:
       # One JSON object: a source name to its read pattern, plus `limit`.
       # Resolved by the caller, because only it knows which export is newest.
       - name: vars
-      - { name: query, value: "s3://uw-dev-qe-test-data/config/test-data/compose.sql" }
+      - {
+          name: query,
+          value: "s3://uw-dev-qe-test-data/config/test-data/compose.sql",
+        }
       - { name: composed, value: "s3://uw-dev-qe-test-data/composite.ndjson" }
       - { name: alias, value: test-accounts }
       - { name: id-field, value: account_id }
@@ -68,7 +71,10 @@ spec:
       inputs:
         parameters:
           # Pinned by kustomize; see the replacements in this package.
-          - { name: query-duckdb-image, value: "registry.uw.systems/dev-enablement/query-duckdb:main" }
+          - {
+              name: query-duckdb-image,
+              value: "registry.uw.systems/dev-enablement/query-duckdb:main",
+            }
       steps:
         - - name: compose
             templateRef:
@@ -76,12 +82,24 @@ spec:
               template: execute-job
             arguments:
               parameters:
-                - { name: cluster-name, value: "{{workflow.parameters.cluster-name}}" }
-                - { name: target-namespace, value: "{{workflow.parameters.target-namespace}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
                 # Unique across every execute-job this workflow makes.
                 - { name: job-name, value: test-data-compose-accounts }
-                - { name: timeout, value: "{{workflow.parameters.compose-timeout}}" }
-                - { name: log-level, value: "{{workflow.parameters.log-level}}" }
+                - {
+                    name: timeout,
+                    value: "{{workflow.parameters.compose-timeout}}",
+                  }
+                - {
+                    name: log-level,
+                    value: "{{workflow.parameters.log-level}}",
+                  }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
@@ -126,7 +144,10 @@ spec:
     - name: load
       inputs:
         parameters:
-          - { name: load-es-image, value: "registry.uw.systems/dev-enablement/load-es:main" }
+          - {
+              name: load-es-image,
+              value: "registry.uw.systems/dev-enablement/load-es:main",
+            }
       steps:
         - - name: load
             templateRef:
@@ -134,11 +155,23 @@ spec:
               template: execute-job
             arguments:
               parameters:
-                - { name: cluster-name, value: "{{workflow.parameters.cluster-name}}" }
-                - { name: target-namespace, value: "{{workflow.parameters.target-namespace}}" }
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
                 - { name: job-name, value: test-data-index-accounts }
-                - { name: timeout, value: "{{workflow.parameters.load-timeout}}" }
-                - { name: log-level, value: "{{workflow.parameters.log-level}}" }
+                - {
+                    name: timeout,
+                    value: "{{workflow.parameters.load-timeout}}",
+                  }
+                - {
+                    name: log-level,
+                    value: "{{workflow.parameters.log-level}}",
+                  }
                 - name: job-template
                   value: |
                     apiVersion: batch/v1
