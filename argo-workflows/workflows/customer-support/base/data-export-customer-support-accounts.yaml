@@ -36,33 +36,22 @@ spec:
         - { name: adapter-dsn, value: "http://elasticsearch:9200" }
         - { name: entities, value: "account_v4" }
 
-        # `id`, not `accountId` — account_v4 has no accountId, and not
-        # `id.keyword` either: it is already a keyword, which is why a terms
-        # query on the raw field matches. Both mistakes export nothing and say
-        # nothing.
+        # `id`, not `accountId`: account_v4 has no accountId. Not `id.keyword`
+        # either — it is already a keyword. Either mistake exports nothing.
         - { name: key-field, value: "id" }
 
-        # An allow-list, not an exclusion: a field added upstream stays out of
-        # the export until somebody decides it belongs, which is the safe
-        # direction for a source holding customer records — and the only thing
-        # standing between this and a support-notes column if the workflow is
-        # ever pointed at an environment holding real customers.
+        # An allow-list, so a field added upstream stays out until someone
+        # decides it belongs. Everything account_v4 carries except `comment`
+        # (1.9M free-text support notes) and `account_holders.*` (mapped, empty).
         #
-        # Everything account_v4 actually carries, so the export is enough to
-        # seed an environment from: identity, the account name and number, the
-        # correspondence address and email, the staff flag, and dates of birth.
-        #
-        # Two are left out.
-        # `comment` is 1.9M free-text support notes.
-        # `account_holders.*` is mapped but empty
+        # Not `id`: the key field is always column 0 and the driver skips it when
+        # matching, so listing it fails the export as an unmatched pattern.
         - {
             name: fields,
-            value: "id,number,name,is_staff,correspondence_email,correspondence_address.*,date_of_birth_1,date_of_birth_2",
+            value: "number,name,is_staff,correspondence_email,correspondence_address.*,date_of_birth_1,date_of_birth_2",
           }
 
-        # Mandatory alongside `fields`, not an optimisation. Without it the
-        # adapter also writes a `document` column holding the whole _source and
-        # the list above becomes decoration — everything excluded travels to S3
-        # inside it. With it, the search asks Elasticsearch only for the listed
-        # paths, so what is not exported is never read.
+        # Required with `fields`, not an optimisation: otherwise the adapter also
+        # writes a `document` column holding the whole _source, and everything
+        # excluded above travels to S3 inside it.
         - { name: skip-document, value: "true" }
