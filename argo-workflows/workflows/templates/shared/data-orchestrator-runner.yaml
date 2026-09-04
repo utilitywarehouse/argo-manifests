@@ -89,6 +89,22 @@ spec:
       - { name: cluster-name, value: "" } # target cluster → resolves CA + token + server 1:1
       # run scope / metadata
       - { name: entities, value: "" } # comma-separated list, e.g. "tariffs, tariff_rates". Empty = all.
+      # Document-store drivers (elasticsearch, mongodb). The SQL drivers ignore
+      # all three: they discover their tables and have no document to narrow.
+      #
+      #   key-field      the field the export chunks and joins on. REQUIRED for
+      #                  those drivers — they refuse to start without it. For CRM
+      #                  and customer-support it is accountId.keyword: every field
+      #                  in those indices is analysed text, and chunking on the
+      #                  analysed field returns nothing, silently.
+      #   fields         narrow the export to these paths, comma-separated, globs
+      #                  allowed (status.*). Default is every field.
+      #   skip-document  drop the whole-document column and fetch only `fields`.
+      #                  Sets bytes-per-row, and so the part size.
+      - { name: key-field, value: "" }
+      - { name: fields, value: "" }
+      - { name: skip-document, value: "false" }
+
       # IMPORT only: which export run to import from. Empty = the orchestrator resolves the latest
       # completed export run for system-key. Ignored for export. Sent to StartRun only when non-empty.
       - { name: source-run-id, value: "" }
@@ -151,6 +167,9 @@ spec:
           - { name: adapter-dsn-key, value: "DB_DSN" }
           - { name: adapter-dsn, value: "" }
           - { name: entities, value: "" }
+          - { name: key-field, value: "" }
+          - { name: fields, value: "" }
+          - { name: skip-document, value: "false" }
           - { name: source-run-id, value: "" }
           - { name: label, value: adhoc }
           - { name: triggered-by, value: argo }
@@ -289,7 +308,16 @@ spec:
                                 - name: DB_DSN
                                   {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : (inputs.parameters['adapter-secret'] != '' ? 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }' : 'valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['adapter-config'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }')}}
                                 - { name: RDS_USE_PASSWORD_AUTH, value: "true" }
-                                - { name: DB_DRIVER, value: {{inputs.parameters.adapter-driver}} }   # postgres | cockroach
+                                - { name: DB_DRIVER, value: {{inputs.parameters.adapter-driver}} }   # postgres | cockroachdb | elasticsearch | mongodb
+                                # What to export. Empty means "discover" to the SQL
+                                # drivers and is a startup error for the document
+                                # ones, which have no discovery.
+                                - { name: ENTITIES, value: "{{inputs.parameters.entities}}" }
+                                # Document-store drivers only; each line renders
+                                # only when its parameter is set.
+                                {{=inputs.parameters['key-field'] != '' ? '- { name: KEY_FIELD, value: "' + inputs.parameters['key-field'] + '" }' : ''}}
+                                {{=inputs.parameters['fields'] != '' ? '- { name: FIELDS, value: "' + inputs.parameters['fields'] + '" }' : ''}}
+                                {{=inputs.parameters['skip-document'] == 'true' ? '- { name: SKIP_DOCUMENT, value: "true" }' : ''}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract

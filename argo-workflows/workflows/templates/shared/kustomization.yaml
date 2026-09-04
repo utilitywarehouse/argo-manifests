@@ -31,7 +31,12 @@ configMapGenerator:
         config.kubernetes.io/local-config: "true"
     literals:
       - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:5c9063aa3d12e0482d7cd37c368950e750377868
-      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:5c9063aa3d12e0482d7cd37c368950e750377868
+      # On a branch, not main: the elasticsearch and mongodb drivers are not
+      # merged yet, and the CRM and customer-support exports need the first of
+      # them. The branch is a superset — postgres and cockroachdb are still
+      # registered, so the workflows already using this template are unaffected.
+      # Move back to a main SHA once it lands.
+      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:chore-add-doc-adapters
       - call-grpc=registry.uw.systems/dev-enablement/call-grpc:ead92c818ad3db9f1b50ab0a0e88bd7c3c422e95
       - call-http=registry.uw.systems/dev-enablement/call-http:ead92c818ad3db9f1b50ab0a0e88bd7c3c422e95
       - exec-kube=registry.uw.systems/dev-enablement/exec-kube:ead92c818ad3db9f1b50ab0a0e88bd7c3c422e95

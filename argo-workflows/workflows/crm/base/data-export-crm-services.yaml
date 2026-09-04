@@ -1,0 +1,55 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-crm-services
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      CRM service data export
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: crm-services
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: crm-services
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: crm_services }
+        - { name: label, value: crm-services-export }
+        - { name: adapter-driver, value: elasticsearch }
+
+        # No credential to fetch: these clusters run with xpack.security
+        # disabled, and the address is the in-namespace service. A literal DSN
+        # keeps the namespace from having to hold a secret that says nothing.
+        - {
+            name: adapter-dsn,
+            value: "http://services-gateway-elasticsearch:9200",
+          }
+
+        # Required — the driver does no index discovery and refuses to start
+        # without it. cbc-services-v2 is the cashback one; the names are the
+        # indices as they exist, not a tidied-up set.
+        - {
+            name: entities,
+            value: "energy-services,fixed-line-services,mobile-services,cbc-services-v2,insurance-services",
+          }
+
+        # accountId.keyword, never accountId. Every field in these indices is
+        # analysed text with a keyword subfield, and chunking on the analysed
+        # field returns zero rows with no error.
+        - { name: key-field, value: "accountId.keyword" }
