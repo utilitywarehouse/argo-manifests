@@ -118,6 +118,7 @@ spec:
                           containers:
                             - name: compose
                               image: {{inputs.parameters.query-duckdb-image}}
+                              imagePullPolicy: Always
                               env:
                                 - name: QUERY
                                   value: |-
@@ -207,6 +208,7 @@ spec:
                           containers:
                             - name: load
                               image: {{inputs.parameters.load-es-image}}
+                              imagePullPolicy: Always
                               env:
                                 - name: INPUT
                                   value: |-
