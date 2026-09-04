@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Named for the cluster the work lands on: both steps run in qe on dev-aws, the
+# namespace holding the Elasticsearch and the S3 credentials. Argo itself runs
+# on dev-merit. The base already defaults cluster-name and target-namespace, so
+# this only labels the template.
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: WorkflowTemplate
+      name: flow-test-data-rebuild
+    patch: |-
+      - op: add
+        path: /metadata/labels/data.uw.systems~1cluster
+        value: dev-aws
+      - op: add
+        path: /metadata/labels/data.uw.systems~1namespace
+        value: qe

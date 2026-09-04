@@ -10,9 +10,10 @@ resources:
   - ../../workflows/energy-platform/overlays/dev-merit
   - ../../workflows/staging-ept/overlays/dev-merit
   - ../../workflows/billing/overlays/dev-merit
-  - ../../workflows/finance/overlays/dev-merit
-  - ../../workflows/crm/overlays/dev-merit
-  - ../../workflows/customer-support/overlays/dev-merit
+  - ../../workflows/finance/overlays/dev-aws
+  - ../../workflows/crm/overlays/dev-aws
+  - ../../workflows/customer-support/overlays/dev-aws
+  - ../../workflows/qe/overlays/dev-aws
   - workflow-step-executor-sa.yaml
   - ingress.yaml
   - auth.yaml
