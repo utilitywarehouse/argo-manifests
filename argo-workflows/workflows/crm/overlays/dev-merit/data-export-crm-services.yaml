@@ -1,0 +1,23 @@
+# dev-merit overlay for base/data-export-crm-services.yaml
+#
+# Argo runs on dev-merit; the source is on dev-aws. cluster-name resolves the
+# CA, the job-executor token and the API server together, so the Job is created
+# in the namespace that can actually reach the index.
+- op: add
+  path: /spec/workflowSpec/arguments/parameters/-
+  value: { name: target-namespace, value: crm }
+- op: add
+  path: /spec/workflowSpec/arguments/parameters/-
+  value: { name: cluster-name, value: dev-aws }
+- op: add
+  path: /metadata/labels/data.uw.systems~1cluster
+  value: dev-aws
+- op: add
+  path: /metadata/labels/data.uw.systems~1namespace
+  value: crm
+- op: add
+  path: /spec/workflowSpec/workflowMetadata/labels/data.uw.systems~1cluster
+  value: dev-aws
+- op: add
+  path: /spec/workflowSpec/workflowMetadata/labels/data.uw.systems~1namespace
+  value: crm

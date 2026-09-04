@@ -11,6 +11,8 @@ resources:
   - ../../workflows/staging-ept/overlays/dev-merit
   - ../../workflows/billing/overlays/dev-merit
   - ../../workflows/finance/overlays/dev-merit
+  - ../../workflows/crm/overlays/dev-merit
+  - ../../workflows/customer-support/overlays/dev-merit
   - workflow-step-executor-sa.yaml
   - ingress.yaml
   - auth.yaml
