@@ -44,14 +44,13 @@ spec:
         # decides it belongs. Everything account_v4 carries except `comment`
         # (1.9M free-text support notes) and `account_holders.*` (mapped, empty).
         #
+        # This is also what keeps the excluded fields out of S3 entirely: the
+        # adapter filters _source by this list, so Elasticsearch never returns
+        # them and they reach neither the columns nor the `document` column.
+        #
         # Not `id`: the key field is always column 0 and the driver skips it when
         # matching, so listing it fails the export as an unmatched pattern.
         - {
             name: fields,
             value: "number,name,is_staff,correspondence_email,correspondence_address.*,date_of_birth_1,date_of_birth_2",
           }
-
-        # Required with `fields`, not an optimisation: otherwise the adapter also
-        # writes a `document` column holding the whole _source, and everything
-        # excluded above travels to S3 inside it.
-        - { name: skip-document, value: "true" }
