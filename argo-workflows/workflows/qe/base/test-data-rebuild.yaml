@@ -54,6 +54,8 @@ spec:
       - { name: memory-limit, value: 6GB }
       - { name: compose-timeout, value: 90m }
       - { name: load-timeout, value: 2h }
+      - { name: job-active-deadline, value: 3h }
+      - { name: job-ttl, value: 24h }
       - { name: cluster-name, value: dev-aws }
       - { name: target-namespace, value: qe }
       - { name: aws-secret, value: duckdb-s3 }
@@ -65,8 +67,26 @@ spec:
       steps:
         - - name: compose
             template: compose
+            arguments:
+              parameters:
+                - {
+                    name: timeout,
+                    value: "{{workflow.parameters.compose-timeout}}",
+                  }
+                - {
+                    name: job-active-deadline,
+                    value: "{{workflow.parameters.job-active-deadline}}",
+                  }
+                - { name: job-ttl, value: "{{workflow.parameters.job-ttl}}" }
         - - name: load
             template: load
+            arguments:
+              parameters:
+                - {
+                    name: job-active-deadline,
+                    value: "{{workflow.parameters.job-active-deadline}}",
+                  }
+                - { name: job-ttl, value: "{{workflow.parameters.job-ttl}}" }
 
     - name: compose
       inputs:
@@ -76,6 +96,9 @@ spec:
               name: query-duckdb-image,
               value: "registry.uw.systems/dev-enablement/query-duckdb:main",
             }
+          - name: job-active-deadline
+          - name: job-ttl
+          - name: timeout
       steps:
         - - name: compose
             templateRef:
@@ -93,10 +116,7 @@ spec:
                   }
                 # Unique across every execute-job this workflow makes.
                 - { name: job-name, value: test-data-compose-accounts }
-                - {
-                    name: timeout,
-                    value: "{{workflow.parameters.compose-timeout}}",
-                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - {
                     name: log-level,
                     value: "{{workflow.parameters.log-level}}",
@@ -111,6 +131,8 @@ spec:
                     kind: Job
                     spec:
                       backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
                         spec:
                           restartPolicy: Never
@@ -137,8 +159,10 @@ spec:
                                 - name: DUCKDB_MEMORY_LIMIT
                                   value: |-
                                     {{workflow.parameters.memory-limit}}
-                                - name: TIMEOUT
-                                  value: "{{=int(duration(workflow.parameters['compose-timeout']).Seconds())}}"
+                                - {
+                                    name: TIMEOUT,
+                                    value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}",
+                                  }
                                 - name: LOG_LEVEL
                                   value: |-
                                     {{workflow.parameters.log-level}}
@@ -169,6 +193,8 @@ spec:
               name: load-es-image,
               value: "registry.uw.systems/dev-enablement/load-es:main",
             }
+          - name: job-active-deadline
+          - name: job-ttl
       steps:
         - - name: load
             templateRef:
@@ -203,6 +229,8 @@ spec:
                     kind: Job
                     spec:
                       backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
                         spec:
                           restartPolicy: Never
