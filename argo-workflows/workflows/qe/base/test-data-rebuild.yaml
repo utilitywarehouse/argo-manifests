@@ -46,7 +46,8 @@ spec:
         }
       - { name: composed, value: "s3://uw-dev-qe-test-data/composite.ndjson" }
       - { name: alias, value: test-accounts }
-      - { name: id-field, value: account_id }
+      # The composition puts identifiers under _meta, not at the root.
+      - { name: id-field, value: _meta.identifiers.account_id }
       - { name: shards, value: "3" }
       - { name: replicas, value: "1" }
       # Below the pod's memory limit, so DuckDB spills rather than being killed.
@@ -136,6 +137,8 @@ spec:
                                 - name: DUCKDB_MEMORY_LIMIT
                                   value: |-
                                     {{workflow.parameters.memory-limit}}
+                                - name: TIMEOUT
+                                  value: "{{=int(duration(workflow.parameters['compose-timeout']).Seconds())}}"
                                 - name: LOG_LEVEL
                                   value: |-
                                     {{workflow.parameters.log-level}}
