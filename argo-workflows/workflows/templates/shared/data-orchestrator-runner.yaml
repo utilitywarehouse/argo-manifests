@@ -120,6 +120,13 @@ spec:
       - { name: fields, value: "" }
       - { name: skip-document, value: "false" }
       - { name: sample-size, value: "" }
+      # Driver options with no parameter of their own, comma-separated key=value.
+      # The adapter validates keys against the chosen driver and fails at startup
+      # naming what is valid, so a typo or an option meant for another driver does
+      # not pass silently. mongodb: database=<name> when the DSN carries none —
+      # an operator-managed DSN often has the credentials and no path.
+      # elasticsearch: page_size, keep_alive.
+      - { name: driver-options, value: "" }
 
       # IMPORT only: which export run to import from. Empty = the orchestrator resolves the latest
       # completed export run for system-key. Ignored for export. Sent to StartRun only when non-empty.
@@ -193,6 +200,7 @@ spec:
           - { name: fields, value: "" }
           - { name: skip-document, value: "false" }
           - { name: sample-size, value: "" }
+          - { name: driver-options, value: "" }
           - { name: source-run-id, value: "" }
           - { name: label, value: adhoc }
           - { name: triggered-by, value: argo }
@@ -346,6 +354,7 @@ spec:
                                 {{=inputs.parameters['fields'] != '' ? '- { name: FIELDS, value: "' + inputs.parameters['fields'] + '" }' : ''}}
                                 {{=inputs.parameters['skip-document'] == 'true' ? '- { name: SKIP_DOCUMENT, value: "true" }' : ''}}
                                 {{=inputs.parameters['sample-size'] != '' ? '- { name: SAMPLE_SIZE, value: "' + inputs.parameters['sample-size'] + '" }' : ''}}
+                                {{=inputs.parameters['driver-options'] != '' ? '- { name: DRIVER_OPTIONS, value: "' + inputs.parameters['driver-options'] + '" }' : ''}}
                                 - { name: MODE, value: {{inputs.parameters.mode}} }
                                 - { name: SYSTEM_KEY, value: {{inputs.parameters.system-key}} }
                                 - { name: GRPC_ADDR, value: ":50051" }    # fixed internal contract

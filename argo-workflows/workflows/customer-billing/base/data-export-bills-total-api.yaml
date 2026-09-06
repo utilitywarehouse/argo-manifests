@@ -6,17 +6,6 @@
 #
 # ⚠️ THE DATABASE IS `bills`, NOT `app`. `app` exists and is empty, so the
 # mistake reads as an empty collection rather than an error.
-#
-# BOOTSTRAP — Secret `bills-total-api-data-adapter` in customer-billing, key
-# DB_DSN. The driver takes the database from the DSN path and refuses to start
-# without one, and no key on the operator-managed cluster Secret carries it:
-# `mongolizer.url` has no path, `mongodb.exporter.url` is localhost.
-#
-#   mongodb://admin:<url-encoded admin.password>@bills-total-api-mongo-cluster.customer-billing.svc.cluster.local/bills?authSource=admin&readPreference=secondaryPreferred
-#
-# authSource=admin because the admin user lives in the admin database while the
-# path names bills. URL-encode the password — it contains characters that
-# otherwise misparse, a `/` reading as a port.
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
@@ -51,8 +40,14 @@ spec:
         - { name: system-key, value: bills_total_api }
         - { name: label, value: bills-total-api-export }
         - { name: adapter-driver, value: mongodb }
-        - { name: adapter-secret, value: bills-total-api-data-adapter }
-        - { name: adapter-dsn-key, value: DB_DSN }
+        # The operator-managed cluster Secret, used as it stands. mongolizer.url
+        # carries the credentials but no database — its path is just "/" — so the
+        # database is named as a driver option rather than by composing a new DSN.
+        # That also keeps authSource defaulting to admin, where the user is
+        # defined; putting /bills in the path would point it at bills and fail.
+        - { name: adapter-secret, value: bills-total-api-mongo-cluster }
+        - { name: adapter-dsn-key, value: mongolizer.url }
+        - { name: driver-options, value: "database=bills" }
 
         # Named, though the driver would discover it, so a collection added
         # upstream stays out until someone decides it belongs.
