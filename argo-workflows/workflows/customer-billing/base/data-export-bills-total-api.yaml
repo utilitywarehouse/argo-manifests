@@ -1,0 +1,75 @@
+# bills-total-api data export — the bill index behind My Account's bill list.
+# One collection, bills.bills, ~4.5M documents.
+#
+# ⚠️ FIELD NAMES ARE LOWERCASED — the store writes through mgocompat, so it is
+# `accountid`, never `accountId`. camelCase matches nothing.
+#
+# ⚠️ THE DATABASE IS `bills`, NOT `app`. `app` exists and is empty, so the
+# mistake reads as an empty collection rather than an error.
+#
+# BOOTSTRAP — billing team, once per cluster. The mongo driver takes the database
+# from the DSN path and refuses to start without one, and no key on the
+# operator-managed cluster Secret carries it (`mongolizer.url` has no path;
+# `mongodb.exporter.url` is localhost). So, as for the energy exports, the owning
+# team provisions Secret `bills-total-api-data-adapter`, key DB_DSN:
+#
+#   mongodb://mongolizer:<mongolizer.password>@bills-total-api-mongo-cluster.customer-billing.svc.cluster.local/bills?readPreference=secondaryPreferred
+#
+# mongolizer holds `backup` — find + listCollections on every non-system
+# collection, and no write. That is the whole of what the adapter does. `admin`
+# is `root` and `bills-total-api` is readWrite on this database; neither belongs
+# in a long-lived Secret for a read-only scan. readPreference is a property of
+# the URI, not the user — set it whichever account you use.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-bills-total-api
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      bills-total-api bill index export from customer-billing
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: bills-total-api
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: bills-total-api
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: bills_total_api }
+        - { name: label, value: bills-total-api-export }
+        - { name: adapter-driver, value: mongodb }
+        - { name: adapter-secret, value: bills-total-api-data-adapter }
+        - { name: adapter-dsn-key, value: DB_DSN }
+
+        # Named, though the driver would discover it, so a collection added
+        # upstream stays out until someone decides it belongs.
+        - { name: entities, value: "bills" }
+
+        # No `.keyword` — that suffix is an Elasticsearch thing. The key must hold
+        # strings and be indexed: chunk bounds are compared as strings, and this is
+        # the leading field of {accountid, invoiceid}. `_id` satisfies neither — an
+        # ObjectId sorts above every string, so the bounds match nothing.
+        - { name: key-field, value: "accountid" }
+
+        # No `fields` allow-list: five small fields, all of them wanted.
+
+        # ~46 chunks at the 100k default, preceded by an unindexed field census
+        # over the whole collection. Longer than the 30m default allows.
+        - { name: timeout, value: 2h }
+        - { name: job-active-deadline, value: 2h10m }
