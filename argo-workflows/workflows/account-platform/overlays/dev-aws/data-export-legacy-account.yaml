@@ -1,0 +1,23 @@
+# dev-aws overlay for base/data-export-legacy-account.yaml
+#
+# Named for the cluster the work lands on. Argo runs on dev-merit; cluster-name resolves the
+# CA, the job-executor token and the API server together, so the Job is created
+# in the namespace that can actually reach cockroachdb-proxy.
+- op: add
+  path: /spec/workflowSpec/arguments/parameters/-
+  value: { name: target-namespace, value: account-platform }
+- op: add
+  path: /spec/workflowSpec/arguments/parameters/-
+  value: { name: cluster-name, value: dev-aws }
+- op: add
+  path: /metadata/labels/data.uw.systems~1cluster
+  value: dev-aws
+- op: add
+  path: /metadata/labels/data.uw.systems~1namespace
+  value: account-platform
+- op: add
+  path: /spec/workflowSpec/workflowMetadata/labels/data.uw.systems~1cluster
+  value: dev-aws
+- op: add
+  path: /spec/workflowSpec/workflowMetadata/labels/data.uw.systems~1namespace
+  value: account-platform

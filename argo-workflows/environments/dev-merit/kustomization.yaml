@@ -14,6 +14,7 @@ resources:
   - ../../workflows/crm/overlays/dev-aws
   - ../../workflows/customer-support/overlays/dev-aws
   - ../../workflows/customer-billing/overlays/dev-aws
+  - ../../workflows/account-platform/overlays/dev-aws
   - ../../workflows/qe/overlays/dev-aws
   - workflow-step-executor-sa.yaml
   - ingress.yaml

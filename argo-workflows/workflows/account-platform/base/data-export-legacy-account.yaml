@@ -1,0 +1,71 @@
+# legacy-account data export — the legacy account store, 3.9M rows from one table.
+#
+# The other half of the account picture: account_api is the live store but not a
+# complete one, and this holds the accounts it does not. It also carries columns
+# account_api has no equivalent for — psr_flag (priority services register),
+# billing_group, referrer_type, creation_reason — alongside the is_staff /
+# is_business / join_date that both stores share.
+#
+# SCOPE: `legacy_account` only. The database also holds account_ids and
+# platform_customer (2.23M each, id mappings) and two empty tables; the account
+# store already carries both account_id and account_number, so they stay out.
+#
+# ⚠️ THIS TABLE CARRIES A `password` COLUMN — 1.75M rows have one, 0-14 chars
+# across 15 distinct lengths, which is not the shape of any hash. Also
+# payment_details, date_of_birth_1/2, psr_flag and free-text comments. A SQL
+# source has no column allow-list, so this is exported whole or not at all: the
+# decision was to point and pull rather than build a view, which means whoever
+# can read the bucket can read those columns. dev-aws data is fabricated; that
+# stops being true the day this points at prod.
+#
+# CONNECTION. Same cluster, user and CA as data-export-account-api — only the
+# database in the DSN differs. legacy_account is a separate database on the same
+# CockroachDB, and one adapter DSN means one database, hence a second workflow.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-legacy-account
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      legacy-account account store export from account-platform
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: legacy-account
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 3 * * *" # an hour after account-api: same source cluster, don't stack them
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: legacy-account
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: legacy_account }
+        - { name: label, value: legacy-account-export }
+        - { name: adapter-driver, value: cockroachdb }
+        - name: adapter-dsn
+          value: "postgresql://accounts@cockroachdb-proxy:26257/legacy_account?sslmode=verify-full"
+        - { name: ca-secret, value: ca-auth-key }
+
+        # ⚠️ HASHED NAME, and account-platform is the only export namespace with
+        # one — see the note in data-export-account-api.yaml. It rots whenever the
+        # docker credential is rotated.
+        - { name: image-pull-secret, value: dockerhub-key-fg5t2k8k7t }
+
+        - { name: entities, value: "legacy_account" }
+
+        # 3.9M rows, chunked on the primary key `rowid` at the 100k default.
+        - { name: timeout, value: 90m }
+        - { name: job-active-deadline, value: 100m }
