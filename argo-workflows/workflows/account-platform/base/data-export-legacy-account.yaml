@@ -1,26 +1,23 @@
 # legacy-account data export — the legacy account store, 3.9M rows from one table.
 #
-# The other half of the account picture: account_api is the live store but not a
-# complete one, and this holds the accounts it does not. It also carries columns
-# account_api has no equivalent for — psr_flag (priority services register),
-# billing_group, referrer_type, creation_reason — alongside the is_staff /
-# is_business / join_date that both stores share.
+# Holds the accounts account_api does not, plus columns account_api has no
+# equivalent for: psr_flag (priority services register), billing_group,
+# referrer_type, creation_reason. is_staff / is_business / join_date exist in
+# both, but are far better populated in account_api.
 #
-# SCOPE: `legacy_account` only. The database also holds account_ids and
-# platform_customer (2.23M each, id mappings) and two empty tables; the account
-# store already carries both account_id and account_number, so they stay out.
+# SCOPE: `legacy_account` only. account_ids and platform_customer (2.23M each)
+# are id mappings the account store already covers — it carries both account_id
+# and account_number — and two more tables are empty.
 #
-# ⚠️ THIS TABLE CARRIES A `password` COLUMN — 1.75M rows have one, 0-14 chars
-# across 15 distinct lengths, which is not the shape of any hash. Also
-# payment_details, date_of_birth_1/2, psr_flag and free-text comments. A SQL
-# source has no column allow-list, so this is exported whole or not at all: the
-# decision was to point and pull rather than build a view, which means whoever
-# can read the bucket can read those columns. dev-aws data is fabricated; that
-# stops being true the day this points at prod.
+# ⚠️ CARRIES A `password` COLUMN — 1.75M rows have one, 0-14 chars across 15
+# distinct lengths, which is not the shape of any hash. Also payment_details,
+# date_of_birth_1/2, psr_flag and free-text comments. A SQL source has no column
+# allow-list, so the table goes whole: whoever can read the bucket can read those
+# columns. dev-aws data is fabricated; prod would not be.
 #
 # CONNECTION. Same cluster, user and CA as data-export-account-api — only the
-# database in the DSN differs. legacy_account is a separate database on the same
-# CockroachDB, and one adapter DSN means one database, hence a second workflow.
+# database in the DSN differs. One adapter DSN means one database, hence a
+# separate workflow.
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
@@ -59,9 +56,6 @@ spec:
           value: "postgresql://accounts@cockroachdb-proxy:26257/legacy_account?sslmode=verify-full"
         - { name: ca-secret, value: ca-auth-key }
 
-        # ⚠️ HASHED NAME, and account-platform is the only export namespace with
-        # one — see the note in data-export-account-api.yaml. It rots whenever the
-        # docker credential is rotated.
         - { name: image-pull-secret, value: dockerhub-key-fg5t2k8k7t }
 
         - { name: entities, value: "legacy_account" }
