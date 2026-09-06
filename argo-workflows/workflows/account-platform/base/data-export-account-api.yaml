@@ -1,26 +1,23 @@
 # account-api data export — the account store, 3.5M rows from one table.
 #
-# SCOPE: `accounts` only. The database also holds persons (4.2M) and its join
-# table account_persons (4.3M) — name, date of birth, email, phone, address —
-# plus the business_details and sic_codes lookups. None of them are the account
-# store, and a SQL source has no column allow-list (`fields` narrows only the
-# document-store drivers), so a table comes whole or not at all. They stay out.
+# SCOPE: `accounts` only. persons (4.2M) and its join table account_persons
+# (4.3M) carry name, date of birth, email, phone and address; business_details
+# and sic_codes are lookups. A SQL source has no column allow-list — `fields`
+# narrows only the document-store drivers — so a table comes whole or not at all.
 #
-# ⚠️ NOT EVERY ACCOUNT. account_api is the live store but not a complete one —
-# legacy_account holds the accounts it does not, and carries psr_flag and the
-# other legacy-only columns. It is a different database, so a different DSN and a
-# different workflow: data-export-legacy-account, alongside this one.
+# ⚠️ NOT EVERY ACCOUNT. legacy_account holds the accounts this one does not, plus
+# psr_flag and the other legacy-only columns. Separate database, separate DSN,
+# separate workflow: data-export-legacy-account.
 #
-# ⚠️ PICK THE DATABASE CAREFULLY. The cluster carries account_api,
-# account_api_temp and account_api_20250214 — the last a snapshot frozen
-# 2025-02-20 and hundreds of thousands of rows behind. All three answer the same
-# queries, so the wrong one exports quietly and wrongly.
+# ⚠️ PICK THE DATABASE CAREFULLY. The cluster also carries account_api_temp and
+# account_api_20250214, a snapshot frozen 2025-02-20 and hundreds of thousands of
+# rows behind. All three answer the same queries, so the wrong one exports
+# quietly and wrongly.
 #
 # CONNECTION. Client-cert auth, as step-account-resolve-account does it: the DSN
 # names the `accounts` user and carries no password, and the adapter mints a
 # client cert from the in-cluster CA using ca-auth-key. The runner's ca-address /
-# ca-profile defaults (certificate-authority:8080, `client`) are what this
-# namespace runs, so only the secret needs naming.
+# ca-profile defaults match this namespace, so only the secret needs naming.
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
@@ -59,16 +56,14 @@ spec:
           value: "postgresql://accounts@cockroachdb-proxy:26257/account_api?sslmode=verify-full"
         - { name: ca-secret, value: ca-auth-key }
 
-        # ⚠️ HASHED NAME, and this is the only export namespace with one.
-        # account-platform generates its pull secret with a kustomize
-        # secretGenerator, so the suffix changes whenever the docker credential is
-        # rotated and this goes ImagePullBackOff. The `default` SA tracks it
-        # automatically; `data-orchestrator` — which the Job runs as, for the vault
-        # AWS role — does not, so the name is pinned here.
+        # ⚠️ HASHED NAME — account-platform generates its pull secret with a
+        # kustomize secretGenerator, so the suffix changes when the docker
+        # credential rotates and this goes ImagePullBackOff. The `default` SA
+        # tracks it; `data-orchestrator`, which the Job runs as for the vault AWS
+        # role, does not.
         - { name: image-pull-secret, value: dockerhub-key-fg5t2k8k7t }
 
-        # Named, not discovered — discovery lists every BASE TABLE, which here
-        # means the four tables this export deliberately leaves out plus the
+        # Named, not discovered: discovery lists every BASE TABLE, including the
         # schema_migrations / schema_lock bookkeeping.
         - { name: entities, value: "accounts" }
 

@@ -1,0 +1,35 @@
+# export-format — adds the output-format parameter to every data-export
+# CronWorkflow, so the format is selectable per run from the Argo submit form,
+# the API, or `argo submit --from cronwf/<name> -p export-format=pgcopy`.
+#
+# Declared on each workflow rather than inherited from
+# step-data-orchestrator-runner because the submit form is built from the
+# workflow's own arguments. Defined once here so the enum grows in one place
+# when a format is added.
+#
+# Defaults to the source's own format, so adding the parameter changes no
+# output; a workflow that wants something else labels itself
+# data.uw.systems/export-format and declares its own.
+#
+# The selector matches exports only: the import CronWorkflow carries
+# data-import and takes no export format.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      kind: CronWorkflow
+      labelSelector: "data.uw.systems/capability=data-export,!data.uw.systems/export-format"
+    patch: |
+      - op: add
+        path: /spec/workflowSpec/arguments/parameters/-
+        value:
+          name: export-format
+          value: ""
+          enum: ["", "pgcopy", "parquet"]
+          description: >-
+            Output format. Parquet is the columnar format the analytics tooling
+            reads; PGCOPY is lossless for Postgres and CockroachDB types and is
+            what the import path loads. Empty takes the source's own default. One
+            format is written per run. The document-store sources produce Parquet
+            only, and reject anything else.

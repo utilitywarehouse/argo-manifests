@@ -35,6 +35,7 @@
 #     mode, run-type, system-key         what to run
 #     adapter-secret|-config, adapter-dsn-key  source DSN (team's secret or configmap in target ns)
 #     target-namespace, cluster-name      where to run / how to dispatch
+#     export-format                       output format (see the parameters below)
 #
 #   Environment defaults
 #     entities, label, triggered-by       run scope / metadata
@@ -89,6 +90,12 @@ spec:
       - { name: cluster-name, value: "" } # target cluster → resolves CA + token + server 1:1
       # run scope / metadata
       - { name: entities, value: "" } # comma-separated list, e.g. "tariffs, tariff_rates". Empty = all.
+      # Output format. Empty takes the driver's default: PGCOPY for the SQL
+      # drivers, Parquet for the document stores, which produce nothing else. A
+      # format the driver cannot produce fails the run, naming what it can.
+      - name: export-format
+        value: ""
+        enum: ["", "pgcopy", "parquet"]
       # Document-store drivers (elasticsearch, mongodb). The SQL drivers ignore
       # all four: they discover their tables and have no document to narrow.
       #
@@ -181,6 +188,7 @@ spec:
           - { name: adapter-dsn-key, value: "DB_DSN" }
           - { name: adapter-dsn, value: "" }
           - { name: entities, value: "" }
+          - { name: export-format, value: "" }
           - { name: key-field, value: "" }
           - { name: fields, value: "" }
           - { name: skip-document, value: "false" }
@@ -423,6 +431,14 @@ spec:
                                   SRC=""
                                   if [ -n "{{inputs.parameters.source-run-id}}" ]; then SRC="\"sourceRunId\":\"{{inputs.parameters.source-run-id}}\","; fi
 
+                                  # export-format uppercased onto the Format enum. Omitted when
+                                  # empty: options.export would pin export mode to UNSPECIFIED.
+                                  OPTS=""
+                                  if [ -n "{{inputs.parameters.export-format}}" ]; then
+                                    FMT=$(printf '%s' "{{inputs.parameters.export-format}}" | tr '[:lower:]' '[:upper:]')
+                                    OPTS="\"options\":{\"export\":{\"preferredFormat\":\"FORMAT_$FMT\"}},"
+                                  fi
+
                                   SYS="{{inputs.parameters.system-key}}"
                                   # Dump the full health/ready payloads from BOTH the orchestrator (:8080) and
                                   # the adapter (:8081) so a 0-job run can be diagnosed as readiness vs no-data.
@@ -460,7 +476,7 @@ spec:
                                   # StartRun. A rejected run comes back on the `rejected` oneof branch, so
                                   # accepted.runId is absent and extraction fails — echo the response (which
                                   # carries rejected.reason) instead of a misleading "field not found".
-                                  PAYLOAD="{\"runType\":\"{{inputs.parameters.run-type}}\",\"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES]}],$SRC\"label\":\"{{inputs.parameters.label}}\",\"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"}"
+                                  PAYLOAD="{\"runType\":\"{{inputs.parameters.run-type}}\",\"scope\":[{\"systemKey\":\"{{inputs.parameters.system-key}}\",\"entities\":[$ENTITIES]}],$OPTS$SRC\"label\":\"{{inputs.parameters.label}}\",\"triggeredBy\":\"{{inputs.parameters.triggered-by}}\"}"
                                   echo "StartRun payload: $PAYLOAD"
                                   if ! /app/executor --address localhost:8090 --method "$SERVICE/StartRun" \
                                     --payload "$PAYLOAD" \

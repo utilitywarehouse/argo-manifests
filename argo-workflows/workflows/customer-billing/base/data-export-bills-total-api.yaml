@@ -7,19 +7,16 @@
 # ⚠️ THE DATABASE IS `bills`, NOT `app`. `app` exists and is empty, so the
 # mistake reads as an empty collection rather than an error.
 #
-# BOOTSTRAP — billing team, once per cluster. The mongo driver takes the database
-# from the DSN path and refuses to start without one, and no key on the
-# operator-managed cluster Secret carries it (`mongolizer.url` has no path;
-# `mongodb.exporter.url` is localhost). So, as for the energy exports, the owning
-# team provisions Secret `bills-total-api-data-adapter`, key DB_DSN:
+# BOOTSTRAP — Secret `bills-total-api-data-adapter` in customer-billing, key
+# DB_DSN. The driver takes the database from the DSN path and refuses to start
+# without one, and no key on the operator-managed cluster Secret carries it:
+# `mongolizer.url` has no path, `mongodb.exporter.url` is localhost.
 #
-#   mongodb://mongolizer:<mongolizer.password>@bills-total-api-mongo-cluster.customer-billing.svc.cluster.local/bills?readPreference=secondaryPreferred
+#   mongodb://admin:<url-encoded admin.password>@bills-total-api-mongo-cluster.customer-billing.svc.cluster.local/bills?authSource=admin&readPreference=secondaryPreferred
 #
-# mongolizer holds `backup` — find + listCollections on every non-system
-# collection, and no write. That is the whole of what the adapter does. `admin`
-# is `root` and `bills-total-api` is readWrite on this database; neither belongs
-# in a long-lived Secret for a read-only scan. readPreference is a property of
-# the URI, not the user — set it whichever account you use.
+# authSource=admin because the admin user lives in the admin database while the
+# path names bills. URL-encode the password — it contains characters that
+# otherwise misparse, a `/` reading as a port.
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
