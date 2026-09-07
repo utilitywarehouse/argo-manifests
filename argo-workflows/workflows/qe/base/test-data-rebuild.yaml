@@ -68,8 +68,21 @@ spec:
       - { name: mapping-policy-key, value: mapping }
       - { name: shards, value: "3" }
       - { name: replicas, value: "1" }
-      # Below the pod's memory limit, so DuckDB spills rather than being killed.
+      # Parameters because the size of a rebuild is chosen at submit time: a
+      # 500-account preview and every account are the same query three orders
+      # of magnitude apart. memory-limit is where DuckDB spills and must stay
+      # below compose-memory, or the kernel kills it instead — raise together.
+      - { name: compose-cpu, value: "4" }
+      - { name: compose-memory, value: 8Gi }
       - { name: memory-limit, value: 6GB }
+      # temp-limit is how much of the volume the spill may take. DuckDB
+      # measures the node's disk behind the emptyDir, and writing past the
+      # volume evicts the pod rather than failing the query.
+      - { name: compose-scratch, value: 60Gi }
+      - { name: temp-limit, value: 40GB }
+      # The composed file is fetched here whole, so this follows its size.
+      - { name: load-memory, value: 4Gi }
+      - { name: load-scratch, value: 40Gi }
       - { name: compose-timeout, value: 90m }
       - { name: load-timeout, value: 2h }
       - { name: job-active-deadline, value: 3h }
@@ -177,6 +190,15 @@ spec:
                                 - name: DUCKDB_MEMORY_LIMIT
                                   value: |-
                                     {{workflow.parameters.memory-limit}}
+                                # Left to itself DuckDB takes the node's core
+                                # count and budgets gigabytes a thread, so a
+                                # big query is killed before the memory limit.
+                                - name: DUCKDB_THREADS
+                                  value: |-
+                                    {{workflow.parameters.compose-cpu}}
+                                - name: DUCKDB_TEMP_LIMIT
+                                  value: |-
+                                    {{workflow.parameters.temp-limit}}
                                 - {
                                     name: TIMEOUT,
                                     value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}",
@@ -191,18 +213,29 @@ spec:
                                 - name: AWS_REGION
                                   value: "eu-west-1"
                               resources:
-                                requests: { cpu: "2", memory: 8Gi, ephemeral-storage: 60Gi }
-                                limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 60Gi }
+                                requests:
+                                  {
+                                    cpu: "{{workflow.parameters.compose-cpu}}",
+                                    memory: "{{workflow.parameters.compose-memory}}",
+                                    ephemeral-storage: "{{workflow.parameters.compose-scratch}}",
+                                  }
+                                limits:
+                                  {
+                                    cpu: "{{workflow.parameters.compose-cpu}}",
+                                    memory: "{{workflow.parameters.compose-memory}}",
+                                    ephemeral-storage: "{{workflow.parameters.compose-scratch}}",
+                                  }
                               volumeMounts:
                                 - { name: scratch, mountPath: /scratch }
                           volumes:
-                            # DuckDB's spill: a join across the exports does not
-                            # fit in memory. Sized with the container's
-                            # ephemeral-storage limit, which the namespace
-                            # LimitRange otherwise defaults to 1Gi — an eviction,
-                            # not a slowdown.
+                            # DuckDB's spill and staging: a join across the
+                            # exports does not fit in memory. Sized with the
+                            # container's ephemeral-storage limit, which the
+                            # namespace LimitRange otherwise defaults to 1Gi —
+                            # an eviction, not a slowdown.
                             - name: scratch
-                              emptyDir: { sizeLimit: 60Gi }
+                              emptyDir:
+                                { sizeLimit: "{{workflow.parameters.compose-scratch}}" }
 
     - name: load
       inputs:
@@ -297,12 +330,23 @@ spec:
                                 - name: AWS_REGION
                                   value: "eu-west-1"
                               resources:
-                                requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 40Gi }
-                                limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 40Gi }
+                                requests:
+                                  {
+                                    cpu: "1",
+                                    memory: "{{workflow.parameters.load-memory}}",
+                                    ephemeral-storage: "{{workflow.parameters.load-scratch}}",
+                                  }
+                                limits:
+                                  {
+                                    cpu: "2",
+                                    memory: "{{workflow.parameters.load-memory}}",
+                                    ephemeral-storage: "{{workflow.parameters.load-scratch}}",
+                                  }
                               volumeMounts:
                                 - { name: scratch, mountPath: /scratch }
                           volumes:
                             # The composed documents are cached here: fetched
-                            # once, read twice.
+                            # once, read twice, so this holds the whole file.
                             - name: scratch
-                              emptyDir: { sizeLimit: 40Gi }
+                              emptyDir:
+                                { sizeLimit: "{{workflow.parameters.load-scratch}}" }
