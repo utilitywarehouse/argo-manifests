@@ -72,14 +72,14 @@ spec:
       # 500-account preview and every account are the same query three orders
       # of magnitude apart. memory-limit is where DuckDB spills and must stay
       # below compose-memory, or the kernel kills it instead — raise together.
-      - { name: compose-cpu, value: "4" }
+      - { name: compose-cpu, value: "2" }
       - { name: compose-memory, value: 8Gi }
-      - { name: memory-limit, value: 6GB }
+      - { name: memory-limit, value: 5GB }
       # temp-limit is how much of the volume the spill may take. DuckDB
       # measures the node's disk behind the emptyDir, and writing past the
       # volume evicts the pod rather than failing the query.
       - { name: compose-scratch, value: 60Gi }
-      - { name: temp-limit, value: 40GB }
+      - { name: temp-limit, value: 30GB }
       # The composed file is fetched here whole, so this follows its size.
       - { name: load-memory, value: 4Gi }
       - { name: load-scratch, value: 40Gi }
