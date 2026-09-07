@@ -16,6 +16,8 @@
 #                         environment and has no container provider, so the
 #                         vault sidecar cannot serve it.
 #   the job-executor bundle, and its token harvested here as dev-aws-qe.
+#   config/test-data/manifest.json published from the app. Its `mapping`
+#                         block is the loader's policy — see mapping-policy.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -48,6 +50,22 @@ spec:
       - { name: alias, value: test-accounts }
       # The composition puts identifiers under _meta, not at the root.
       - { name: id-field, value: _meta.identifiers.account_id }
+      # How these documents are mapped, read from the `mapping` block of the
+      # manifest the app publishes — one artefact for everything decided about
+      # them, rather than a second file with no publisher.
+      #
+      # Without it the mapping is wholly derived, which indexes CRM's inner
+      # [{label, value}] arrays as nested. Measured on a real build: 21.1
+      # Lucene documents per account against 5.0, for arrays nothing queries
+      # correlated.
+      #
+      # The object must exist — a missing one fails the load rather than
+      # falling back. A manifest with no `mapping` block is fine.
+      - {
+          name: mapping-policy,
+          value: "s3://uw-dev-qe-test-data/config/test-data/manifest.json",
+        }
+      - { name: mapping-policy-key, value: mapping }
       - { name: shards, value: "3" }
       - { name: replicas, value: "1" }
       # Below the pod's memory limit, so DuckDB spills rather than being killed.
@@ -252,6 +270,12 @@ spec:
                                 - name: ID_FIELD
                                   value: |-
                                     {{workflow.parameters.id-field}}
+                                - name: MAPPING_POLICY
+                                  value: |-
+                                    {{workflow.parameters.mapping-policy}}
+                                - name: MAPPING_POLICY_KEY
+                                  value: |-
+                                    {{workflow.parameters.mapping-policy-key}}
                                 - name: INDEX_SHARDS
                                   value: |-
                                     {{workflow.parameters.shards}}
