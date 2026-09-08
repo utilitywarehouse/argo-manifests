@@ -78,7 +78,10 @@ spec:
       # temp-limit is how much of the volume the spill may take. DuckDB
       # measures the node's disk behind the emptyDir, and writing past the
       # volume evicts the pod rather than failing the query.
-      - { name: compose-scratch, value: 60Gi }
+      # Sized against a pass, not the collection: each pass is uploaded as it
+      # finishes, so the joined result never lands here. What the volume holds
+      # is one pass plus DuckDB's spill, which compose-partitions divides.
+      - { name: compose-scratch, value: 50Gi }
       - { name: temp-limit, value: 30GB }
       # How many passes the compose takes, each over a disjoint slice of the
       # accounts. DuckDB spills a sort or a join, but not the service records an
@@ -87,9 +90,10 @@ spec:
       # re-read of the extracts per pass, which is why the compose timeout is
       # hours rather than minutes.
       - { name: compose-partitions, value: "8" }
-      # The composed file is fetched here whole, so this follows its size.
+      # The loader streams its input twice rather than staging it, so neither
+      # of these follows the size of the composed set.
       - { name: load-memory, value: 4Gi }
-      - { name: load-scratch, value: 40Gi }
+      - { name: load-scratch, value: 4Gi }
       - { name: compose-timeout, value: 4h }
       - { name: load-timeout, value: 2h }
       - { name: job-active-deadline, value: 6h }
@@ -325,8 +329,6 @@ spec:
                                 - name: INDEX_REPLICAS
                                   value: |-
                                     {{workflow.parameters.replicas}}
-                                - name: WORK_DIR
-                                  value: "/scratch"
                                 - name: TIMEOUT
                                   value: |-
                                     {{workflow.parameters.load-timeout}}
