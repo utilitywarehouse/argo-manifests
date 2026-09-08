@@ -30,14 +30,14 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:chore-add-doc-adapters
-      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:chore-add-doc-adapters
-      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:ead92c818ad3db9f1b50ab0a0e88bd7c3c422e95
-      - call-http=registry.uw.systems/dev-enablement/call-http:ead92c818ad3db9f1b50ab0a0e88bd7c3c422e95
-      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:ead92c818ad3db9f1b50ab0a0e88bd7c3c422e95
-      - query-pg=registry.uw.systems/dev-enablement/query-pg:c88de2439b9d08d9a30b9b024dea51af5637c6b7
-      - query-bq=registry.uw.systems/dev-enablement/query-bq:c88de2439b9d08d9a30b9b024dea51af5637c6b7
-      - query-mongo=registry.uw.systems/dev-enablement/query-mongo:c88de2439b9d08d9a30b9b024dea51af5637c6b7
+      - data-orchestrator=registry.uw.systems/dev-enablement/data-orchestrator:2540bc37f194ec888ec8391a1afa80222b923d35
+      - data-adapter=registry.uw.systems/dev-enablement/data-adapter:2540bc37f194ec888ec8391a1afa80222b923d35
+      - call-grpc=registry.uw.systems/dev-enablement/call-grpc:38873e45f23c9e9a389912c40bc4632288dceb35
+      - call-http=registry.uw.systems/dev-enablement/call-http:38873e45f23c9e9a389912c40bc4632288dceb35
+      - exec-kube=registry.uw.systems/dev-enablement/exec-kube:38873e45f23c9e9a389912c40bc4632288dceb35
+      - query-pg=registry.uw.systems/dev-enablement/query-pg:38873e45f23c9e9a389912c40bc4632288dceb35
+      - query-bq=registry.uw.systems/dev-enablement/query-bq:38873e45f23c9e9a389912c40bc4632288dceb35
+      - query-mongo=registry.uw.systems/dev-enablement/query-mongo:38873e45f23c9e9a389912c40bc4632288dceb35
 generatorOptions:
   disableNameSuffixHash: true
 
