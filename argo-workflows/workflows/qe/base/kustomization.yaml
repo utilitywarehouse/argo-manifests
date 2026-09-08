@@ -19,8 +19,8 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:38873e45f23c9e9a389912c40bc4632288dceb35
-      - load-es=registry.uw.systems/dev-enablement/load-es:38873e45f23c9e9a389912c40bc4632288dceb35
+      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:14d74d1350a48363027f7cbdf04c7b39a2e5fdc1
+      - load-es=registry.uw.systems/dev-enablement/load-es:14d74d1350a48363027f7cbdf04c7b39a2e5fdc1
 generatorOptions:
   disableNameSuffixHash: true
 
