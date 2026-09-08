@@ -80,12 +80,19 @@ spec:
       # volume evicts the pod rather than failing the query.
       - { name: compose-scratch, value: 60Gi }
       - { name: temp-limit, value: 30GB }
+      # How many passes the compose takes, each over a disjoint slice of the
+      # accounts. DuckDB spills a sort or a join, but not the service records an
+      # aggregate collects into a list per account, so memory follows how many
+      # accounts a pass holds rather than how much scratch there is. Costs a
+      # re-read of the extracts per pass, which is why the compose timeout is
+      # hours rather than minutes.
+      - { name: compose-partitions, value: "8" }
       # The composed file is fetched here whole, so this follows its size.
       - { name: load-memory, value: 4Gi }
       - { name: load-scratch, value: 40Gi }
-      - { name: compose-timeout, value: 90m }
+      - { name: compose-timeout, value: 4h }
       - { name: load-timeout, value: 2h }
-      - { name: job-active-deadline, value: 3h }
+      - { name: job-active-deadline, value: 6h }
       - { name: job-ttl, value: 24h }
       - { name: cluster-name, value: dev-aws }
       - { name: target-namespace, value: qe }
@@ -199,6 +206,9 @@ spec:
                                 - name: DUCKDB_TEMP_LIMIT
                                   value: |-
                                     {{workflow.parameters.temp-limit}}
+                                - name: PARTITIONS
+                                  value: |-
+                                    {{workflow.parameters.compose-partitions}}
                                 - {
                                     name: TIMEOUT,
                                     value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}",
