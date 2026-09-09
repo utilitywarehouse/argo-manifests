@@ -95,6 +95,10 @@ spec:
       - { name: compose-partitions, value: "8" }
       # The loader streams its input twice rather than staging it, so neither
       # of these follows the size of the composed set.
+      # The loader decodes every document to derive the field catalogue, which
+      # is the pass it spends its time in and scales with cores: 84 MB/s on one,
+      # 154 on two. Two is also the largest that schedules dependably here.
+      - { name: load-cpu, value: "2" }
       - { name: load-memory, value: 4Gi }
       - { name: load-scratch, value: 4Gi }
       - { name: compose-timeout, value: 4h }
@@ -350,7 +354,7 @@ spec:
                               resources:
                                 requests:
                                   {
-                                    cpu: "1",
+                                    cpu: "{{workflow.parameters.load-cpu}}",
                                     memory: "{{workflow.parameters.load-memory}}",
                                     ephemeral-storage: "{{workflow.parameters.load-scratch}}",
                                   }
