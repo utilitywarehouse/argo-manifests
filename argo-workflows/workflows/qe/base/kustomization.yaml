@@ -10,16 +10,14 @@ resources:
 # transformer cannot reach because they are Argo expressions inside a Job
 # heredoc rather than resolvable image fields.
 # ---------------------------------------------------------------------------
-# The two pins move independently: CI builds only what a change reaches, so an
-# executor untouched by a merge has no image at that SHA.
 configMapGenerator:
   - name: qe-image-versions
     options:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:05a70b1210d310e4c897c2be167553c4bc8d53e7
-      - load-es=registry.uw.systems/dev-enablement/load-es:9f2df62cbd0d56be40934b3bb952b2cdf4dd15c5
+      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:a5a47cd6ba005ecb959f9e537f852cb48fed7725
+      - load-es=registry.uw.systems/dev-enablement/load-es:a5a47cd6ba005ecb959f9e537f852cb48fed7725
 generatorOptions:
   disableNameSuffixHash: true
 
