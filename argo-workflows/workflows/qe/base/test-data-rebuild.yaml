@@ -173,8 +173,12 @@ spec:
                     name: target-namespace,
                     value: "{{workflow.parameters.target-namespace}}",
                   }
-                # Unique across every execute-job this workflow makes.
-                - { name: job-name, value: test-data-compose-accounts }
+                # Unique across every execute-job this workflow makes, and the
+                # slices are eight of them.
+                - {
+                    name: job-name,
+                    value: "test-data-compose-accounts-{{inputs.parameters.pass}}",
+                  }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - {
                     name: log-level,
