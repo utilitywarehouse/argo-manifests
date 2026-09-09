@@ -9,9 +9,6 @@ resources:
 # and replacements onto template INPUT parameters, which kustomize's `images:`
 # transformer cannot reach because they are Argo expressions inside a Job
 # heredoc rather than resolvable image fields.
-#
-# On a branch, not a SHA: neither executor has been through CI yet. Move to a
-# main SHA once they have.
 # ---------------------------------------------------------------------------
 configMapGenerator:
   - name: qe-image-versions
@@ -19,8 +16,8 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:2cce4358ec9ce920f60d7bfa05ea741e931d785b
-      - load-es=registry.uw.systems/dev-enablement/load-es:2cce4358ec9ce920f60d7bfa05ea741e931d785b
+      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:05a70b1210d310e4c897c2be167553c4bc8d53e7
+      - load-es=registry.uw.systems/dev-enablement/load-es:05a70b1210d310e4c897c2be167553c4bc8d53e7
 generatorOptions:
   disableNameSuffixHash: true
 
