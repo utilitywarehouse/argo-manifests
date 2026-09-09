@@ -46,7 +46,13 @@ spec:
           name: query,
           value: "s3://uw-dev-qe-test-data/config/test-data/compose.sql",
         }
-      - { name: composed, value: "s3://uw-dev-qe-test-data/composite.ndjson" }
+      # A prefix, and one this run owns: slices are composed by separate pods and
+      # write a part each, and parts left by an earlier run under a shared
+      # prefix would be read as this run's documents.
+      - {
+          name: composed,
+          value: "s3://uw-dev-qe-test-data/composed/{{workflow.name}}/",
+        }
       - { name: alias, value: test-accounts }
       # The composition puts identifiers under _meta, not at the root.
       - { name: id-field, value: _meta.identifiers.account_id }
@@ -116,8 +122,11 @@ spec:
       steps:
         - - name: compose
             template: compose
+            withSequence:
+              count: "{{workflow.parameters.compose-partitions}}"
             arguments:
               parameters:
+                - { name: pass, value: "{{item}}" }
                 - {
                     name: timeout,
                     value: "{{workflow.parameters.compose-timeout}}",
@@ -148,6 +157,7 @@ spec:
           - name: job-active-deadline
           - name: job-ttl
           - name: timeout
+          - name: pass
       steps:
         - - name: compose
             templateRef:
@@ -200,7 +210,11 @@ spec:
                                     {{workflow.parameters.vars}}
                                 - name: OUTPUT
                                   value: |-
-                                    {{workflow.parameters.composed}}
+                                    {{workflow.parameters.composed}}part-{{inputs.parameters.pass}}.ndjson
+                                - name: PASS
+                                  value: "{{inputs.parameters.pass}}"
+                                - name: RUN_STARTED_AT
+                                  value: "{{workflow.creationTimestamp.RFC3339}}"
                                 - name: FORMAT
                                   value: "ndjson"
                                 - name: WORK_DIR
