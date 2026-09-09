@@ -66,6 +66,9 @@ spec:
           value: "s3://uw-dev-qe-test-data/config/test-data/manifest.json",
         }
       - { name: mapping-policy-key, value: mapping }
+      # The ETag the manifest had when this run was submitted. The app sends it;
+      # empty reads the object as it stands, which is what a manual submit does.
+      - { name: mapping-policy-version, value: "" }
       - { name: shards, value: "3" }
       - { name: replicas, value: "1" }
       # Parameters because the size of a rebuild is chosen at submit time: a
@@ -323,6 +326,9 @@ spec:
                                 - name: MAPPING_POLICY_KEY
                                   value: |-
                                     {{workflow.parameters.mapping-policy-key}}
+                                - name: MAPPING_POLICY_VERSION
+                                  value: |-
+                                    {{workflow.parameters.mapping-policy-version}}
                                 - name: INDEX_SHARDS
                                   value: |-
                                     {{workflow.parameters.shards}}
