@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - data-export-energy-tariff-system.yaml
   - data-export-energy-meterpoints.yaml
+  - data-export-energy-meters.yaml
   - data-export-energy-services.yaml
   - data-export-energy-services-event-store.yaml
   - flow-gentrack-account-map.yaml

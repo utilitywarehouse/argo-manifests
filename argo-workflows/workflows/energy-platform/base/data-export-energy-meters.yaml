@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-energy-meters
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      energy-meters data export from energy-platform
+
+  labels:
+    workflows.argoproj.io/creator: energy
+    data.uw.systems/system: energy-meters
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: energy-meters
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: energy_meters }
+        - { name: entities, value: "meters,smart_meters,fit_meters" }
+        - { name: label, value: energy-meters-export }
+        - { name: log-level, value: debug }
+        - { name: adapter-driver, value: cockroachdb }
+        - { name: adapter-secret, value: meter-reads-api-cockroachdb-secrets }
+        - { name: adapter-dsn-key, value: url }
+        - { name: ca-secret, value: ca.auth.keys.energy-platform }
+        - { name: ca-auth-key, value: meter.reads.auth.key }
+        - { name: ca-config, value: ca.config.energy-platform }
+        - { name: ca-profile-key, value: ca.meter-reads.node.profile }
+        - { name: ca-address-key, value: ca.endpoint }
