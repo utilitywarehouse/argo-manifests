@@ -18,6 +18,10 @@ patches:
     path: data-export-energy-meterpoints.yaml
   - target:
       kind: CronWorkflow
+      name: data-export-energy-meters
+    path: data-export-energy-meters.yaml
+  - target:
+      kind: CronWorkflow
       name: data-export-energy-services
     path: data-export-energy-services.yaml
   - target:
