@@ -32,7 +32,7 @@ spec:
         - { name: system-key, value: energy_meterpoints }
         - {
             name: entities,
-            value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping",
+            value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping,postcode_gsp_mapping",
           }
         - { name: label, value: energy-meterpoints-export }
         - { name: log-level, value: debug }
