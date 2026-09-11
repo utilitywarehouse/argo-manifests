@@ -1,0 +1,55 @@
+# debt-collection export — app.debt.v2 from the finance mongo cluster.
+#
+# The operator-managed cluster Secret, used as it stands. mongolizer.url carries
+# the credentials but no database — its path is empty — so the database is named
+# as a driver option rather than by composing a new DSN. That also keeps
+# authSource defaulting to admin, where mongolizer is defined.
+#
+# ⚠️ Unlike bills-total-api, this DSN pins pod -0 rather than the service, and
+# carries no readPreference. The driver discovers the set from that seed, so
+# reads land on the primary and -0 must be up to bootstrap discovery.
+#
+# The collection is named: the database holds 16 of them, half `.backup` copies.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-debt-collection
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      debt-collection data export from finance
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: debt-collection
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: debt-collection
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: debt_collection }
+        - { name: label, value: debt-collection-export }
+        - { name: adapter-driver, value: mongodb }
+        - { name: adapter-secret, value: debt-collection-mongo-cluster }
+        - { name: adapter-dsn-key, value: mongolizer.url }
+        - { name: driver-options, value: "database=app" }
+        - { name: entities, value: "debt.v2" }
+
+        # Unique, indexed, and string throughout — UUIDs, 0 non-strings across
+        # the collection. `_id` is an ObjectId and would sort above every string,
+        # so its chunk bounds would match nothing.
+        - { name: key-field, value: "account_id" }
