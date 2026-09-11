@@ -1,0 +1,51 @@
+# billing_adapter_db export — whole DB; selection happens downstream.
+# Budget plans (budget_plan_*) share the database with the billing adapter.
+#
+# Password auth, not the apps' IAM DSN. IAM would mean granting rds-db:connect
+# to qe-dev-data-orchestrator-rw, which every export in the cluster shares — one
+# role accumulating cross-domain DBs. billing_adapter_role_read_only keeps the
+# credential domain-owned, as tariff-system and energy-flows do on this RDS.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-energy-billing-adapter
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      billing_adapter_db data export from energy-billing
+
+  labels:
+    workflows.argoproj.io/creator: energy
+    data.uw.systems/system: energy-billing-adapter
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: energy-billing-adapter
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: energy_billing_adapter }
+        # No entities: discovery lists only what the role may SELECT, so the
+        # terraform grant list is the export scope.
+        - { name: label, value: energy-billing-adapter-export }
+        - { name: log-level, value: debug }
+        - { name: adapter-driver, value: postgres }
+        - { name: adapter-password-auth, value: "true" }
+        - { name: adapter-secret, value: energy-billing-data-adapter }
+        - { name: adapter-dsn-key, value: postgres_dsn_readonly }
+        # `events` is an append-only JSONB log — the one table that outgrows the
+        # 30m default. Raise both together.
+        - { name: timeout, value: 1h }
+        - { name: job-active-deadline, value: 1h10m }

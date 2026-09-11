@@ -42,6 +42,7 @@
 #     orchestrator-image, adapter-image   container images
 #     adapter-args                        adapter argv
 #     adapter-driver                      adapter DB driver (postgres | cockroach)
+#     adapter-password-auth               source RDS auth: password in the DSN, or IAM
 #     aws-bucket, aws-region              S3 output
 #     orchestrator-db-dsn                 shared orchestrator RDS (literal, IAM auth);
 #       or orchestrator-db-secret + -key  ...sourced from a secret instead (password DSN)
@@ -139,6 +140,13 @@ spec:
       # image-versions ConfigMap in shared/kustomization.yaml. Not UI-settable.
       - { name: adapter-args, value: "serve" }
       - { name: adapter-driver, value: postgres }
+      # How the adapter authenticates to an RDS source. "true" takes the password
+      # out of the DSN. "false" mints an IAM token instead, for a passwordless
+      # DSN (postgres://<role>@<host>/<db>) — the role must be rds_iam and the
+      # AWS role behind runner-sa must hold rds-db:connect for it.
+      - name: adapter-password-auth
+        value: "true"
+        enum: ["true", "false"]
       # CockroachDB cert auth for the adapter's SOURCE DB (optional). The adapter fetches its
       # client cert from the CA service; postgres sources don't need this. Nothing renders
       # unless ca-secret is set — leave it unset otherwise.
@@ -219,6 +227,7 @@ spec:
             }
           - { name: adapter-args, value: "serve" }
           - { name: adapter-driver, value: postgres }
+          - { name: adapter-password-auth, value: "true" }
           - { name: ca-secret, value: "" }
           - { name: ca-auth-key, value: auth.key }
           - { name: ca-address, value: "certificate-authority:8080" }
@@ -340,7 +349,7 @@ spec:
                                 - { name: LOG_LEVEL, value: {{inputs.parameters.log-level}} }
                                 - name: DB_DSN
                                   {{=inputs.parameters['adapter-dsn'] != '' ? 'value: "' + inputs.parameters['adapter-dsn'] + '"' : (inputs.parameters['adapter-secret'] != '' ? 'valueFrom: { secretKeyRef: { name: ' + inputs.parameters['adapter-secret'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }' : 'valueFrom: { configMapKeyRef: { name: ' + inputs.parameters['adapter-config'] + ', key: ' + inputs.parameters['adapter-dsn-key'] + ' } }')}}
-                                - { name: RDS_USE_PASSWORD_AUTH, value: "true" }
+                                - { name: RDS_USE_PASSWORD_AUTH, value: "{{inputs.parameters.adapter-password-auth}}" }
                                 - { name: DB_DRIVER, value: {{inputs.parameters.adapter-driver}} }   # postgres | cockroachdb | elasticsearch | mongodb
                                 # What to export. Empty means "discover": the SQL
                                 # drivers list their tables, mongodb lists the

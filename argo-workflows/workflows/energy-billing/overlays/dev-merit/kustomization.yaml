@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+components:
+  - ../../../components/export-format
+
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: CronWorkflow
+      name: data-export-energy-billing-adapter
+    path: data-export-energy-billing-adapter.yaml
