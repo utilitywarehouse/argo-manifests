@@ -56,10 +56,14 @@ metadata:
       from energy's service_snapshot or the gentrack migration table. Paste a
       list to resolve a few, or leave it empty for the whole population. Turn on
       with-bills to also report which of them energy-billing holds a bill for.
+    data.uw.systems/action-applies-when: _meta.counts.services.energy.gentrack_migrated:>0
+    data.uw.systems/bind.gentrack-account-numbers: _meta.identifiers.gentrack_account_number[]
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
     workflows.argoproj.io/invocation: standalone
+    data.uw.systems/actions: "true"
+    data.uw.systems/action-scope: account
     data.uw.systems/system: energy-platform
 spec:
   entrypoint: resolve

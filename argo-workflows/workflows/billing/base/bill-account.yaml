@@ -6,10 +6,14 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Bill one or more accounts by input
+    data.uw.systems/action-applies-when: _meta.counts.services.energy.live:>0
+    data.uw.systems/bind.account-numbers: _meta.identifiers.account_number[]
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: billing
     workflows.argoproj.io/invocation: standalone
+    data.uw.systems/actions: "true"
+    data.uw.systems/action-scope: account
     data.uw.systems/system: billing
     data.uw.systems/capability: bill-run
 spec:

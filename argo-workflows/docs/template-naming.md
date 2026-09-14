@@ -52,8 +52,35 @@ Each template carries a consistent metadata block. None of it hides a template f
 | `workflows.argoproj.io/creator` | label | team (`billing`, `qe`, …) | ownership; filter and search by team |
 | `data.uw.systems/system` | label | owning system | filter by system |
 | `data.uw.systems/capability` | label | capability (e.g. `bill-run`) | narrows to a capability where relevant |
+| `data.uw.systems/actions` | label | `"true"` | opt in to being offered against an account in test-data-ui |
+| `data.uw.systems/action-scope` | label | `account` \| `service` \| `bill` | what the action operates on; groups the menu |
+| `data.uw.systems/action-applies-when` | annotation | a Lucene query (see below) | which accounts it is offered for. Absent means all |
+| `data.uw.systems/bind.<parameter>` | annotation | a dotted path into the account document | fills that parameter from the account, for confirmation |
 
 `component` and `invocation` are **different axes**: `component` is _what the thing is_ (product vs building block), `invocation` is _whether it can be launched_. A template can legitimately be `invocation: standalone` **and** `component: step` — the four dual-use steps above are exactly that. Don't collapse them; they answer different questions.
+
+## Offering a template as an account action
+
+A template carrying `data.uw.systems/actions: "true"` is offered in test-data-ui against a selected account. Three further keys make the offer specific, and all three are read from the template — there is no list in the app to keep in step.
+
+**`action-scope`** says what it operates on. A label, because it is a short enumerated value and worth selecting on.
+
+**`action-applies-when`** says which accounts it is offered for. **It is a Lucene `query_string` over the composed account document, not expr-lang** — a different language and a different engine from `success-expr`, `assert` and Argo's own `when:`, all of which are expr-lang evaluated inside a running step. This one is evaluated by Elasticsearch before anything is submitted, which is what lets the app decide whether to offer the action at all. An annotation rather than a label, because a label value cannot contain `:` or `>`.
+
+```yaml
+data.uw.systems/action-applies-when: _meta.counts.services.energy.live:>0
+```
+
+Fields come from the index's own catalogue. Ranges on a field inside a flattened root need both bounds (`register_count:[2 TO 99]`, not `:>1`), and two conditions on one flattened root can be satisfied by two different elements — so liveness is taken from a `_meta` count rather than from the service record.
+
+**`bind.<parameter>`** fills a parameter from the account, for the person to confirm rather than have applied silently. The value is a dotted path; arrays along it are followed, so `bills.bills_total_api.invoiceid` offers every invoice the account has and the form shows each one's date and total beside it. A trailing `[]` says the **parameter** takes the whole list, comma-joined, rather than one of it:
+
+```yaml
+data.uw.systems/bind.account-numbers: _meta.identifiers.account_number[]
+data.uw.systems/bind.invoice-id: bills.bills_total_api.invoiceid
+```
+
+`[]` is only legal at the end of a path. It is not a wildcard — arrays are followed anyway — and one in the middle is rejected when the template is read.
 
 ## Naming the remote Job
 
@@ -140,4 +167,5 @@ Two things break it, and both come from ordinary values — expr predicates like
 1. Decide: does a human launch it? → `flow-`. Is it called by other workflows? → `step-`. When both, it's a `step`.
 2. Name it `<marker>-<domain>-<thing>`. Omit `<domain>` only for cross-domain `shared/` steps.
 3. Copy the metadata block: set `app.kubernetes.io/component` and `workflows.argoproj.io/invocation`, write a `description`, and set the ownership labels (`creator`, `system`, `capability`). For a step that must never be run alone (`invocation: reference-only`), lead the description with "Do NOT submit from the UI"; for a standalone-capable step, describe how it's normally used instead.
-4. Reference it by its full name from callers (`templateRef.name`) and from any kustomize `replacements` `select: { name: ... }`. Keep the filename short and descriptive; list it in the package `kustomization.yaml` by that filename.
+4. If a human should be able to run it against one account from test-data-ui, add `data.uw.systems/actions`, an `action-scope`, an `action-applies-when` if it only suits some accounts, and a `bind.<parameter>` for every parameter the account can answer.
+5. Reference it by its full name from callers (`templateRef.name`) and from any kustomize `replacements` `select: { name: ... }`. Keep the filename short and descriptive; list it in the package `kustomization.yaml` by that filename.
