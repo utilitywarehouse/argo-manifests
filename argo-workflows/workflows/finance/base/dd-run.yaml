@@ -6,10 +6,15 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Collect one or more billed accounts by direct debit in dev
+    data.uw.systems/action-applies-when: _meta.counts.bills.fulfilled:>0
+    data.uw.systems/bind.account-numbers: _meta.identifiers.account_number[]
+    data.uw.systems/bind.invoice-id: bills.bills_total_api.invoiceid
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: payments
     workflows.argoproj.io/invocation: standalone
+    data.uw.systems/actions: "true"
+    data.uw.systems/action-scope: bill
     data.uw.systems/system: finance
     data.uw.systems/capability: dd-run
 spec:
