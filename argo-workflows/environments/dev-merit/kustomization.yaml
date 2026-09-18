@@ -8,6 +8,7 @@ resources:
   - ../../system/namespaced/server
   - ../../workflows/templates
   - ../../workflows/energy-platform/overlays/dev-merit
+  - ../../workflows/cbc/overlays/dev-merit
   - ../../workflows/staging-ept/overlays/dev-merit
   - ../../workflows/billing/overlays/dev-merit
   - ../../workflows/energy-billing/overlays/dev-merit

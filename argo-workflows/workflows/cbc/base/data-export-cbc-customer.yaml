@@ -1,0 +1,62 @@
+# CBC customer_api: wallets and cards. Preferred over statement_v2 where both
+# hold a fact, as statuses here are text rather than bigint enums.
+#
+# wallets.uw_account_id is the UUIDv5 of the account number; wallets.id is the
+# service `reference` published by CRM's cbc-services-v2.
+#
+# cards carries holder PII and activation_code. SQL sources have no column
+# allow-list, so they land in the bucket; the composition drops them.
+# card_holders is skipped: all PII, and is_account_holder on cards covers it.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-cbc-customer
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      CBC wallet and card export from customer_api
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: cbc-customer
+    data.uw.systems/capability: data-export
+    # opts out of the export-format component; declared below
+    data.uw.systems/export-format: parquet
+spec:
+  schedules:
+    - "0 4 * * *"
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: cbc-customer
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: cbc_customer }
+        - { name: label, value: cbc-customer-export }
+        - { name: adapter-driver, value: cockroachdb }
+
+        # TODO(cbc-onboarding): qe_ro does not exist yet (cucaracha_ro has no grants)
+        - name: adapter-dsn
+          value: "postgresql://qe_ro@cockroachdb-proxy:26257/customer_api?sslmode=verify-full"
+
+        # cbc uses the runner's default key names, so no renames needed
+        - { name: ca-secret, value: ca-auth-key }
+        - { name: ca-config, value: ca.config }
+
+        # must be set: empty exports every table (account_balance, *_history)
+        - { name: entities, value: "wallets,cards" }
+
+        - name: export-format
+          value: parquet
+          enum: ["", "pgcopy", "parquet"]
+          description: >-
+            Pinned to parquet for the test-data composition.
