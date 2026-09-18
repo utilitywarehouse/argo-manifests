@@ -1,0 +1,60 @@
+# CBC statement_v2: the cashback wallet ledger. Its `wallet` table is skipped;
+# customer_api.wallets is a superset.
+#
+# transaction is a discriminated union: each id is the primary key of exactly one
+# detail row (wallet_load, wallet_unload, fee, ...). Join on id, don't treat
+# them as siblings or loads are double-counted.
+#
+# Enum columns (transaction_type, status, decline_reason, cashback_type,
+# dispute.status) are bigints with labels in proto only.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-cbc-statement
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      CBC wallet ledger export from statement_v2
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: cbc-statement
+    data.uw.systems/capability: data-export
+    # opts out of the export-format component; declared below
+    data.uw.systems/export-format: parquet
+spec:
+  schedules:
+    - "30 4 * * *" # after cbc-customer; same cluster
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: cbc-statement
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: cbc_statement }
+        - { name: label, value: cbc-statement-export }
+        - { name: adapter-driver, value: cockroachdb }
+
+        # owner user: no read-only user exists
+        - name: adapter-dsn
+          value: "postgresql://statement_v2@cockroachdb-proxy:26257/statement_v2?sslmode=verify-full"
+
+        - { name: ca-secret, value: ca-auth-key }
+
+        # must be set: empty exports every table
+        - { name: entities, value: "transaction,cashback,dispute" }
+
+        - name: export-format
+          value: parquet
+          enum: ["", "pgcopy", "parquet"]
+          description: >-
+            Pinned to parquet for the test-data composition.
