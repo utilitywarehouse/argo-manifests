@@ -44,18 +44,14 @@ spec:
         - { name: label, value: cbc-statement-export }
         - { name: adapter-driver, value: cockroachdb }
 
-        # TODO(cbc-onboarding): qe_ro does not exist yet
+        # owner user: no read-only user exists
         - name: adapter-dsn
-          value: "postgresql://qe_ro@cockroachdb-proxy:26257/statement_v2?sslmode=verify-full"
+          value: "postgresql://statement_v2@cockroachdb-proxy:26257/statement_v2?sslmode=verify-full"
 
         - { name: ca-secret, value: ca-auth-key }
-        - { name: ca-config, value: ca.config }
 
-        # must be set: empty exports every table; authorisation/settlement left out
-        - {
-            name: entities,
-            value: "transaction,cashback,wallet_load,wallet_unload,dispute",
-          }
+        # must be set: empty exports every table
+        - { name: entities, value: "transaction,cashback,dispute" }
 
         - name: export-format
           value: parquet
