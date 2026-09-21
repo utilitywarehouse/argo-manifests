@@ -2,28 +2,18 @@
 # derive-meter-state — fold the meterpoint event log into the meters table
 # =============================================================================
 # energy-meter-reads-api dropped its `meters` and `smart_meters` projections
-# (#421). energy-meterpoints owns meters now and materialises none of it —
-# GetMeter rebuilds a meter per request from meter_event_log — so the account
-# model has to fold that log, and this is where it happens.
+# (#421) and energy-meterpoints, which owns meters now, materialises none of it.
 #
-# Not in the composition: folding 17.8M events inside compose OOM-killed four
-# of eight partitions at 8Gi, because every pod scanned the whole 7.1 GB export
-# and held ~4.8M meter_ids while doing everything else it already does. Here it
-# happens once, and compose reads a ~300 MB table like the one it replaces.
+# Not in the composition: folding 17.8M events there OOM-killed four of eight
+# compose partitions at 8Gi. Here it happens once and compose reads a ~300 MB
+# table shaped like the one it replaces.
 #
-# Referenced by flow-test-data-rebuild, and submittable on its own: it resolves
-# the export it reads by asking the orchestrator, so it needs no caller to tell
-# it which one.
+# Resolves its own input from the orchestrator, so it is submittable alone as
+# well as referenced by the rebuild. Output is keyed on the SOURCE run, so
+# folding the same export twice writes the same path rather than a duplicate.
 #
-# Output is keyed on the SOURCE run, not this run: the same export folds to the
-# same path, so a second call is a no-op rather than a duplicate.
-#
-# ⚠️ UNPROVEN, first run will say: (1) whether an 89-line parameter survives
-# substitution into the Job manifest — Argo inserts raw text with no
-# re-indenting, and every other substituted value here is one line; (2) whether
-# call-grpc renders the response camelCase (runId) or as proto field names
-# (run_id); (3) what the fold costs in one pod, since parquet cannot be
-# partitioned and the aggregate holds every meter.
+# ⚠️ Unmeasured: what the fold costs in one pod. Parquet cannot be partitioned,
+# so the aggregate holds every meter at once.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -70,39 +60,14 @@ spec:
       - { name: timeout, value: 90m }
       - { name: job-active-deadline, value: 100m }
       - { name: job-ttl, value: 1h }
-      # The fold. One line, and it has to be: Argo substitutes raw text with no
-      # re-indenting, so a multi-line value lands unindented inside the Job
-      # manifest and stops it parsing. `make check` proves that rather than
-      # leaving it to a run.
+      # One line because Argo substitutes raw text with no re-indenting, so a
+      # multi-line value stops the Job manifest parsing. `make check` proves it.
       #
-      # What it does, since the SQL can no longer say so itself:
-      #
-      #   Every field is last-writer-wins over one meter's events, ordered by
-      #   saved_at and projecting occurred_at, as GetMeter's own builders do. One
-      #   GROUP BY, because six aggregates over the same scan is what OOM-killed
-      #   this inside compose.
-      #
-      #   Keyed on the payload's @type, not event_name: gentrack-webhook-processor
-      #   wrote event_name as the literal "Event" on 116 rows on 2025-11-13, and
-      #   @type is right on all of them.
-      #
-      #   uninstalled_at is moved by four events and set by one, so the last of
-      #   them decides. Discovery does not clear it — a re-discovered meter stays
-      #   removed.
-      #
-      #   Registers are replaced wholesale and renamed to the old table's keys:
-      #   the event says id/noOfDials, `meters` said register_id/dials, and an
-      #   absent label or tpr lands as ''. There is deliberately NO tpr guard —
-      #   GetMeter drops a whole electricity register configuration when any
-      #   register lacks a tpr, where the consumer that filled `meters` kept it,
-      #   and dropping them would empty the registers of an eighth of the estate.
-      #
-      #   installed_at is the event's occurred_at, so it is when the meter went
-      #   in. The old column held the Kafka envelope's created_at, which meant
-      #   every value was the day the 2021 backfill ran.
-      #
-      #   Unscoped: every meter, because the output stands in for a table rather
-      #   than one run's slice.
+      # Three things not to undo: it keys on the payload's @type, because
+      # event_name reads "Event" on 116 rows written 2025-11-13; it has no tpr
+      # guard, where GetMeter drops a whole register configuration for a missing
+      # tpr and would empty an eighth of the estate; and installed_at is the
+      # event's occurred_at, not the old column's Kafka envelope created_at.
       - name: fold-sql
         value: |-
           WITH ev AS ( SELECT CAST(t.meter_id AS VARCHAR) AS meter_id, CAST(t.mpxn AS VARCHAR) AS mpxn, {s: try_cast(t.saved_at AS TIMESTAMP), u: CAST(t.uuid AS VARCHAR)} AS seq, try_cast(t.occurred_at AS TIMESTAMP) AS occurred_at, regexp_extract(json_extract_string(t.payload, '$."@type"'), '[^.]+$') AS kind, coalesce(json_extract_string(t.payload, '$.meterTypeElec'), json_extract_string(t.payload, '$.meterTypeGas')) AS meter_type, json_extract_string(t.payload, '$.meterSerialNumber') AS serial, json_extract_string(t.payload, '$.meterpointNumber') AS mp_number, json_extract_string(t.payload, '$.measurementSystem') AS system, list_transform(CAST(json_extract(t.payload, '$.configuration.registers') AS JSON[]), lambda r: {dials: coalesce(CAST(json_extract(r, '$.noOfDials') AS INTEGER), 0), label: coalesce(json_extract_string(r, '$.label'), ''), register_id: json_extract_string(r, '$.id'), tpr: coalesce(json_extract_string(r, '$.tpr'), '')}) AS registers FROM read_parquet(getvariable('energy_meterpoints/meter_event_log'), union_by_name=true) t ), folded AS ( SELECT meter_id, any_value(mpxn) AS mpxn, arg_max(meter_type, seq) FILTER (WHERE meter_type IS NOT NULL AND kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent', 'MeterTypeCorrectedEvent')) AS meter_type, arg_max(serial, seq) FILTER (WHERE kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS serial, arg_max(mp_number, seq) FILTER (WHERE kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS mp_number, arg_max(system, seq) FILTER (WHERE kind = 'MeterDiscoveredEvent' AND system IS NOT NULL) AS system, arg_max(kind, seq) FILTER (WHERE kind IN ('MeterUninstalledEvent', 'MeterErroneouslyUninstalledEvent', 'MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS life_kind, arg_max(occurred_at, seq) FILTER (WHERE kind IN ('MeterUninstalledEvent', 'MeterErroneouslyUninstalledEvent', 'MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS life_at, arg_max(occurred_at, seq) FILTER (WHERE kind IN ('MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS installed_at, arg_max(registers, seq) FILTER (WHERE len(registers) > 0 AND kind IN ('MeterRegistersDiscoveredEvent', 'MeterRegisterConfigurationChangedEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS registers FROM ev GROUP BY meter_id ) SELECT meter_id, coalesce(serial, '') AS meter_serial_number, coalesce(mp_number, mpxn) AS mpxn, coalesce(meter_type, '') AS meter_type, CAST(to_json(registers) AS VARCHAR) AS registers, CASE system WHEN 'MEASUREMENT_SYSTEM_GAS_METRIC' THEN 'UnitOfMeasureMetric' WHEN 'MEASUREMENT_SYSTEM_GAS_IMPERIAL' THEN 'UnitOfMeasureImperial' ELSE '' END AS units_of_measure, CASE WHEN life_kind = 'MeterUninstalledEvent' THEN replace(CAST(life_at AS VARCHAR), ' ', 'T') || 'Z' END AS uninstalled_at, replace(CAST(installed_at AS VARCHAR), ' ', 'T') || 'Z' AS installed_at FROM folded;
