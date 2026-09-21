@@ -19,3 +19,13 @@ patches:
       - op: add
         path: /metadata/labels/data.uw.systems~1namespace
         value: qe
+  - target:
+      kind: WorkflowTemplate
+      name: flow-derive-meter-state
+    patch: |-
+      - op: add
+        path: /metadata/labels/data.uw.systems~1cluster
+        value: dev-aws
+      - op: add
+        path: /metadata/labels/data.uw.systems~1namespace
+        value: qe
