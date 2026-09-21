@@ -39,8 +39,7 @@ spec:
       - { name: source-system-key, value: energy_meterpoints }
       - { name: source-entity, value: meter_event_log }
       - { name: orchestrator-address, value: "data-orchestrator:8090" }
-      # Where the folded table lands. The source run id is appended, so the
-      # artifact says which export it came from.
+      # Where the folded table lands, replaced each run.
       - {
           name: derived,
           value: "s3://uw-dev-qe-test-data/derived/energy_meters/",
@@ -170,13 +169,18 @@ spec:
                 # The run id, then the first file. The read pattern is derived
                 # from the file rather than assembled from a path convention:
                 # the orchestrator's answer is the one thing that cannot drift.
+                # destinationUri is the export's directory, so the read
+                # pattern is it plus a glob — no reassembling it from a file
+                # path. The previous version sliced files[0].uri apart with an
+                # expression Argo could not parse, and passed the unevaluated
+                # tag through to DuckDB as a literal path.
                 - {
                     name: result-expr,
-                    value: 'response.body.exports[0].runId + " " + response.body.exports[0].files[0].uri',
+                    value: 'response.body.exports[0].destinationUri + "*.parquet"',
                   }
                 - {
                     name: assert,
-                    value: "len(response.body.exports) == 1 and len(response.body.exports[0].files) > 0",
+                    value: 'len(response.body.exports) == 1 and response.body.exports[0].destinationUri != ""',
                   }
                 - {
                     name: assert-message,
@@ -188,12 +192,11 @@ spec:
             template: fold
             arguments:
               parameters:
-                # The chunk's directory with a glob for its siblings: one export
-                # is 180 files and the fold needs all of them, because the log is
-                # chunked on its uuid primary key and a meter's events are spread
-                # across every chunk.
+                # Every chunk: one export is 180 files and the fold needs all
+                # of them, because the log is chunked on its uuid primary key so
+                # a meter's events are spread across every chunk.
                 - name: source
-                  value: "{{=join(split(split(steps.resolve.outputs.result, ' ')[1], '/')[:-1], '/') + '/*.parquet'}}"
+                  value: "{{steps.resolve.outputs.parameters.result}}"
                 - {
                     name: query-duckdb-image,
                     value: "{{inputs.parameters.query-duckdb-image}}",
