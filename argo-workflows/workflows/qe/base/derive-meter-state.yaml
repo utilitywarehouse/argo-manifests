@@ -49,16 +49,24 @@ spec:
       - { name: image-pull-secret, value: dockerhub-key }
       - { name: log-level, value: info }
       # One pod, one pass: parquet cannot be partitioned, so the aggregate holds
-      # every meter at once. Sized generously until the first run measures it —
-      # memory-limit is where DuckDB spills and must stay under fold-memory, or
-      # the kernel kills it instead.
+      # every meter at once. Measured over all 17.8M events — 8Gi/6GB is
+      # OOM-killed, 12Gi/9GB completes in 1m43s, 16Gi/12GB in 1m51s. Compose
+      # has 8Gi for the whole composition, which is why the fold cannot live
+      # there whatever the SQL looks like.
+      #
+      # memory-limit is where DuckDB spills and must stay well under
+      # fold-memory: both OOMs hit the container limit with DuckDB's own budget
+      # unspent, because its JSON and list allocations are outside it.
       - { name: fold-cpu, value: "2" }
-      - { name: fold-memory, value: 16Gi }
-      - { name: memory-limit, value: 12GB }
+      - { name: fold-memory, value: 12Gi }
+      - { name: memory-limit, value: 9GB }
       - { name: fold-scratch, value: 50Gi }
       - { name: temp-limit, value: 30GB }
-      - { name: timeout, value: 90m }
-      - { name: job-active-deadline, value: 100m }
+      # The fold is 1m51s over every event, measured. These are the failure
+      # detector, not the budget: backoffLimit does not catch an image that
+      # will not pull, so a wrong tag costs exactly this long.
+      - { name: timeout, value: 10m }
+      - { name: job-active-deadline, value: 12m }
       - { name: job-ttl, value: 1h }
       # One line because Argo substitutes raw text with no re-indenting, so a
       # multi-line value stops the Job manifest parsing. `make check` proves it.
