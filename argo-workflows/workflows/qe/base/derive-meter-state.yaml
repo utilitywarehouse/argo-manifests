@@ -9,8 +9,9 @@
 # table shaped like the one it replaces.
 #
 # Resolves its own input from the orchestrator, so it is submittable alone as
-# well as referenced by the rebuild. Output is keyed on the SOURCE run, so
-# folding the same export twice writes the same path rather than a duplicate.
+# well as referenced by the rebuild. Output goes to one fixed path, replaced
+# each run like composed/ is: at 1m43s the fold is cheaper than reasoning about
+# whether a kept artifact matches the export compose is actually reading.
 #
 # ⚠️ Unmeasured: what the fold costs in one pod. Parquet cannot be partitioned,
 # so the aggregate holds every meter at once.
@@ -186,10 +187,6 @@ spec:
             template: fold
             arguments:
               parameters:
-                - {
-                    name: run-id,
-                    value: "{{=split(steps.resolve.outputs.result, ' ')[0]}}",
-                  }
                 # The chunk's directory with a glob for its siblings: one export
                 # is 180 files and the fold needs all of them, because the log is
                 # chunked on its uuid primary key and a meter's events are spread
@@ -250,9 +247,7 @@ spec:
           # find the artifact already there.
           - name: meters
             valueFrom:
-              expression: >-
-                inputs.parameters['derived'] +
-                split(steps.resolve.outputs.result, ' ')[0] + '/meters.parquet'
+              expression: "inputs.parameters['derived'] + 'meters.parquet'"
 
     # One Job, one pass over every event. Mirrors the compose step's shape —
     # same executor, same scratch volume, same bucket credentials — and differs
@@ -260,7 +255,6 @@ spec:
     - name: fold
       inputs:
         parameters:
-          - name: run-id
           - name: source
           - name: query-duckdb-image
           - name: cluster-name
@@ -326,7 +320,7 @@ spec:
                                     {"energy_meterpoints/meter_event_log": "{{inputs.parameters.source}}"}
                                 - name: OUTPUT
                                   value: |-
-                                    {{inputs.parameters.derived}}{{inputs.parameters.run-id}}/meters.parquet
+                                    {{inputs.parameters.derived}}meters.parquet
                                 - name: FORMAT
                                   value: "parquet"
                                 - name: WORK_DIR
