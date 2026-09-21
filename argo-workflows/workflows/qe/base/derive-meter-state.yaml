@@ -45,8 +45,8 @@ spec:
         }
       - { name: cluster-name, value: dev-aws }
       - { name: target-namespace, value: qe }
-      - { name: aws-secret, value: test-data-bucket }
-      - { name: image-pull-secret, value: registry-credentials }
+      - { name: aws-secret, value: duckdb-s3 }
+      - { name: image-pull-secret, value: dockerhub-key }
       - { name: log-level, value: info }
       # One pod, one pass: parquet cannot be partitioned, so the aggregate holds
       # every meter at once. Sized generously until the first run measures it —
