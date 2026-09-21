@@ -17,13 +17,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      # qe-toolkit#311: parquet output and --query-sql, which the fold needs.
-      #
-      # ⚠️ The BRANCH tag, not a SHA, and temporary. A pull_request build tags
-      # type=sha with github.sha — the merge commit, which exists only inside
-      # that run — so the branch tag is the only one a pin can name. Repin to a
-      # main SHA once #311 merges.
-      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:feat-derive-meter-state
+      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:9c81d400ff0c8d4a661b376e243964480fb27551
       - load-es=registry.uw.systems/dev-enablement/load-es:1b5e3e67664d295d016c1685c2356f4a2ba91e60
 generatorOptions:
   disableNameSuffixHash: true
