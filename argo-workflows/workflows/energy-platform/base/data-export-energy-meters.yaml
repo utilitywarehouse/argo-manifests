@@ -30,7 +30,10 @@ spec:
         - { name: mode, value: export }
         - { name: run-type, value: RUN_TYPE_EXPORT }
         - { name: system-key, value: energy_meters }
-        - { name: entities, value: "meters,smart_meters,fit_meters" }
+        # fit_meters only: `meters` and `smart_meters` were dropped in
+        # https://github.com/utilitywarehouse/energy-meter-reads-api/pull/421
+        # The meter estate now comes from energy_meterpoints/meter_event_log.
+        - { name: entities, value: "fit_meters" }
         - { name: label, value: energy-meters-export }
         - { name: log-level, value: debug }
         - { name: adapter-driver, value: cockroachdb }
