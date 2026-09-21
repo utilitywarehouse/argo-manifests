@@ -77,62 +77,34 @@ spec:
       # guard, where GetMeter drops a whole register configuration for a missing
       # tpr and would empty an eighth of the estate; and installed_at is the
       # event's occurred_at, not the old column's Kafka envelope created_at.
-      - name: fold-sql
-        value: |-
-          WITH ev AS ( SELECT CAST(t.meter_id AS VARCHAR) AS meter_id, CAST(t.mpxn AS VARCHAR) AS mpxn, {s: try_cast(t.saved_at AS TIMESTAMP), u: CAST(t.uuid AS VARCHAR)} AS seq, try_cast(t.occurred_at AS TIMESTAMP) AS occurred_at, regexp_extract(json_extract_string(t.payload, '$."@type"'), '[^.]+$') AS kind, coalesce(json_extract_string(t.payload, '$.meterTypeElec'), json_extract_string(t.payload, '$.meterTypeGas')) AS meter_type, json_extract_string(t.payload, '$.meterSerialNumber') AS serial, json_extract_string(t.payload, '$.meterpointNumber') AS mp_number, json_extract_string(t.payload, '$.measurementSystem') AS system, list_transform(CAST(json_extract(t.payload, '$.configuration.registers') AS JSON[]), lambda r: {dials: coalesce(CAST(json_extract(r, '$.noOfDials') AS INTEGER), 0), label: coalesce(json_extract_string(r, '$.label'), ''), register_id: json_extract_string(r, '$.id'), tpr: coalesce(json_extract_string(r, '$.tpr'), '')}) AS registers FROM read_parquet(getvariable('energy_meterpoints/meter_event_log'), union_by_name=true) t ), folded AS ( SELECT meter_id, any_value(mpxn) AS mpxn, arg_max(meter_type, seq) FILTER (WHERE meter_type IS NOT NULL AND kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent', 'MeterTypeCorrectedEvent')) AS meter_type, arg_max(serial, seq) FILTER (WHERE kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS serial, arg_max(mp_number, seq) FILTER (WHERE kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS mp_number, arg_max(system, seq) FILTER (WHERE kind = 'MeterDiscoveredEvent' AND system IS NOT NULL) AS system, arg_max(kind, seq) FILTER (WHERE kind IN ('MeterUninstalledEvent', 'MeterErroneouslyUninstalledEvent', 'MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS life_kind, arg_max(occurred_at, seq) FILTER (WHERE kind IN ('MeterUninstalledEvent', 'MeterErroneouslyUninstalledEvent', 'MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS life_at, arg_max(occurred_at, seq) FILTER (WHERE kind IN ('MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS installed_at, arg_max(registers, seq) FILTER (WHERE len(registers) > 0 AND kind IN ('MeterRegistersDiscoveredEvent', 'MeterRegisterConfigurationChangedEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS registers FROM ev GROUP BY meter_id ) SELECT meter_id, coalesce(serial, '') AS meter_serial_number, coalesce(mp_number, mpxn) AS mpxn, coalesce(meter_type, '') AS meter_type, CAST(to_json(registers) AS VARCHAR) AS registers, CASE system WHEN 'MEASUREMENT_SYSTEM_GAS_METRIC' THEN 'UnitOfMeasureMetric' WHEN 'MEASUREMENT_SYSTEM_GAS_IMPERIAL' THEN 'UnitOfMeasureImperial' ELSE '' END AS units_of_measure, CASE WHEN life_kind = 'MeterUninstalledEvent' THEN replace(CAST(life_at AS VARCHAR), ' ', 'T') || 'Z' END AS uninstalled_at, replace(CAST(installed_at AS VARCHAR), ' ', 'T') || 'Z' AS installed_at FROM folded;
 
   templates:
     - name: derive
       inputs:
         parameters:
-          # Every value arrives here rather than being read from
-          # workflow.parameters: under templateRef that resolves against the
-          # CALLING workflow, which knows none of these.
+          # Literal defaults, not {{workflow.parameters.*}}: under templateRef
+          # those resolve against the CALLING workflow, which knows none of
+          # them. spec.arguments carries the same values for the submit form.
+          - { name: source-system-key, value: "energy_meterpoints" }
+          - { name: source-entity, value: "meter_event_log" }
+          - { name: orchestrator-address, value: "data-orchestrator:8090" }
           - {
-              name: source-system-key,
-              value: "{{workflow.parameters.source-system-key}}",
+              name: derived,
+              value: "s3://uw-dev-qe-test-data/derived/energy_meters/",
             }
-          - {
-              name: source-entity,
-              value: "{{workflow.parameters.source-entity}}",
-            }
-          - {
-              name: orchestrator-address,
-              value: "{{workflow.parameters.orchestrator-address}}",
-            }
-          - { name: derived, value: "{{workflow.parameters.derived}}" }
-          - {
-              name: cluster-name,
-              value: "{{workflow.parameters.cluster-name}}",
-            }
-          - {
-              name: target-namespace,
-              value: "{{workflow.parameters.target-namespace}}",
-            }
-          - { name: aws-secret, value: "{{workflow.parameters.aws-secret}}" }
-          - {
-              name: image-pull-secret,
-              value: "{{workflow.parameters.image-pull-secret}}",
-            }
-          - { name: log-level, value: "{{workflow.parameters.log-level}}" }
-          - { name: fold-cpu, value: "{{workflow.parameters.fold-cpu}}" }
-          - { name: fold-memory, value: "{{workflow.parameters.fold-memory}}" }
-          - {
-              name: memory-limit,
-              value: "{{workflow.parameters.memory-limit}}",
-            }
-          - {
-              name: fold-scratch,
-              value: "{{workflow.parameters.fold-scratch}}",
-            }
-          - { name: temp-limit, value: "{{workflow.parameters.temp-limit}}" }
-          - { name: timeout, value: "{{workflow.parameters.timeout}}" }
-          - {
-              name: job-active-deadline,
-              value: "{{workflow.parameters.job-active-deadline}}",
-            }
-          - { name: job-ttl, value: "{{workflow.parameters.job-ttl}}" }
-          - { name: fold-sql, value: "{{workflow.parameters.fold-sql}}" }
+          - { name: cluster-name, value: "dev-aws" }
+          - { name: target-namespace, value: "qe" }
+          - { name: aws-secret, value: "duckdb-s3" }
+          - { name: image-pull-secret, value: "dockerhub-key" }
+          - { name: log-level, value: "info" }
+          - { name: fold-cpu, value: "2" }
+          - { name: fold-memory, value: "12Gi" }
+          - { name: memory-limit, value: "9GB" }
+          - { name: fold-scratch, value: "50Gi" }
+          - { name: temp-limit, value: "30GB" }
+          - { name: timeout, value: "10m" }
+          - { name: job-active-deadline, value: "12m" }
+          - { name: job-ttl, value: "1h" }
           - {
               name: query-duckdb-image,
               value: "registry.uw.systems/dev-enablement/query-duckdb:main",
@@ -242,7 +214,6 @@ spec:
                     value: "{{inputs.parameters.job-active-deadline}}",
                   }
                 - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
-                - { name: fold-sql, value: "{{inputs.parameters.fold-sql}}" }
       outputs:
         parameters:
           # What compose reads, for the caller to pass on as a var. Derived from
@@ -276,6 +247,8 @@ spec:
           - name: job-active-deadline
           - name: job-ttl
           - name: fold-sql
+            value: |-
+              WITH ev AS ( SELECT CAST(t.meter_id AS VARCHAR) AS meter_id, CAST(t.mpxn AS VARCHAR) AS mpxn, {s: try_cast(t.saved_at AS TIMESTAMP), u: CAST(t.uuid AS VARCHAR)} AS seq, try_cast(t.occurred_at AS TIMESTAMP) AS occurred_at, regexp_extract(json_extract_string(t.payload, '$."@type"'), '[^.]+$') AS kind, coalesce(json_extract_string(t.payload, '$.meterTypeElec'), json_extract_string(t.payload, '$.meterTypeGas')) AS meter_type, json_extract_string(t.payload, '$.meterSerialNumber') AS serial, json_extract_string(t.payload, '$.meterpointNumber') AS mp_number, json_extract_string(t.payload, '$.measurementSystem') AS system, list_transform(CAST(json_extract(t.payload, '$.configuration.registers') AS JSON[]), lambda r: {dials: coalesce(CAST(json_extract(r, '$.noOfDials') AS INTEGER), 0), label: coalesce(json_extract_string(r, '$.label'), ''), register_id: json_extract_string(r, '$.id'), tpr: coalesce(json_extract_string(r, '$.tpr'), '')}) AS registers FROM read_parquet(getvariable('energy_meterpoints/meter_event_log'), union_by_name=true) t ), folded AS ( SELECT meter_id, any_value(mpxn) AS mpxn, arg_max(meter_type, seq) FILTER (WHERE meter_type IS NOT NULL AND kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent', 'MeterTypeCorrectedEvent')) AS meter_type, arg_max(serial, seq) FILTER (WHERE kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS serial, arg_max(mp_number, seq) FILTER (WHERE kind IN ('MeterDiscoveredEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS mp_number, arg_max(system, seq) FILTER (WHERE kind = 'MeterDiscoveredEvent' AND system IS NOT NULL) AS system, arg_max(kind, seq) FILTER (WHERE kind IN ('MeterUninstalledEvent', 'MeterErroneouslyUninstalledEvent', 'MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS life_kind, arg_max(occurred_at, seq) FILTER (WHERE kind IN ('MeterUninstalledEvent', 'MeterErroneouslyUninstalledEvent', 'MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS life_at, arg_max(occurred_at, seq) FILTER (WHERE kind IN ('MeterInstalledEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS installed_at, arg_max(registers, seq) FILTER (WHERE len(registers) > 0 AND kind IN ('MeterRegistersDiscoveredEvent', 'MeterRegisterConfigurationChangedEvent', 'MeterTechnicalDetailsUpdatedEvent')) AS registers FROM ev GROUP BY meter_id ) SELECT meter_id, coalesce(serial, '') AS meter_serial_number, coalesce(mp_number, mpxn) AS mpxn, coalesce(meter_type, '') AS meter_type, CAST(to_json(registers) AS VARCHAR) AS registers, CASE system WHEN 'MEASUREMENT_SYSTEM_GAS_METRIC' THEN 'UnitOfMeasureMetric' WHEN 'MEASUREMENT_SYSTEM_GAS_IMPERIAL' THEN 'UnitOfMeasureImperial' ELSE '' END AS units_of_measure, CASE WHEN life_kind = 'MeterUninstalledEvent' THEN replace(CAST(life_at AS VARCHAR), ' ', 'T') || 'Z' END AS uninstalled_at, replace(CAST(installed_at AS VARCHAR), ' ', 'T') || 'Z' AS installed_at FROM folded;
       steps:
         - - name: fold
             templateRef:

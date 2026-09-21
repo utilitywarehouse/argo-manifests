@@ -120,6 +120,27 @@ spec:
   templates:
     - name: rebuild
       steps:
+        # Meter state, before anything reads it. energy-meter-reads-api dropped
+        # the `meters` projection (#421) and the fold that replaces it needs
+        # more memory than compose has for everything together — 12Gi against
+        # compose's 8Gi — so it runs as its own pod first. ~2 minutes.
+        #
+        # Every parameter it needs is defaulted on its own template; only the
+        # cluster and namespace come from here, so the two cannot disagree.
+        - - name: derive-meters
+            templateRef:
+              name: flow-derive-meter-state
+              template: derive
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
         - - name: compose
             template: compose
             withSequence:
