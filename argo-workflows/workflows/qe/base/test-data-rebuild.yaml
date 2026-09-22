@@ -105,11 +105,6 @@ spec:
       # rather than every export whole. Empty skips the step: a preview is one
       # partition, which reads everything anyway.
       - { name: shard-query, value: "" }
-      # What to derive before composing: a JSON array the app writes, one entry
-      # per published derivation — {name, query, output, partitions}. Empty
-      # derives nothing, which is what a rebuild did before derivations were
-      # published rather than built into this manifest.
-      - { name: derives, value: "[]" }
       # The loader streams its input twice rather than staging it, so neither
       # of these follows the size of the composed set.
       # The loader decodes every document to derive the field catalogue, which
@@ -131,42 +126,6 @@ spec:
   templates:
     - name: rebuild
       steps:
-        # Every published derivation, before anything reads it: each turns
-        # exports into a table the composition reads as `derived/<name>`. The
-        # app writes the list — a derivation is SQL it publishes, not a step
-        # this manifest knows about — so an empty list runs nothing.
-        - - name: derive
-            templateRef:
-              name: step-test-data-derive
-              template: derive
-            withParam: "{{workflow.parameters.derives}}"
-            arguments:
-              parameters:
-                - { name: name, value: "{{item.name}}" }
-                - { name: query, value: "{{item.query}}" }
-                - { name: output, value: "{{item.output}}" }
-                - { name: partitions, value: "{{item.partitions}}" }
-                - { name: vars, value: "{{workflow.parameters.vars}}" }
-                - {
-                    name: cluster-name,
-                    value: "{{workflow.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{workflow.parameters.target-namespace}}",
-                  }
-                - {
-                    name: aws-secret,
-                    value: "{{workflow.parameters.aws-secret}}",
-                  }
-                - {
-                    name: image-pull-secret,
-                    value: "{{workflow.parameters.image-pull-secret}}",
-                  }
-                - {
-                    name: log-level,
-                    value: "{{workflow.parameters.log-level}}",
-                  }
         - - name: shard
             template: shard
             when: "'{{workflow.parameters.shard-query}}' != ''"
