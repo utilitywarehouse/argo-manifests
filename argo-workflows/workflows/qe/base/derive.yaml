@@ -53,8 +53,10 @@ spec:
       - { name: derive-cpu, value: "2" }
       - { name: derive-memory, value: 8Gi }
       - { name: memory-limit, value: 5GB }
-      - { name: derive-scratch, value: 20Gi }
-      - { name: temp-limit, value: 15GB }
+      # The volume is DuckDB's spill, not the result: that goes to object
+      # storage. The meter fold spilled ~145 MB writing a 300 MB table.
+      - { name: derive-scratch, value: 10Gi }
+      - { name: temp-limit, value: 8GB }
       # The failure detector, not the budget: backoffLimit does not catch an
       # image that will not pull.
       - { name: timeout, value: 30m }
@@ -81,8 +83,8 @@ spec:
           - { name: derive-cpu, value: "2" }
           - { name: derive-memory, value: "8Gi" }
           - { name: memory-limit, value: "5GB" }
-          - { name: derive-scratch, value: "20Gi" }
-          - { name: temp-limit, value: "15GB" }
+          - { name: derive-scratch, value: "10Gi" }
+          - { name: temp-limit, value: "8GB" }
           - { name: timeout, value: "30m" }
           - { name: job-active-deadline, value: "35m" }
           - { name: job-ttl, value: "1h" }
