@@ -1,0 +1,303 @@
+# =============================================================================
+# derive — turn exports into a table compose can read
+# =============================================================================
+# A derivation is published SQL plus a name: it reads exports by name, as the
+# composition does, and writes parquet the composition then reads as
+# `derived/<name>`. The first one folds energy_meterpoints/meter_event_log into
+# the shape the dropped energy_meters/meters table had, but nothing here knows
+# that — the SQL lives with the composition it serves, not in this manifest.
+#
+# Sized like compose and split like compose: one pod per partition at 8Gi, with
+# `partitions` the only dial. The fold's own aggregate holds every meter it is
+# given at once, so growth is answered by raising partitions rather than memory
+# — 4.8M meters need 5GB, 1.2M fit in 2GB (measured).
+#
+# A step, not a flow: it exists to be called by the rebuild, and runs standalone
+# only to try one out.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-test-data-derive
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Run a published derivation over the exports named in `vars` and write
+      parquet for the composition to read. Called by flow-test-data-rebuild;
+      submit directly only to try a derivation out.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/invocation: standalone
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: test-data
+    data.uw.systems/capability: derive
+spec:
+  entrypoint: derive
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      # What to run, over what, to where. No defaults: a derivation is named by
+      # its caller, and a wrong default would write one artifact over another.
+      - { name: name }
+      - { name: query }
+      - { name: vars }
+      - { name: output }
+      # How many pods split the meters, accounts, or whatever the SQL groups by.
+      # The SQL decides what a partition is, reading `partition` and
+      # `partitions`, exactly as the composition's spine does.
+      - { name: partitions, value: "1" }
+      - { name: cluster-name, value: dev-aws }
+      - { name: target-namespace, value: qe }
+      - { name: aws-secret, value: duckdb-s3 }
+      - { name: image-pull-secret, value: dockerhub-key }
+      - { name: log-level, value: info }
+      # 8Gi, the size every step in the rebuild asks for: of thirty schedulable
+      # nodes a busy dev-aws had twenty-one with 8Gi free and one with 12Gi.
+      # memory-limit is where DuckDB spills; the gap above it is what it cannot
+      # spill and what the kernel kills on, so widen it rather than close it.
+      - { name: derive-cpu, value: "2" }
+      - { name: derive-memory, value: 8Gi }
+      - { name: memory-limit, value: 5GB }
+      - { name: derive-scratch, value: 20Gi }
+      - { name: temp-limit, value: 15GB }
+      # The failure detector, not the budget: backoffLimit does not catch an
+      # image that will not pull, so a wrong tag costs exactly this long.
+      - { name: timeout, value: 30m }
+      - { name: job-active-deadline, value: 35m }
+      - { name: job-ttl, value: 1h }
+
+  templates:
+    - name: derive
+      inputs:
+        parameters:
+          # Literal defaults, not {{workflow.parameters.*}}: under templateRef
+          # those resolve against the CALLING workflow, which knows none of
+          # them. spec.arguments carries the same values for the submit form.
+          - { name: name }
+          - { name: query }
+          - { name: vars }
+          - { name: output }
+          - { name: partitions, value: "1" }
+          - { name: cluster-name, value: "dev-aws" }
+          - { name: target-namespace, value: "qe" }
+          - { name: aws-secret, value: "duckdb-s3" }
+          - { name: image-pull-secret, value: "dockerhub-key" }
+          - { name: log-level, value: "info" }
+          - { name: derive-cpu, value: "2" }
+          - { name: derive-memory, value: "8Gi" }
+          - { name: memory-limit, value: "5GB" }
+          - { name: derive-scratch, value: "20Gi" }
+          - { name: temp-limit, value: "15GB" }
+          - { name: timeout, value: "30m" }
+          - { name: job-active-deadline, value: "35m" }
+          - { name: job-ttl, value: "1h" }
+          - {
+              name: query-duckdb-image,
+              value: "registry.uw.systems/dev-enablement/query-duckdb:main",
+            }
+      steps:
+        - - name: run
+            template: run
+            withSequence:
+              count: "{{inputs.parameters.partitions}}"
+            arguments:
+              parameters:
+                - { name: partition, value: "{{item}}" }
+                - { name: name, value: "{{inputs.parameters.name}}" }
+                - { name: query, value: "{{inputs.parameters.query}}" }
+                - { name: vars, value: "{{inputs.parameters.vars}}" }
+                - { name: output, value: "{{inputs.parameters.output}}" }
+                - {
+                    name: partitions,
+                    value: "{{inputs.parameters.partitions}}",
+                  }
+                - {
+                    name: query-duckdb-image,
+                    value: "{{inputs.parameters.query-duckdb-image}}",
+                  }
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - {
+                    name: aws-secret,
+                    value: "{{inputs.parameters.aws-secret}}",
+                  }
+                - {
+                    name: image-pull-secret,
+                    value: "{{inputs.parameters.image-pull-secret}}",
+                  }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - {
+                    name: derive-cpu,
+                    value: "{{inputs.parameters.derive-cpu}}",
+                  }
+                - {
+                    name: derive-memory,
+                    value: "{{inputs.parameters.derive-memory}}",
+                  }
+                - {
+                    name: memory-limit,
+                    value: "{{inputs.parameters.memory-limit}}",
+                  }
+                - {
+                    name: derive-scratch,
+                    value: "{{inputs.parameters.derive-scratch}}",
+                  }
+                - {
+                    name: temp-limit,
+                    value: "{{inputs.parameters.temp-limit}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: job-active-deadline,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
+                - { name: job-ttl, value: "{{inputs.parameters.job-ttl}}" }
+      outputs:
+        parameters:
+          # What compose reads: every partition's part, as one read pattern.
+          # Decided here rather than plumbed back out of the Jobs, so a caller
+          # knows the path before the first pod starts.
+          - name: reads
+            valueFrom:
+              expression: "inputs.parameters['output'] + 'part-*.parquet'"
+
+    # One Job per partition. Mirrors the compose step's shape — same executor,
+    # same scratch volume, same bucket credentials — and differs only in writing
+    # parquet, and in taking its SQL from object storage rather than a query
+    # parameter this manifest would have to carry.
+    - name: run
+      inputs:
+        parameters:
+          - name: partition
+          - name: name
+          - name: query
+          - name: vars
+          - name: output
+          - name: partitions
+          - name: query-duckdb-image
+          - name: cluster-name
+          - name: target-namespace
+          - name: aws-secret
+          - name: image-pull-secret
+          - name: log-level
+          - name: derive-cpu
+          - name: derive-memory
+          - name: memory-limit
+          - name: derive-scratch
+          - name: temp-limit
+          - name: timeout
+          - name: job-active-deadline
+          - name: job-ttl
+      steps:
+        - - name: run
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                # Unique across every execute-job a run makes, and a rebuild
+                # makes one per derivation per partition.
+                - {
+                    name: job-name,
+                    value: "derive-{{inputs.parameters.name}}-{{inputs.parameters.partition}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          restartPolicy: Never
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          containers:
+                            - name: derive
+                              image: {{inputs.parameters.query-duckdb-image}}
+                              imagePullPolicy: Always
+                              env:
+                                # Where the SQL is, not the SQL itself: the Job
+                                # fetches it, so a derivation is as long and as
+                                # readable as it needs to be, and is published
+                                # rather than deployed.
+                                - name: QUERY
+                                  value: |-
+                                    {{inputs.parameters.query}}
+                                - name: VARS
+                                  value: |-
+                                    {{inputs.parameters.vars}}
+                                - name: OUTPUT
+                                  value: |-
+                                    {{inputs.parameters.output}}part-{{inputs.parameters.partition}}.parquet
+                                - name: FORMAT
+                                  value: "parquet"
+                                - name: PARTITIONS
+                                  value: |-
+                                    {{inputs.parameters.partitions}}
+                                - name: PARTITION
+                                  value: "{{inputs.parameters.partition}}"
+                                - name: WORK_DIR
+                                  value: "/scratch"
+                                - name: DUCKDB_MEMORY_LIMIT
+                                  value: |-
+                                    {{inputs.parameters.memory-limit}}
+                                - name: DUCKDB_THREADS
+                                  value: |-
+                                    {{inputs.parameters.derive-cpu}}
+                                - name: DUCKDB_TEMP_LIMIT
+                                  value: |-
+                                    {{inputs.parameters.temp-limit}}
+                                - {
+                                    name: TIMEOUT,
+                                    value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}",
+                                  }
+                                - name: LOG_LEVEL
+                                  value: |-
+                                    {{inputs.parameters.log-level}}
+                                - name: AWS_ACCESS_KEY_ID
+                                  valueFrom: { secretKeyRef: { name: {{inputs.parameters.aws-secret}}, key: AWS_ACCESS_KEY_ID } }
+                                - name: AWS_SECRET_ACCESS_KEY
+                                  valueFrom: { secretKeyRef: { name: {{inputs.parameters.aws-secret}}, key: AWS_SECRET_ACCESS_KEY } }
+                                - name: AWS_REGION
+                                  value: "eu-west-1"
+                              resources:
+                                requests:
+                                  {
+                                    cpu: "{{inputs.parameters.derive-cpu}}",
+                                    memory: "{{inputs.parameters.derive-memory}}",
+                                    ephemeral-storage: "{{inputs.parameters.derive-scratch}}",
+                                  }
+                                limits:
+                                  {
+                                    cpu: "{{inputs.parameters.derive-cpu}}",
+                                    memory: "{{inputs.parameters.derive-memory}}",
+                                    ephemeral-storage: "{{inputs.parameters.derive-scratch}}",
+                                  }
+                              volumeMounts:
+                                - { name: scratch, mountPath: /scratch }
+                          volumes:
+                            # DuckDB's spill. What a derivation groups per key
+                            # cannot spill — that is what partitions are for —
+                            # but its scans and its parquet write can.
+                            - name: scratch
+                              emptyDir:
+                                { sizeLimit: "{{inputs.parameters.derive-scratch}}" }
