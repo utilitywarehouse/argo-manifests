@@ -2,7 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - derive-meter-state.yaml
+  - derive.yaml
   - test-data-rebuild.yaml
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ replacements:
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-duckdb-image].value
         options: { create: false }
-      - select: { kind: WorkflowTemplate, name: flow-derive-meter-state }
+      - select: { kind: WorkflowTemplate, name: step-test-data-derive }
         fieldPaths:
           - spec.templates.*.inputs.parameters.[name=query-duckdb-image].value
         options: { create: false }

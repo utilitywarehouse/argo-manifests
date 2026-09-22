@@ -91,6 +91,9 @@ spec:
       # Sized against a partition, not the collection: each writes its own
       # part. What the volume holds is one partition plus DuckDB's spill.
       - { name: compose-scratch, value: 50Gi }
+      # The shard step streams object storage to object storage: its volume
+      # holds DuckDB's temp, not a copy of what it writes.
+      - { name: shard-scratch, value: 10Gi }
       - { name: temp-limit, value: 30GB }
       # How many partitions the accounts are composed in, a pod each. DuckDB
       # spills a sort or a join, but not the service records an aggregate
@@ -123,27 +126,6 @@ spec:
   templates:
     - name: rebuild
       steps:
-        # Meter state, before anything reads it. energy-meter-reads-api dropped
-        # the `meters` projection (#421) and the fold that replaces it needs
-        # more memory than compose has for everything together — 12Gi against
-        # compose's 8Gi — so it runs as its own pod first. ~2 minutes.
-        #
-        # Every parameter it needs is defaulted on its own template; only the
-        # cluster and namespace come from here, so the two cannot disagree.
-        - - name: derive-meters
-            templateRef:
-              name: flow-derive-meter-state
-              template: derive
-            arguments:
-              parameters:
-                - {
-                    name: cluster-name,
-                    value: "{{workflow.parameters.cluster-name}}",
-                  }
-                - {
-                    name: target-namespace,
-                    value: "{{workflow.parameters.target-namespace}}",
-                  }
         - - name: shard
             template: shard
             when: "'{{workflow.parameters.shard-query}}' != ''"
@@ -266,20 +248,20 @@ spec:
                                   {
                                     cpu: "{{workflow.parameters.compose-cpu}}",
                                     memory: "{{workflow.parameters.compose-memory}}",
-                                    ephemeral-storage: "{{workflow.parameters.compose-scratch}}",
+                                    ephemeral-storage: "{{workflow.parameters.shard-scratch}}",
                                   }
                                 limits:
                                   {
                                     cpu: "{{workflow.parameters.compose-cpu}}",
                                     memory: "{{workflow.parameters.compose-memory}}",
-                                    ephemeral-storage: "{{workflow.parameters.compose-scratch}}",
+                                    ephemeral-storage: "{{workflow.parameters.shard-scratch}}",
                                   }
                               volumeMounts:
                                 - { name: scratch, mountPath: /scratch }
                           volumes:
                             - name: scratch
                               emptyDir:
-                                { sizeLimit: "{{workflow.parameters.compose-scratch}}" }
+                                { sizeLimit: "{{workflow.parameters.shard-scratch}}" }
 
     - name: compose
       inputs:

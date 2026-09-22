@@ -21,7 +21,7 @@ patches:
         value: qe
   - target:
       kind: WorkflowTemplate
-      name: flow-derive-meter-state
+      name: step-test-data-derive
     patch: |-
       - op: add
         path: /metadata/labels/data.uw.systems~1cluster
