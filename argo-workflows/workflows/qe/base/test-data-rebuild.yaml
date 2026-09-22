@@ -79,26 +79,29 @@ spec:
       - { name: replicas, value: "1" }
       # Parameters because the size of a rebuild is chosen at submit time: a
       # 500-account preview and every account are the same query three orders
-      # of magnitude apart. memory-limit is where DuckDB spills and must stay
-      # below compose-memory, or the kernel kills it instead — raise together.
+      # of magnitude apart. memory-limit is where DuckDB spills. The gap above it
+      # to compose-memory is what DuckDB cannot spill, per-account lists and
+      # JSON, and it is that gap the kernel kills on: widen it, don't close it.
       - { name: compose-cpu, value: "2" }
       - { name: compose-memory, value: 8Gi }
       - { name: memory-limit, value: 5GB }
       # temp-limit is how much of the volume the spill may take. DuckDB
       # measures the node's disk behind the emptyDir, and writing past the
       # volume evicts the pod rather than failing the query.
-      # Sized against a pass, not the collection: each pass is uploaded as it
-      # finishes, so the joined result never lands here. What the volume holds
-      # is one pass plus DuckDB's spill, which compose-partitions divides.
+      # Sized against a partition, not the collection: each writes its own
+      # part. What the volume holds is one partition plus DuckDB's spill.
       - { name: compose-scratch, value: 50Gi }
       - { name: temp-limit, value: 30GB }
-      # How many passes the compose takes, each over a disjoint slice of the
-      # accounts. DuckDB spills a sort or a join, but not the service records an
-      # aggregate collects into a list per account, so memory follows how many
-      # accounts a pass holds rather than how much scratch there is. Costs a
-      # re-read of the extracts per pass, which is why the compose timeout is
-      # hours rather than minutes.
+      # How many partitions the accounts are composed in, a pod each. DuckDB
+      # spills a sort or a join, but not the service records an aggregate
+      # collects into a list per account, so memory follows how many accounts a
+      # partition holds. The lever for memory: raise this, not compose-memory.
       - { name: compose-partitions, value: "8" }
+      # The script that splits the large exports by partition before compose,
+      # written by the app for this run, so each partition reads its own part
+      # rather than every export whole. Empty skips the step: a preview is one
+      # partition, which reads everything anyway.
+      - { name: shard-query, value: "" }
       # The loader streams its input twice rather than staging it, so neither
       # of these follows the size of the composed set.
       # The loader decodes every document to derive the field catalogue, which
@@ -141,13 +144,16 @@ spec:
                     name: target-namespace,
                     value: "{{workflow.parameters.target-namespace}}",
                   }
+        - - name: shard
+            template: shard
+            when: "'{{workflow.parameters.shard-query}}' != ''"
         - - name: compose
             template: compose
             withSequence:
               count: "{{workflow.parameters.compose-partitions}}"
             arguments:
               parameters:
-                - { name: pass, value: "{{item}}" }
+                - { name: partition, value: "{{item}}" }
                 - {
                     name: timeout,
                     value: "{{workflow.parameters.compose-timeout}}",
@@ -167,6 +173,114 @@ spec:
                   }
                 - { name: job-ttl, value: "{{workflow.parameters.job-ttl}}" }
 
+    # Runs the app's shard script: splits the large exports by the spine's
+    # rule, hash(account) % compose-partitions, into a prefix the app chose,
+    # which this run's vars already point compose at.
+    - name: shard
+      inputs:
+        parameters:
+          # Pinned by kustomize; see the replacements in this package.
+          - {
+              name: query-duckdb-image,
+              value: "registry.uw.systems/dev-enablement/query-duckdb:main",
+            }
+      steps:
+        - - name: shard
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
+                - { name: job-name, value: "test-data-shard-accounts" }
+                - {
+                    name: timeout,
+                    value: "{{workflow.parameters.compose-timeout}}",
+                  }
+                - {
+                    name: log-level,
+                    value: "{{workflow.parameters.log-level}}",
+                  }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(workflow.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(workflow.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          restartPolicy: Never
+                          imagePullSecrets:
+                            - name: {{workflow.parameters.image-pull-secret}}
+                          containers:
+                            - name: shard
+                              image: {{inputs.parameters.query-duckdb-image}}
+                              imagePullPolicy: Always
+                              env:
+                                - name: QUERY
+                                  value: |-
+                                    {{workflow.parameters.shard-query}}
+                                - name: VARS
+                                  value: |-
+                                    {{workflow.parameters.vars}}
+                                - name: OUTPUT
+                                  value: |-
+                                    {{workflow.parameters.composed}}shards.ndjson
+                                - name: FORMAT
+                                  value: "ndjson"
+                                - name: WORK_DIR
+                                  value: "/scratch"
+                                - name: DUCKDB_MEMORY_LIMIT
+                                  value: |-
+                                    {{workflow.parameters.memory-limit}}
+                                - name: DUCKDB_THREADS
+                                  value: |-
+                                    {{workflow.parameters.compose-cpu}}
+                                - name: DUCKDB_TEMP_LIMIT
+                                  value: |-
+                                    {{workflow.parameters.temp-limit}}
+                                - {
+                                    name: TIMEOUT,
+                                    value: "{{=int(duration(workflow.parameters['compose-timeout']).Seconds())}}",
+                                  }
+                                - name: LOG_LEVEL
+                                  value: |-
+                                    {{workflow.parameters.log-level}}
+                                - name: AWS_ACCESS_KEY_ID
+                                  valueFrom: { secretKeyRef: { name: {{workflow.parameters.aws-secret}}, key: AWS_ACCESS_KEY_ID } }
+                                - name: AWS_SECRET_ACCESS_KEY
+                                  valueFrom: { secretKeyRef: { name: {{workflow.parameters.aws-secret}}, key: AWS_SECRET_ACCESS_KEY } }
+                                - name: AWS_REGION
+                                  value: "eu-west-1"
+                              resources:
+                                requests:
+                                  {
+                                    cpu: "{{workflow.parameters.compose-cpu}}",
+                                    memory: "{{workflow.parameters.compose-memory}}",
+                                    ephemeral-storage: "{{workflow.parameters.compose-scratch}}",
+                                  }
+                                limits:
+                                  {
+                                    cpu: "{{workflow.parameters.compose-cpu}}",
+                                    memory: "{{workflow.parameters.compose-memory}}",
+                                    ephemeral-storage: "{{workflow.parameters.compose-scratch}}",
+                                  }
+                              volumeMounts:
+                                - { name: scratch, mountPath: /scratch }
+                          volumes:
+                            - name: scratch
+                              emptyDir:
+                                { sizeLimit: "{{workflow.parameters.compose-scratch}}" }
+
     - name: compose
       inputs:
         parameters:
@@ -178,7 +292,7 @@ spec:
           - name: job-active-deadline
           - name: job-ttl
           - name: timeout
-          - name: pass
+          - name: partition
       steps:
         - - name: compose
             templateRef:
@@ -195,10 +309,10 @@ spec:
                     value: "{{workflow.parameters.target-namespace}}",
                   }
                 # Unique across every execute-job this workflow makes, and the
-                # slices are eight of them.
+                # partitions are eight of them.
                 - {
                     name: job-name,
-                    value: "test-data-compose-accounts-{{inputs.parameters.pass}}",
+                    value: "test-data-compose-accounts-{{inputs.parameters.partition}}",
                   }
                 - { name: timeout, value: "{{inputs.parameters.timeout}}" }
                 - {
@@ -235,9 +349,9 @@ spec:
                                     {{workflow.parameters.vars}}
                                 - name: OUTPUT
                                   value: |-
-                                    {{workflow.parameters.composed}}part-{{inputs.parameters.pass}}.ndjson
-                                - name: PASS
-                                  value: "{{inputs.parameters.pass}}"
+                                    {{workflow.parameters.composed}}part-{{inputs.parameters.partition}}.ndjson
+                                - name: PARTITION
+                                  value: "{{inputs.parameters.partition}}"
                                 - name: RUN_STARTED_AT
                                   value: "{{workflow.creationTimestamp.RFC3339}}"
                                 - name: FORMAT
