@@ -17,9 +17,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      # Temporary: the branch build of qe-toolkit #312, which this workflow
-      # needs for PARTITION. Moves to its main SHA once that merges.
-      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:feat-query-duckdb-partitions
+      - query-duckdb=registry.uw.systems/dev-enablement/query-duckdb:82715ce5036f52d2c43d734539d2b85317701be0
       - load-es=registry.uw.systems/dev-enablement/load-es:1b5e3e67664d295d016c1685c2356f4a2ba91e60
 generatorOptions:
   disableNameSuffixHash: true
