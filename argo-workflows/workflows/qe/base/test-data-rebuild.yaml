@@ -214,9 +214,13 @@ spec:
                                 - name: VARS
                                   value: |-
                                     {{workflow.parameters.vars}}
+                                # Beside the composed prefix rather than inside
+                                # it: load reads that prefix whole, and this one
+                                # summary row was indexed as an account. Derived
+                                # from the prefix so the bucket is declared once.
                                 - name: OUTPUT
                                   value: |-
-                                    {{workflow.parameters.composed}}shards.ndjson
+                                    {{=sprig.trimSuffix("/", workflow.parameters.composed) + "-shards.ndjson"}}
                                 - name: FORMAT
                                   value: "ndjson"
                                 - name: WORK_DIR
