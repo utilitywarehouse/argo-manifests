@@ -6,7 +6,7 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Bill one or more accounts by input
-    data.uw.systems/action-applies-when: _meta.counts.services.energy.live:>0
+    data.uw.systems/action-applies-when: _meta.energy.live:>0
     data.uw.systems/bind.account-numbers: _meta.identifiers.account_number[]
     data.uw.systems/bind.gentrack-bill-numbers: bills.energy_billing_adapter.billing_period_accounts.bill_number[]
   labels:

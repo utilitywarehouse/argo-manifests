@@ -6,7 +6,7 @@ metadata:
   annotations:
     workflows.argoproj.io/description: >-
       Collect one or more billed accounts by direct debit in dev
-    data.uw.systems/action-applies-when: _meta.counts.bills.fulfilled:>0
+    data.uw.systems/action-applies-when: _meta.billed:*
     data.uw.systems/bind.account-numbers: _meta.identifiers.account_number[]
     data.uw.systems/bind.invoice-id: bills.bills_total_api.invoiceid
   labels:
@@ -22,29 +22,51 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: account-numbers } # UW customer account number(s), comma-separated — accounts that already have a bill
-      # default safe: preflight + fabricate only. No invoice moves, nothing is uploaded, nothing is booked
+      - name: account-numbers
+        description: >-
+          UW customer account number(s), comma-separated. Accounts that already
+          have a bill.
       - name: dry-run
         value: "true"
         enum: ["true", "false"]
-      - name: validation-mode # attended pauses before the bucket and before processing
+        description: >-
+          true runs the preflight and fabricates only: no invoice moves, nothing
+          uploaded, nothing booked.
+      - name: validation-mode
         value: "attended"
         enum: ["attended", "unattended"]
-      - { name: invoice-id, value: "" } # one account only; needed when it has two invoices due the same day
-      # Empty takes each account's own invoice plus adjustments, which is the usual
-      # run. An amount here needs no invoice at all
-      - { name: amount, value: "" }
-      - name: type # empty lets the amount's sign decide
+        description: >-
+          attended pauses before the bucket and before processing; unattended
+          runs straight through.
+      - name: invoice-id
+        value: ""
+        description: >-
+          One account only. Needed when it has two invoices due the same day;
+          empty takes the account's own invoice.
+      - name: amount
+        value: ""
+        description: >-
+          Empty takes each account's own invoice plus adjustments, the usual
+          run. An amount here needs no invoice at all.
+      - name: type
         value: ""
         enum: ["", "collection", "refund"]
-      # true => also wait for the payment in the ledger and BigQuery's transaction log
+        description: Empty lets the amount's sign decide.
       - name: verify
         value: "false"
         enum: ["true", "false"]
-      - { name: verify-wait, value: 10m } # how long verify waits for the payment to reach the ledger and the tx log
+        description: >-
+          true also waits for the payment in the ledger and BigQuery's
+          transaction log.
+      - name: verify-wait
+        value: 10m
+        description: >-
+          How long verify waits for the payment to reach the ledger and the
+          transaction log.
       - name: log-level
         value: "info"
         enum: ["info", "debug"]
+        description: One level for the whole pipeline.
   templates:
     - name: main
       inputs:
