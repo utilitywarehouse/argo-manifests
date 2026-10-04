@@ -8,6 +8,7 @@ metadata:
       Bill one or more accounts by input
     data.uw.systems/action-applies-when: _meta.counts.services.energy.live:>0
     data.uw.systems/bind.account-numbers: _meta.identifiers.account_number[]
+    data.uw.systems/bind.gentrack-bill-numbers: bills.energy_billing_adapter.billing_period_accounts.bill_number[]
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: billing
@@ -21,29 +22,56 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      - { name: account-numbers } # UW customer account number(s), comma-separated — one or many
-      # default safe: plan + fabricate only, no mongo writes/upload/register/bill-run
+      - name: account-numbers
+        description: >-
+          UW customer account number(s), comma-separated. The same run bills one
+          or many.
       - name: dry-run
         value: "true"
         enum: ["true", "false"]
-      - name: validation-mode # attended pauses before Commit
+        description: >-
+          true plans, fabricates and validates only: no deletes, Mongo writes,
+          upload, register or bill run.
+      - name: validation-mode
         value: "attended"
         enum: ["attended", "unattended"]
-      - { name: bill-period, value: "" } # bill-run month; bills the month before it. Empty => current month
-      - name: rebill # clear bills + re-send energy data first
+        description: >-
+          attended pauses at each gate before Commit; unattended runs straight
+          through.
+      - name: bill-period
+        value: ""
+        description: >-
+          YYYY-MM, the bill-run month. The bill covers the month before it.
+          Empty means the current month.
+      - name: rebill
         value: "auto"
         enum: ["auto", "force", "off"]
-      - { name: gentrack-bill-numbers, value: "" } # which bills to re-open, comma-separated (e.g. J40000010621). Empty => the period being billed
+        description: >-
+          auto resets only if a committed bill blocks the period, and re-sends
+          energy data when billing has none for it. force does both regardless;
+          off fails if either is due, as a read-only preflight.
+      - name: gentrack-bill-numbers
+        value: ""
+        description: >-
+          Gentrack bill number(s) to re-send, comma-separated (e.g.
+          J40000010621). Narrows which bills a re-send re-opens and never
+          triggers one. Empty means the period being billed.
       - name: engineer-visit
         value: "false"
         enum: ["true", "false"]
-      # true => also observe the ledger, BigQuery and the finance one-liners. Same bill either way
+        description: >-
+          true adds an engineer-visit debit (metering works, £190 including VAT)
+          to each account's bill, charged on the 16th of the month before.
       - name: verify
         value: "false"
         enum: ["true", "false"]
+        description: >-
+          true also observes the ledger, BigQuery and the finance one-liners.
+          The bill is the same either way.
       - name: log-level
         value: "info"
         enum: ["info", "debug"]
+        description: One level for the whole pipeline.
   templates:
     - name: main
       inputs:

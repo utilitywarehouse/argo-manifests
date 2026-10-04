@@ -82,6 +82,14 @@ data.uw.systems/bind.invoice-id: bills.bills_total_api.invoiceid
 
 `[]` is only legal at the end of a path. It is not a wildcard — arrays are followed anyway — and one in the middle is rejected when the template is read.
 
+A bound parameter **with a default** (`value: ""`) is optional: its options start unticked and the form runs with none chosen, so the default applies. One **without** a default is required: a `[]` list starts with every value ticked, a single value is filled when the account has exactly one, and the form does not run until it is answered.
+
+```yaml
+data.uw.systems/bind.gentrack-bill-numbers: bills.energy_billing_adapter.billing_period_accounts.bill_number[]
+```
+
+Give every parameter a `description`. The form shows it under the field, and a YAML `#` comment never reaches it.
+
 ## Naming the remote Job
 
 Steps dispatch a Kubernetes Job through `step-executor-remote-namespace`. Its `job-name` parameter is the only thing that names that Job — a `metadata:` block inside `job-template` is discarded. The final name is `<job-name>-<workflow.uid[:8]>`.
