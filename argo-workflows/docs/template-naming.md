@@ -68,10 +68,10 @@ A template carrying `data.uw.systems/actions: "true"` is offered in test-data-ui
 **`action-applies-when`** says which accounts it is offered for. **It is a Lucene `query_string` over the composed account document, not expr-lang** — a different language and a different engine from `success-expr`, `assert` and Argo's own `when:`, all of which are expr-lang evaluated inside a running step. This one is evaluated by Elasticsearch before anything is submitted, which is what lets the app decide whether to offer the action at all. An annotation rather than a label, because a label value cannot contain `:` or `>`.
 
 ```yaml
-data.uw.systems/action-applies-when: _meta.counts.services.energy.live:>0
+data.uw.systems/action-applies-when: _meta.energy.live:>0
 ```
 
-Fields come from the index's own catalogue. Ranges on a field inside a flattened root need both bounds (`register_count:[2 TO 99]`, not `:>1`), and two conditions on one flattened root can be satisfied by two different elements — so liveness is taken from a `_meta` count rather than from the service record.
+Fields come from the index's own catalogue, and a field it does not have matches no account, so the action is never offered. Check a condition's count in test-data-ui's Explore before relying on it. Ranges on a field inside a flattened root need both bounds (`register_count:[2 TO 99]`, not `:>1`), and two conditions on one flattened root can be satisfied by two different elements — so liveness is taken from a `_meta` count rather than from the service record.
 
 **`bind.<parameter>`** fills a parameter from the account, for the person to confirm rather than have applied silently. The value is a dotted path; arrays along it are followed, so `bills.bills_total_api.invoiceid` offers every invoice the account has and the form shows each one's date and total beside it. A trailing `[]` says the **parameter** takes the whole list, comma-joined, rather than one of it:
 
@@ -81,6 +81,14 @@ data.uw.systems/bind.invoice-id: bills.bills_total_api.invoiceid
 ```
 
 `[]` is only legal at the end of a path. It is not a wildcard — arrays are followed anyway — and one in the middle is rejected when the template is read.
+
+A bound parameter **with a default** (`value: ""`) is optional: its options start unticked and the form runs with none chosen, so the default applies. One **without** a default is required: a `[]` list starts with every value ticked, a single value is filled when the account has exactly one, and the form does not run until it is answered.
+
+```yaml
+data.uw.systems/bind.gentrack-bill-numbers: bills.energy_billing_adapter.billing_period_accounts.bill_number[]
+```
+
+Give every parameter a `description`. The form shows it under the field, and a YAML `#` comment never reaches it.
 
 ## Naming the remote Job
 
