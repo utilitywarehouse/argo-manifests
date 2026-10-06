@@ -16,3 +16,7 @@ patches:
       kind: CronWorkflow
       name: data-export-debt-collection
     path: data-export-debt-collection.yaml
+  - target:
+      kind: CronWorkflow
+      name: data-export-overdue-balance
+    path: data-export-overdue-balance.yaml
