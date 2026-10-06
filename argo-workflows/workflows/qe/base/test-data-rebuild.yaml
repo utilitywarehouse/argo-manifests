@@ -99,7 +99,7 @@ spec:
       # spills a sort or a join, but not the service records an aggregate
       # collects into a list per account, so memory follows how many accounts a
       # partition holds. The lever for memory: raise this, not compose-memory.
-      - { name: compose-partitions, value: "8" }
+      - { name: compose-partitions, value: "10" }
       # The script that splits the large exports by partition before compose,
       # written by the app for this run, so each partition reads its own part
       # rather than every export whole. Empty skips the step: a preview is one
@@ -294,8 +294,7 @@ spec:
                     name: target-namespace,
                     value: "{{workflow.parameters.target-namespace}}",
                   }
-                # Unique across every execute-job this workflow makes, and the
-                # partitions are eight of them.
+                # Unique across every execute-job this workflow makes, and across partitions.
                 - {
                     name: job-name,
                     value: "test-data-compose-accounts-{{inputs.parameters.partition}}",
