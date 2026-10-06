@@ -1,0 +1,55 @@
+# ledgers export — `ledger` from the ledgers RDS instance.
+#
+# One row per (account_id, type), four types, so at most four per account. Each
+# carries balance_total/net_total/vat_total — the balances need no join.
+#
+# `ledger` only: the ledgers-ro grant covers 14 tables and discovery would take
+# them all, including ledger_entry — unbounded per ledger, no account_id, so
+# neither scopable to the spine nor chunkable on the join key.
+#
+# Password auth against the domain-owned `ledgers-ro` role, not IAM: IAM would
+# grant rds-db:connect to the shared qe-dev-data-orchestrator-rw.
+#
+# Chunked on the `id` primary key at the 100k default.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-ledgers
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      ledgers data export from ledgers
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: ledgers
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 4 * * *" # clear of energy-billing (02:00), the other dev-merit RDS export
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: ledgers
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: ledgers }
+        - { name: label, value: ledgers-export }
+        - { name: adapter-driver, value: postgres }
+        - { name: adapter-password-auth, value: "true" }
+        - { name: adapter-secret, value: rds-readonly }
+        - { name: adapter-dsn-key, value: dsn }
+        - { name: entities, value: "ledger" }
+
+        # Row count unmeasured; bounded above by 4 per account.
+        - { name: timeout, value: 45m }
+        - { name: job-active-deadline, value: 55m }

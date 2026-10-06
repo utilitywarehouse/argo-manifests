@@ -1,0 +1,60 @@
+# overdue-balance export — app.overdue-balances from the finance mongo cluster.
+# 2,044,414 documents of {account_id, total_value, total_currency}.
+#
+# ⚠️ overdue-balance-api and projected-overdue-balance-api run the same binary
+# off different topics, so their documents are structurally identical. This is
+# the actual one. If both are ever taken, only the bucket name separates them.
+#
+# A row says nothing about owing: 1,155,803 are 0.00 and 352,162 are negative
+# (in credit). Only 536,449 are above zero.
+#
+# mongolizer.url carries credentials but no database, so the database is a
+# driver option and authSource stays on admin.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-overdue-balance
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      overdue-balance data export from finance
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: overdue-balance
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "30 2 * * *" # clear of debt-collection (02:00), same cluster's neighbour
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: overdue-balance
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: overdue_balance }
+        - { name: label, value: overdue-balance-export }
+        - { name: adapter-driver, value: mongodb }
+        - { name: adapter-secret, value: overdue-balance-api-mongo-cluster }
+        - { name: adapter-dsn-key, value: mongolizer.url }
+        - { name: driver-options, value: "database=app" }
+
+        # Named: the database also holds debt-payments, 21 rows and unused.
+        - { name: entities, value: "overdue-balances" }
+
+        # Unique index, UUID strings. `_id` is an ObjectId and sorts above
+        # every string, so its chunk bounds match nothing.
+        - { name: key-field, value: "account_id" }
+
+        # ~21 chunks at the 100k default, after an unindexed field census.
+        - { name: timeout, value: 1h }
+        - { name: job-active-deadline, value: 1h10m }
