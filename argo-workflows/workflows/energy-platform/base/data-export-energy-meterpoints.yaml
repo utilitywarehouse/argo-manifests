@@ -30,9 +30,13 @@ spec:
         - { name: mode, value: export }
         - { name: run-type, value: RUN_TYPE_EXPORT }
         - { name: system-key, value: energy_meterpoints }
+        # supply_events is the supply lifecycle history, 246k rows. Not
+        # supply_queue: that is a work queue of scheduled events, holds only
+        # gain/loss, and deletes its rows, so it cannot say an account was lost
+        # last year. Not event_log either — 230M rows and not supply-specific.
         - {
             name: entities,
-            value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping,postcode_gsp_mapping,meter_event_log",
+            value: "meterpoints,sites,related_mpans,meterpoint_mpxn_to_id_mapping,postcode_gsp_mapping,meter_event_log,supply_events",
           }
         - { name: label, value: energy-meterpoints-export }
         - { name: log-level, value: debug }
