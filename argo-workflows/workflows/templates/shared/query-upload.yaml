@@ -12,6 +12,14 @@
 # container reading it, exactly as billing/produce-fwf and finance/dd-run each do
 # inline today. Both of those could migrate onto this, which is the point.
 #
+# ⚠️ The producer container's env is a near-copy of step-query/bq's and the two
+# have to be kept in step. They cannot share one job-template: exec-kube streams
+# logs with PodLogOptions{Follow:true} and no Container, which only works while
+# the pod has exactly ONE regular container. There the query is that container,
+# so its result is scraped; here the uploader is, and the query is an
+# initContainer whose logs are never streamed — which is why this step returns
+# the uploaded key rather than rows.
+#
 # CREDENTIALS. Whichever namespace this runs in needs both: the producer's and
 # the bucket's. `s3-secret` is optional — leave it blank and the AWS SDK's
 # default chain is used, which is what picks up the Vault sidecar's
