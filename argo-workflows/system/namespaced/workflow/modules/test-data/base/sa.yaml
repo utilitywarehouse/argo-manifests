@@ -1,0 +1,11 @@
+# Identity for a Job pod that writes the QE test-data bucket. Separate from
+# data-orchestrator because each of the three QE bucket roles is scoped to its
+# own bucket, so neither can write the other's.
+#
+# Consume an overlay, never this base: the ARN below is invalid on purpose.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-data
+  annotations:
+    vault.uw.systems/aws-role: "arn:aws:iam::000000000000:role/CHANGEME"
