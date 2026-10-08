@@ -1,19 +1,8 @@
-# Identity for a Job pod that writes the QE test-data bucket, carrying the vault
-# AWS role that grants it. A step sets runner-sa=test-data and stamps the Job pod
-# with the vault-sidecar-aws inject annotation; combined with the SA's
-# vault.uw.systems/aws-role that yields short-lived AWS credentials, so no key
-# pair is stored in the namespace.
+# Identity for a Job pod that writes the QE test-data bucket. Separate from
+# data-orchestrator because each of the three QE bucket roles is scoped to its
+# own bucket, so neither can write the other's.
 #
-# WHY A SECOND IDENTITY. The three QE buckets each have their own role, scoped to
-# that bucket alone (terraform aws/dev/qe): qe-dev-data-orchestrator-rw cannot
-# write test-data, and this one cannot write the orchestrator bucket. An export
-# lands in the orchestrator bucket and runs as `data-orchestrator`; a step that
-# produces an input for the composition lands in test-data and runs as this.
-#
-# The role ARN is env-specific and is supplied by an overlay (overlays/dev);
-# consume an overlay, never this base. The placeholder below is intentionally
-# invalid so a bare-base consumer fails loudly instead of silently getting
-# another env's role.
+# Consume an overlay, never this base: the ARN below is invalid on purpose.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
