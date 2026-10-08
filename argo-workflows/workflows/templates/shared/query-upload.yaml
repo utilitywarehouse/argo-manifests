@@ -98,6 +98,13 @@ spec:
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
                       ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
+                        metadata:
+                          annotations:
+                            # Kyverno injects the vault AWS sidecar only on
+                            # request. Same condition as the env vars below: a
+                            # blank s3-secret means the sidecar is the only
+                            # credential source, so asking for it is not optional.
+                            {{=inputs.parameters['s3-secret'] == '' ? 'uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws' : 'workflows.argoproj.io/query: step-query-upload'}}
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
