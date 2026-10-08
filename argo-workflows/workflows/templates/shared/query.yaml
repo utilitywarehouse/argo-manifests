@@ -204,6 +204,11 @@ spec:
     # bq — the same step against BigQuery. Only the credential differs: a service
     # account JSON projected at query-bq's default GCP_SERVICE_ACCOUNT_PATH,
     # which is why nothing names it in env.
+    #
+    # ⚠️ step-query-upload/bq carries a near-copy of this container's env; keep
+    # them in step. They cannot share a job-template: exec-kube streams logs with
+    # no container selected, so a second regular container here would break pg,
+    # bq and mongo together.
     # -------------------------------------------------------------------------
     - name: bq
       inputs:

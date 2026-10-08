@@ -1,0 +1,128 @@
+# gentrack-bills — which accounts Gentrack holds bills for, accepted vs draft.
+#
+# Reads Junifer's own Bill table as data-infra replicates it into BigQuery every
+# 15 minutes. The energy-billing adapter's billing_period_accounts cannot answer
+# this: it holds bill FILES the adapter ingested, a different set, with no
+# acceptance. Of nine bills visible in the Gentrack UI, four were absent from it.
+#
+# Keyed on the Gentrack account number, with no UW identifier: test-data-ui's
+# composition already resolves that in _meta.identifiers.
+#
+# Deleted and superseded bills are excluded so the counts match the UI.
+# supersededFl marks the replaced version, not the replacement — J20000031503
+# shows five accepted bills, and six here means that clause was dropped.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: flow-gentrack-bills
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Read-only. Counts Gentrack bills per account — accepted and draft — from
+      BigQuery's replica of Junifer `Bill`, and lands the result as ndjson in the
+      test-data bucket for test-data-ui's composition to read. Leave
+      gentrack-account-numbers blank for every account.
+  labels:
+    app.kubernetes.io/component: flow
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: energy-billing
+    data.uw.systems/capability: bill-run
+spec:
+  entrypoint: main
+  serviceAccountName: workflow-step-executor
+  arguments:
+    parameters:
+      # Blank = every account. Otherwise Gentrack account numbers (J2…).
+      - { name: gentrack-account-numbers, value: "" }
+
+      # One project: no cross-project join to the gentrack_silver mapping.
+      - { name: gcp-project-id, value: uw-data-platform-dev }
+      - { name: bill-table, value: "uw-data-platform-dev.gentrack.Bill" }
+      - { name: account-table, value: "uw-data-platform-dev.gentrack.Account" }
+
+      # imported/, not derived/ — the app's clearStaleParts sweeps that prefix.
+      # Fixed key, read as one object rather than a glob.
+      - { name: bucket, value: uw-dev-qe-test-data }
+      - {
+          name: object-key,
+          value: "imported/gentrack-bills/gentrack-bills.ndjson",
+        }
+
+      # Both credentials must be in the namespace this runs in: the Job is fused.
+      - { name: cluster-name, value: dev-merit }
+      - { name: target-namespace, value: billing }
+      - { name: gcp-secret, value: bq-source-gcp-key }
+      - { name: gcp-secret-key, value: token.json }
+      # Blank: the Vault sidecar supplies them, via the runner SA's aws-role.
+      - { name: s3-secret, value: "" }
+      - { name: runner-sa, value: test-data }
+
+      - { name: timeout, value: 10m }
+      - { name: job-active-deadline, value: 15m }
+  templates:
+    - name: main
+      steps:
+        - - name: bills
+            templateRef: { name: step-query-upload, template: bq }
+            arguments:
+              parameters:
+                - { name: job-name, value: gentrack-bills }
+                - {
+                    name: cluster-name,
+                    value: "{{workflow.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{workflow.parameters.target-namespace}}",
+                  }
+                - {
+                    name: gcp-project-id,
+                    value: "{{workflow.parameters.gcp-project-id}}",
+                  }
+                - {
+                    name: gcp-secret,
+                    value: "{{workflow.parameters.gcp-secret}}",
+                  }
+                - {
+                    name: gcp-secret-key,
+                    value: "{{workflow.parameters.gcp-secret-key}}",
+                  }
+                - { name: bucket, value: "{{workflow.parameters.bucket}}" }
+                - {
+                    name: object-key,
+                    value: "{{workflow.parameters.object-key}}",
+                  }
+                - {
+                    name: s3-secret,
+                    value: "{{workflow.parameters.s3-secret}}",
+                  }
+                - {
+                    name: s3-access-key-key,
+                    value: "{{workflow.parameters.s3-access-key-key}}",
+                  }
+                - {
+                    name: s3-secret-key-key,
+                    value: "{{workflow.parameters.s3-secret-key-key}}",
+                  }
+                - { name: format, value: ndjson }
+                - { name: timeout, value: "{{workflow.parameters.timeout}}" }
+                - {
+                    name: job-active-deadline,
+                    value: "{{workflow.parameters.job-active-deadline}}",
+                  }
+                - name: query
+                  value: >-
+                    SELECT a.number AS gentrack_account_number,
+                    b.accountFk AS gentrack_account_id,
+                    COUNTIF(b.acceptedDttm IS NOT NULL) AS accepted_bills,
+                    COUNTIF(b.status = 'Draft') AS draft_bills,
+                    MAX(b.issueDt) AS latest_issued,
+                    MAX(b.acceptedDttm) AS latest_accepted
+                    FROM `{{workflow.parameters.bill-table}}` b
+                    LEFT JOIN `{{workflow.parameters.account-table}}` a ON a.id = b.accountFk
+                    WHERE NOT b.deleteFl AND NOT b.supersededFl
+                    AND ('{{workflow.parameters.gentrack-account-numbers}}' = ''
+                    OR a.number IN UNNEST(SPLIT('{{workflow.parameters.gentrack-account-numbers}}', ',')))
+                    GROUP BY 1, 2
+                    HAVING (draft_bills + accepted_bills) > 0
+                    ORDER BY 1

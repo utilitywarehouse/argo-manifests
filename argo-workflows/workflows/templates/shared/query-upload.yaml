@@ -1,0 +1,156 @@
+# query-upload — run a query and land its result in an object store.
+#
+# Separate from step-query, which returns rows. These need different Job shapes:
+# exec-kube streams logs with no container selected, which works only while the
+# pod has one regular container. There the query is it; here the uploader is and
+# the query runs as an initContainer, so this returns the uploaded key, not rows.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-query-upload
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Runs a query in a target namespace and uploads
+      the result to an object store from the same Job. Referenced by flows.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
+spec:
+  templates:
+    # The producer's env is a near-copy of step-query/bq's; keep them in step.
+    # They cannot share a job-template — see the header.
+    #
+    # Fused into one Job because exec-kube cannot inject a file into a
+    # separately-dispatched one, so producer and uploader share an emptyDir.
+    #
+    # A fixed object-key overwrites. Timestamp it for history, but then a reader
+    # globbing the prefix unions every run.
+    - name: bq
+      inputs:
+        parameters:
+          - { name: query } # ONE statement, single-line — use `value: >-`
+          - { name: job-name }
+          - { name: cluster-name }
+          - { name: target-namespace }
+
+          - { name: gcp-project-id }
+          - { name: gcp-secret }
+          - { name: gcp-secret-key }
+          - { name: gcp-secret-path, value: /app/secrets }
+
+          - { name: bucket }
+          - { name: object-key } # the key within the bucket, including any prefix
+          - { name: sse, value: AES256 } # some UW bucket policies DENY PutObject without it
+          - { name: aws-region, value: eu-west-1 }
+          # Blank = the SDK default chain, i.e. the Vault sidecar. Preferred.
+          - { name: s3-secret, value: "" }
+          - { name: s3-access-key-key, value: aws.accessKey }
+          - { name: s3-secret-key-key, value: aws.secretKey }
+
+          - { name: format, value: ndjson }
+          - {
+              name: query-bq-image,
+              value: "registry.uw.systems/dev-enablement/query-bq:main",
+            }
+          - {
+              name: upload-s3-image,
+              value: "registry.uw.systems/dev-enablement/upload-s3:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 15m }
+          - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" }
+      outputs:
+        parameters:
+          - name: key
+            valueFrom:
+              parameter: "{{steps.run.outputs.parameters.result}}"
+      steps:
+        - - name: run
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: "{{inputs.parameters.job-name}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          volumes:
+                            - name: gcp-creds
+                              secret:
+                                secretName: {{inputs.parameters.gcp-secret}}
+                                items:
+                                  - key: {{inputs.parameters.gcp-secret-key}}
+                                    path: gcp-secret-account.json
+                            - name: work
+                              emptyDir: {}
+                          # initContainers run to completion before containers
+                          # start, which is the ordering this needs.
+                          initContainers:
+                            - name: query
+                              image: {{inputs.parameters.query-bq-image}}
+                              imagePullPolicy: Always
+                              volumeMounts:
+                                - name: gcp-creds
+                                  mountPath: {{inputs.parameters.gcp-secret-path}}
+                                  readOnly: true
+                                - { name: work, mountPath: /work }
+                              env:
+                                - name: QUERY
+                                  value: |-
+                                    {{inputs.parameters.query}}
+                                - { name: GCP_PROJECT_ID, value: "{{inputs.parameters.gcp-project-id}}" }
+                                - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+                                - { name: OUTPUT, value: "/work/out" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                          containers:
+                            - name: upload
+                              image: {{inputs.parameters.upload-s3-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  FILE=/work/out KEY="{{inputs.parameters.object-key}}" /app/executor
+                                  echo "ARGO_RESULT_OUTPUT={{inputs.parameters.object-key}}"
+                              env:
+                                - { name: BUCKET, value: "{{inputs.parameters.bucket}}" }
+                                - { name: SSE, value: "{{inputs.parameters.sse}}" }
+                                - { name: AWS_REGION, value: "{{inputs.parameters.aws-region}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                # Empty is not the same as unset: it would stop the SDK
+                                # reaching for the Vault sidecar.
+                                {{=inputs.parameters['s3-secret'] != '' ? '- { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['s3-secret'] + ', key: ' + inputs.parameters['s3-access-key-key'] + ' } } }' : '# no AWS_ACCESS_KEY_ID: the SDK default chain, i.e. the Vault sidecar'}}
+                                {{=inputs.parameters['s3-secret'] != '' ? '- { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['s3-secret'] + ', key: ' + inputs.parameters['s3-secret-key-key'] + ' } } }' : '# no AWS_SECRET_ACCESS_KEY: as above'}}
+                              volumeMounts:
+                                - { name: work, mountPath: /work }
