@@ -97,12 +97,8 @@ spec:
                     value: "{{workflow.parameters.s3-secret}}",
                   }
                 - {
-                    name: s3-access-key-key,
-                    value: "{{workflow.parameters.s3-access-key-key}}",
-                  }
-                - {
-                    name: s3-secret-key-key,
-                    value: "{{workflow.parameters.s3-secret-key-key}}",
+                    name: runner-sa,
+                    value: "{{workflow.parameters.runner-sa}}",
                   }
                 - { name: format, value: ndjson }
                 - { name: timeout, value: "{{workflow.parameters.timeout}}" }
