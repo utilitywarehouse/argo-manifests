@@ -1,34 +1,16 @@
-# gentrack-bills — which accounts Gentrack holds bills for, counted per state.
+# gentrack-bills — which accounts Gentrack holds bills for, accepted vs draft.
 #
-# Reads Junifer's own `Bill` table as data-infra replicates it into BigQuery
-# (`di-snowflake-source-billing-15min`, every 15 minutes on weekdays). That
-# replica is the only place bill ACCEPTANCE is a first-class fact: `status` and
-# `acceptedDttm` are columns on the bill.
+# Reads Junifer's own Bill table as data-infra replicates it into BigQuery every
+# 15 minutes. The energy-billing adapter's billing_period_accounts cannot answer
+# this: it holds bill FILES the adapter ingested, a different set, with no
+# acceptance. Of nine bills visible in the Gentrack UI, four were absent from it.
 #
-# NOT the energy-billing adapter's `billing_period_accounts`. That holds bill
-# FILES the adapter ingested, which is a different set, and carries no
-# acceptance at all. Measured against the Gentrack UI on 2026-10-08: of nine
-# bills visible there, four were absent from that table, and accounts with no
-# Gentrack bills had rows in it.
+# Keyed on the Gentrack account number, with no UW identifier: test-data-ui's
+# composition already resolves that in _meta.identifiers.
 #
-# The data product says `writePolicy: OVERWRITE`, so `gentrack.Bill` is a full
-# snapshot of current state, not an append-only change log — no latest-per-key
-# reduction is needed. Re-check if that product is ever switched to append.
-#
-# KEYED ON THE GENTRACK ACCOUNT NUMBER and carrying no UW identifier. Resolving
-# a Gentrack number to a UW account is account identity, and test-data-ui's
-# composition already does it once, in `_meta.identifiers`. Answering it here as
-# well would be a second answer to the same question.
-#
-# `NOT deleteFl AND NOT supersededFl` so the counts equal what the Gentrack UI
-# lists — the only thing anyone checks them against. `supersededFl` marks the
-# REPLACED version, not the replacement, so without it a re-billed period counts
-# twice: J20000031503 shows FIVE accepted bills in Gentrack, and six here means
-# this clause has been dropped.
-#
-# ⚠️ Every BigQuery query is billed, and the unscoped form is a full scan of
-# `Bill`. Leave `gentrack-account-numbers` blank for the whole estate; set it
-# while iterating.
+# Deleted and superseded bills are excluded so the counts match the UI.
+# supersededFl marks the replaced version, not the replacement — J20000031503
+# shows five accepted bills, and six here means that clause was dropped.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -50,41 +32,30 @@ spec:
   serviceAccountName: workflow-step-executor
   arguments:
     parameters:
-      # Blank = every account. Otherwise Gentrack account numbers (J2…),
-      # comma-joined — Gentrack's own key, deliberately.
+      # Blank = every account. Otherwise Gentrack account numbers (J2…).
       - { name: gentrack-account-numbers, value: "" }
 
-      # Junifer's Bill and Account, one project. No cross-project join: the
-      # gentrack_silver account mapping would need read on uw-data-models-dev,
-      # and the composition resolves accounts anyway.
+      # One project: no cross-project join to the gentrack_silver mapping.
       - { name: gcp-project-id, value: uw-data-platform-dev }
       - { name: bill-table, value: "uw-data-platform-dev.gentrack.Bill" }
       - { name: account-table, value: "uw-data-platform-dev.gentrack.Account" }
 
-      # Where this lands, for test-data-ui's derive step to read. `imported/`
-      # rather than `derived/`, because the app's clearStaleParts sweeps the
-      # latter. A FIXED key: the reader takes this exact object, not a glob, so
-      # a stale run cannot be unioned with a fresh one.
+      # imported/, not derived/ — the app's clearStaleParts sweeps that prefix.
+      # Fixed key, read as one object rather than a glob.
       - { name: bucket, value: uw-dev-qe-test-data }
       - {
           name: object-key,
           value: "imported/gentrack-bills/gentrack-bills.ndjson",
         }
 
-      # ⚠️ Both credentials must exist in whichever namespace this runs in,
-      # because the query and the upload are fused into one Job. `gcp-secret`
-      # reads uw-data-platform-dev; `s3-secret` writes uw-dev-qe-test-data.
-      # Neither namespace currently holds both — see the runbook note on the PR.
+      # Both credentials must be in the namespace this runs in: the Job is fused.
       - { name: cluster-name, value: dev-merit }
       - { name: target-namespace, value: billing }
       - { name: gcp-secret, value: bq-source-gcp-key }
       - { name: gcp-secret-key, value: token.json }
-      # Blank: credentials come from the Vault sidecar via the runner SA's
-      # vault.uw.systems/aws-role, which `qe-*` roles are permitted to use in
-      # the billing namespace. qe-test-data-rw already exists and already
-      # writes this bucket for test-data-ui.
+      # Blank: the Vault sidecar supplies them, via the runner SA's aws-role.
       - { name: s3-secret, value: "" }
-      - { name: runner-sa, value: qe-test-data-rw }
+      - { name: runner-sa, value: test-data }
 
       - { name: timeout, value: 10m }
       - { name: job-active-deadline, value: 15m }

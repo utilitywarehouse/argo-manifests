@@ -205,14 +205,10 @@ spec:
     # account JSON projected at query-bq's default GCP_SERVICE_ACCOUNT_PATH,
     # which is why nothing names it in env.
     #
-    # ⚠️ step-query-upload/bq carries a near-copy of this container's env, and
-    # the two have to be kept in step. They cannot share one job-template:
-    # exec-kube streams logs with PodLogOptions{Follow:true} and no Container,
-    # which only works while the pod has exactly ONE regular container. Here the
-    # query IS that container, so its ARGO_RESULT_BEGIN block is scraped; there
-    # the uploader is, and the query runs as an initContainer whose logs are not
-    # streamed at all. Adding a second regular container to this step would make
-    # GetLogs ambiguous and break pg, bq and mongo together.
+    # ⚠️ step-query-upload/bq carries a near-copy of this container's env; keep
+    # them in step. They cannot share a job-template: exec-kube streams logs with
+    # no container selected, so a second regular container here would break pg,
+    # bq and mongo together.
     # -------------------------------------------------------------------------
     - name: bq
       inputs:
