@@ -1,0 +1,194 @@
+# query-upload — run a query and land its result in an object store.
+#
+# Separate from step-query on purpose. That template answers "run a query and
+# give me the rows"; this one answers "run a query and leave the result
+# somewhere". Mixing them put an upload concern inside the query template, which
+# is the wrong seam — and the executors stay single-purpose either way:
+# query-bq queries, upload-s3 uploads, and this composes the two.
+#
+# WHY ONE JOB (fused). exec-kube dispatches a Job and captures only its OUTPUT —
+# it cannot inject a file INTO a separately-dispatched Job. So the producer runs
+# as an initContainer writing to a shared emptyDir and the uploader is the main
+# container reading it, exactly as billing/produce-fwf and finance/dd-run each do
+# inline today. Both of those could migrate onto this, which is the point.
+#
+# CREDENTIALS. Whichever namespace this runs in needs both: the producer's and
+# the bucket's. `s3-secret` is optional — leave it blank and the AWS SDK's
+# default chain is used, which is what picks up the Vault sidecar's
+# AWS_CONTAINER_CREDENTIALS_FULL_URI when the pod's service account carries a
+# vault.uw.systems/aws-role annotation. Prefer that to a static key pair.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: step-query-upload
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      Do NOT submit from the UI. Runs a query in a target namespace and uploads
+      the result to an object store from the same Job. Referenced by flows.
+  labels:
+    app.kubernetes.io/component: step
+    workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: reference-only
+spec:
+  templates:
+    # -------------------------------------------------------------------------
+    # bq — a BigQuery query whose result is landed as an object, not returned.
+    #
+    # Use `bq` when the rows are the answer; use this when the rows are an input
+    # to something else and need to persist. The difference is where the result
+    # goes, not how the query runs.
+    #
+    # WHY ONE JOB (fused). exec-kube dispatches a Job and captures only its
+    # OUTPUT — it cannot inject a file INTO a separately-dispatched Job. So the
+    # query runs as an initContainer writing to a shared emptyDir and the upload
+    # is the main container reading it, exactly as billing/produce-fwf does. The
+    # consequence is that BOTH credentials have to exist in the one namespace
+    # this runs in: the GCP service account and the bucket's S3 pair.
+    #
+    # NO RESULT CAPTURE. initContainer stdout is not the Job's output, so this
+    # step returns the uploaded key rather than rows. Ask `bq` for rows.
+    #
+    # A FIXED KEY overwrites. Pass a timestamped `object-key` if you want
+    # history, but know that a reader globbing the prefix will then union every
+    # run — which is how a derivation double-counts.
+    #
+    # NO ROW CAP, and none is needed. `MAX_CAPTURE_ROWS` caps only the rows held
+    # in memory for --assert/--success-expr/--result-expr; this step sets none of
+    # them, so QueryConfig.NeedsRows() is false and the executor streams its
+    # output at constant memory. The file is unbounded at any size.
+    #
+    # ⚠️ If you ever add a `result-expr` here — a row count, say — that cap
+    # applies again, and exceeding it is an ERROR rather than a truncation (by
+    # design: a predicate over a truncated set answers confidently and wrongly).
+    # On a 13k+ row estate the 10,000 default would fail the step. Raise it
+    # deliberately or leave capture off.
+    - name: bq
+      inputs:
+        parameters:
+          - { name: query } # ONE statement, single-line — use `value: >-`
+          - { name: job-name }
+          - { name: cluster-name }
+          - { name: target-namespace }
+
+          - { name: gcp-project-id }
+          - { name: gcp-secret }
+          - { name: gcp-secret-key }
+          - { name: gcp-secret-path, value: /app/secrets }
+
+          - { name: bucket }
+          - { name: object-key } # the key within the bucket, including any prefix
+          - { name: sse, value: AES256 } # some UW bucket policies DENY PutObject without it
+          - { name: aws-region, value: eu-west-1 }
+          # Blank = the SDK default chain, i.e. the Vault sidecar. Preferred.
+          - { name: s3-secret, value: "" }
+          - { name: s3-access-key-key, value: aws.accessKey }
+          - { name: s3-secret-key-key, value: aws.secretKey }
+
+          - { name: format, value: ndjson }
+          - {
+              name: query-bq-image,
+              value: "registry.uw.systems/dev-enablement/query-bq:main",
+            }
+          - {
+              name: upload-s3-image,
+              value: "registry.uw.systems/dev-enablement/upload-s3:main",
+            }
+          - { name: runner-sa, value: default }
+          - { name: image-pull-secret, value: dockerhub-key }
+          - { name: log-level, value: info }
+          - { name: timeout, value: 10m }
+          - { name: job-active-deadline, value: 15m }
+          - { name: job-ttl, value: 24h }
+          - { name: teardown, value: "true" }
+      outputs:
+        parameters:
+          - name: key
+            valueFrom:
+              parameter: "{{steps.run.outputs.parameters.result}}"
+      steps:
+        - - name: run
+            templateRef:
+              name: step-executor-remote-namespace
+              template: execute-job
+            arguments:
+              parameters:
+                - {
+                    name: cluster-name,
+                    value: "{{inputs.parameters.cluster-name}}",
+                  }
+                - {
+                    name: target-namespace,
+                    value: "{{inputs.parameters.target-namespace}}",
+                  }
+                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - { name: log-level, value: "{{inputs.parameters.log-level}}" }
+                - { name: job-name, value: "{{inputs.parameters.job-name}}" }
+                - { name: teardown, value: "{{inputs.parameters.teardown}}" }
+                - name: job-template
+                  value: |
+                    apiVersion: batch/v1
+                    kind: Job
+                    spec:
+                      backoffLimit: 0
+                      activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
+                      ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
+                      template:
+                        spec:
+                          serviceAccountName: {{inputs.parameters.runner-sa}}
+                          imagePullSecrets:
+                            - name: {{inputs.parameters.image-pull-secret}}
+                          restartPolicy: Never
+                          volumes:
+                            - name: gcp-creds
+                              secret:
+                                secretName: {{inputs.parameters.gcp-secret}}
+                                items:
+                                  - key: {{inputs.parameters.gcp-secret-key}}
+                                    path: gcp-secret-account.json
+                            - name: work
+                              emptyDir: {}
+                          # initContainers run to completion before containers
+                          # start, which is the ordering this needs.
+                          initContainers:
+                            - name: query
+                              image: {{inputs.parameters.query-bq-image}}
+                              imagePullPolicy: Always
+                              volumeMounts:
+                                - name: gcp-creds
+                                  mountPath: {{inputs.parameters.gcp-secret-path}}
+                                  readOnly: true
+                                - { name: work, mountPath: /work }
+                              env:
+                                - name: QUERY
+                                  value: |-
+                                    {{inputs.parameters.query}}
+                                - { name: GCP_PROJECT_ID, value: "{{inputs.parameters.gcp-project-id}}" }
+                                - { name: FORMAT, value: "{{inputs.parameters.format}}" }
+                                - { name: OUTPUT, value: "/work/out" }
+                                - { name: TIMEOUT, value: "{{=int(duration(inputs.parameters['timeout']).Seconds())}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                          containers:
+                            - name: upload
+                              image: {{inputs.parameters.upload-s3-image}}
+                              imagePullPolicy: Always
+                              command: [sh, -c]
+                              args:
+                                - |
+                                  set -eu
+                                  FILE=/work/out KEY="{{inputs.parameters.object-key}}" /app/executor
+                                  echo "ARGO_RESULT_OUTPUT={{inputs.parameters.object-key}}"
+                              env:
+                                - { name: BUCKET, value: "{{inputs.parameters.bucket}}" }
+                                - { name: SSE, value: "{{inputs.parameters.sse}}" }
+                                - { name: AWS_REGION, value: "{{inputs.parameters.aws-region}}" }
+                                - { name: TIMEOUT, value: "{{inputs.parameters.timeout}}" }
+                                - { name: LOG_LEVEL, value: "{{inputs.parameters.log-level}}" }
+                                # Comments rather than entries when unused: an empty
+                                # AWS_ACCESS_KEY_ID is not the same as none, and would
+                                # stop the SDK reaching for the Vault sidecar's
+                                # AWS_CONTAINER_CREDENTIALS_FULL_URI.
+                                {{=inputs.parameters['s3-secret'] != '' ? '- { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['s3-secret'] + ', key: ' + inputs.parameters['s3-access-key-key'] + ' } } }' : '# no AWS_ACCESS_KEY_ID: the SDK default chain, i.e. the Vault sidecar'}}
+                                {{=inputs.parameters['s3-secret'] != '' ? '- { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: ' + inputs.parameters['s3-secret'] + ', key: ' + inputs.parameters['s3-secret-key-key'] + ' } } }' : '# no AWS_SECRET_ACCESS_KEY: as above'}}
+                              volumeMounts:
+                                - { name: work, mountPath: /work }

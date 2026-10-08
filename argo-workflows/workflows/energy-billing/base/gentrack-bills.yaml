@@ -79,9 +79,12 @@ spec:
       - { name: target-namespace, value: billing }
       - { name: gcp-secret, value: bq-source-gcp-key }
       - { name: gcp-secret-key, value: token.json }
-      - { name: s3-secret, value: duckdb-s3 }
-      - { name: s3-access-key-key, value: AWS_ACCESS_KEY_ID }
-      - { name: s3-secret-key-key, value: AWS_SECRET_ACCESS_KEY }
+      # Blank: credentials come from the Vault sidecar via the runner SA's
+      # vault.uw.systems/aws-role, which `qe-*` roles are permitted to use in
+      # the billing namespace. qe-test-data-rw already exists and already
+      # writes this bucket for test-data-ui.
+      - { name: s3-secret, value: "" }
+      - { name: runner-sa, value: qe-test-data-rw }
 
       - { name: timeout, value: 10m }
       - { name: job-active-deadline, value: 15m }
@@ -89,7 +92,7 @@ spec:
     - name: main
       steps:
         - - name: bills
-            templateRef: { name: step-query, template: bq-to-s3 }
+            templateRef: { name: step-query-upload, template: bq }
             arguments:
               parameters:
                 - { name: job-name, value: gentrack-bills }

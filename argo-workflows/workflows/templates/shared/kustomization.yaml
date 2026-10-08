@@ -9,6 +9,7 @@ resources:
   - grpc-call.yaml
   - pause.yaml
   - query.yaml
+  - query-upload.yaml
   - consumer-lag-gate.yaml
 
 # ---------------------------------------------------------------------------
