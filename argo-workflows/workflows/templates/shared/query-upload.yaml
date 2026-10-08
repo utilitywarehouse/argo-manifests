@@ -98,6 +98,12 @@ spec:
                       activeDeadlineSeconds: {{=int(duration(inputs.parameters['job-active-deadline']).Seconds())}}
                       ttlSecondsAfterFinished: {{=int(duration(inputs.parameters['job-ttl']).Seconds())}}
                       template:
+                        metadata:
+                          annotations:
+                            # Kyverno injects the vault AWS sidecar only on
+                            # request. The SA annotation does not trigger it; the
+                            # role is derived as dev_aws_<namespace>_<sa>.
+                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
