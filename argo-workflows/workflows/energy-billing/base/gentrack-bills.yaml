@@ -25,6 +25,7 @@ metadata:
   labels:
     app.kubernetes.io/component: flow
     workflows.argoproj.io/creator: qe
+    workflows.argoproj.io/invocation: standalone
     data.uw.systems/system: energy-billing
     data.uw.systems/capability: bill-run
 spec:
