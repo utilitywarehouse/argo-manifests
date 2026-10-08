@@ -23,6 +23,7 @@ The bundle ([`system/namespaced/workflow`](../../system/namespaced/workflow)) co
 
 - **`modules/job-executor`** — the `argo-workflow-job-executor` SA + Role + RoleBinding + a `kubernetes.io/service-account-token` Secret. exec-kube authenticates with this token to create / poll / tear down the run Job in the namespace.
 - **`modules/data-orchestrator/overlays/dev`** — the `data-orchestrator` SA, annotated with the vault AWS role `qe-dev-data-orchestrator-rw` (S3 rw + `rds-db:connect`). This is the identity the data-orchestrator Job pod runs as.
+- **`modules/test-data/overlays/dev`** — the `test-data` SA, annotated with the vault AWS role `qe-test-data-rw` (S3 rw on the QE **test-data** bucket only). Used by steps that produce an input for test-data-ui's composition rather than an export. Separate from `data-orchestrator` because the three QE buckets each have a role scoped to that bucket alone — neither role can write the other's bucket.
 
 The bundle is **environment-specific**: `environments/dev` binds the dev/qe role. A prod cluster would include `environments/prod` (same `job-executor`, prod role on the data-orchestrator SA).
 
