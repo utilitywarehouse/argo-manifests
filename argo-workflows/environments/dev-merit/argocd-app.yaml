@@ -5,7 +5,7 @@ metadata:
   labels:
     name: qe-argo-workflows
   annotations:
-    argocd.argoproj.io/manifest-generate-paths: .
+    argocd.argoproj.io/manifest-generate-paths: .;/argo-workflows/system;/argo-workflows/workflows
 spec:
   project: qe
   source:
