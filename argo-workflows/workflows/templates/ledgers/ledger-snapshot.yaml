@@ -10,10 +10,11 @@
 # top-level column needs the cast.
 #
 # `bill_entry` is the point of the run: a ledger_entry of type `entry-type`
-# ('bill' after a commit, 'payment' after a collection) created at or after
-# `since`, narrowed to one invoice when invoice-number is given. The other
-# entries a commit writes (budget_plan_payment, budget_plan_charges_and_usage)
-# land alongside it and do NOT satisfy it.
+# ('bill' after a commit, 'payment' after a collection). Given invoice-numbers,
+# it is the entry with one of those numbers, whenever it was created — the ledger
+# skips a bill whose number it already holds, so a same-number re-bill keeps the
+# first run's entry (the before/after diff is empty). Without them, it is one
+# created at or after `since`. budget_plan_* entries never satisfy it.
 #
 # EVERY account, not the first. Both predicates count accounts against the
 # `_account` rows — one per account asked for, from the ids CTE rather than the
@@ -31,7 +32,8 @@ metadata:
     workflows.argoproj.io/description: >-
       Read-only. Dumps the accounts' ledgers, balances, entries, service splits
       and any rejections from ledgers-rds. Fails unless every account has a
-      ledger, and after commit a 'bill' entry created since `since`.
+      ledger, and after commit a 'bill' entry for `invoice-numbers` (or, without
+      them, one created since `since`).
   labels:
     app.kubernetes.io/component: step
     workflows.argoproj.io/creator: billing
@@ -49,7 +51,7 @@ spec:
         enum: ["manual", "before", "after"]
       - { name: wait-for-entry, value: 0s } # wait this long for an entry newer than `since`, then dump regardless
       - { name: since, value: "1970-01-01T00:00:00Z" }
-      - { name: invoice-number, value: "" } # source_reference of the bill entry; empty => any
+      - { name: invoice-numbers, value: "" } # bill entries' source_reference(s), comma-joined; empty => any since `since`
       - { name: cluster-name, value: dev-merit }
       - { name: target-namespace, value: ledgers }
 
@@ -62,7 +64,7 @@ spec:
           - { name: wait-for-entry, value: 0s }
           - { name: since, value: "1970-01-01T00:00:00Z" }
           - { name: entry-type, value: bill } # the ledger_entry type to wait for: bill after a commit, payment after a collection
-          - { name: invoice-number, value: "" } # narrows the entry to one invoice; empty => any
+          - { name: invoice-numbers, value: "" } # comma-joined; given => match by number, ignoring `since`
           # One Secret holds the whole DSN; its password makes query-pg skip
           # RDS IAM.
           - { name: dsn-secret, value: rds-readonly }
@@ -154,9 +156,11 @@ spec:
                     JOIN ids i ON i.account_id = l.account_id
                     UNION ALL
                     SELECT 'ledger_entry', l.account_id::text, l.id::text, l.type::text,
-                    le.type = '{{inputs.parameters.entry-type}}' AND le.created_at >= (SELECT ts FROM since)
-                    AND ('{{inputs.parameters.invoice-number}}' = ''
-                    OR le.source_reference = '{{inputs.parameters.invoice-number}}'),
+                    le.type = '{{inputs.parameters.entry-type}}'
+                    AND CASE WHEN '{{inputs.parameters.invoice-numbers}}' = ''
+                    THEN le.created_at >= (SELECT ts FROM since)
+                    ELSE le.source_reference IN (SELECT btrim(n) FROM
+                    unnest(string_to_array('{{inputs.parameters.invoice-numbers}}', ',')) AS u(n)) END,
                     to_jsonb(le)
                     FROM public.ledger_entry le
                     JOIN public.ledger l ON l.id = le.ledger_id
