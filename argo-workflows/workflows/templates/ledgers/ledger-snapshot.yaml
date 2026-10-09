@@ -1,9 +1,9 @@
 # ledger-snapshot — dump the accounts' ledgers, and judge them. `phase` names the
 # remote Job, which must differ per dispatch.
 #
-# Seven tables, one UNION ALL. Each row is {_table, account_id, bill_entry, row},
-# `row` being the source row as jsonb — so a table gaining a column changes
-# nothing here. account_id is a top-level column too: ORDER BY needs a real one.
+# One UNION ALL; each row is {_table, account_id, ledger_id, ledger_type,
+# bill_entry, row}. Every ledger the account has (sales, budget_plan, …) is
+# included.
 #
 # ⚠️ ::text on the uuids. pgx returns a bare `uuid` as [16]byte, which the ndjson
 # writer prints as [146,37,46,…]. to_jsonb() converts server-side, so only the
@@ -139,19 +139,21 @@ spec:
                     unnest(string_to_array('{{inputs.parameters.account-ids}}', ',')) AS t(x)),
                     since AS (SELECT '{{inputs.parameters.since}}'::timestamptz AS ts)
                     SELECT '_account' AS _table, i.account_id::text AS account_id,
+                    NULL::text AS ledger_id, NULL::text AS ledger_type,
                     false AS bill_entry, to_jsonb(i) AS row
                     FROM ids i
                     UNION ALL
-                    SELECT 'ledger', l.account_id::text,
+                    SELECT 'ledger', l.account_id::text, l.id::text, l.type::text,
                     false, to_jsonb(l)
                     FROM public.ledger l JOIN ids i ON i.account_id = l.account_id
                     UNION ALL
-                    SELECT 'ledger_balance', l.account_id::text, false, to_jsonb(lb)
+                    SELECT 'ledger_balance', l.account_id::text, l.id::text, l.type::text,
+                    false, to_jsonb(lb)
                     FROM public.ledger_balance lb
                     JOIN public.ledger l ON l.id = lb.ledger_id
                     JOIN ids i ON i.account_id = l.account_id
                     UNION ALL
-                    SELECT 'ledger_entry', l.account_id::text,
+                    SELECT 'ledger_entry', l.account_id::text, l.id::text, l.type::text,
                     le.type = '{{inputs.parameters.entry-type}}' AND le.created_at >= (SELECT ts FROM since)
                     AND ('{{inputs.parameters.invoice-number}}' = ''
                     OR le.source_reference = '{{inputs.parameters.invoice-number}}'),
@@ -160,15 +162,36 @@ spec:
                     JOIN public.ledger l ON l.id = le.ledger_id
                     JOIN ids i ON i.account_id = l.account_id
                     UNION ALL
-                    SELECT 'service_split_ledger', l.account_id::text, false, to_jsonb(sl)
+                    SELECT 'service_split_ledger', l.account_id::text, l.id::text, l.type::text,
+                    false, to_jsonb(sl)
                     FROM public.service_split_ledger sl
                     JOIN public.ledger_entry le ON le.id = sl.ledger_entry_id
                     JOIN public.ledger l ON l.id = le.ledger_id
                     JOIN ids i ON i.account_id = l.account_id
                     UNION ALL
-                    SELECT 'rejected_entry', re.account_id::text, false, to_jsonb(re)
+                    SELECT 'unassigned_balance_ledger', l.account_id::text, l.id::text, l.type::text,
+                    false, to_jsonb(ub)
+                    FROM public.unassigned_balance_ledger ub
+                    JOIN public.ledger l ON l.id = ub.ledger_id
+                    JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'unassigned_balance_pot', l.account_id::text, l.id::text, l.type::text,
+                    false, to_jsonb(up)
+                    FROM public.unassigned_balance_pot up
+                    JOIN public.ledger l ON l.id = up.ledger_id
+                    JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'submission_log', l.account_id::text, l.id::text, l.type::text,
+                    false, to_jsonb(s)
+                    FROM public.submission_log s
+                    JOIN public.ledger l ON l.id = s.ledger_id
+                    JOIN ids i ON i.account_id = l.account_id
+                    UNION ALL
+                    SELECT 'rejected_entry', re.account_id::text, NULL, NULL,
+                    false, to_jsonb(re)
                     FROM public.rejected_entry re JOIN ids i ON i.account_id = re.account_id
                     UNION ALL
-                    SELECT 'ledger_creation_failure', f.account_id::text, false, to_jsonb(f)
+                    SELECT 'ledger_creation_failure', f.account_id::text, NULL, f.ledger_type::text,
+                    false, to_jsonb(f)
                     FROM public.ledger_creation_failure f JOIN ids i ON i.account_id = f.account_id
-                    ORDER BY 2, 1
+                    ORDER BY 2, 3 NULLS FIRST, 1
