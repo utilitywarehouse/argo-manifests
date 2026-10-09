@@ -95,6 +95,7 @@ spec:
           - { name: segment-ids }
           - { name: verify, value: "false" }
           - { name: account-ids, value: "" }
+          - { name: invoice-numbers, value: "" } # comma-joined; the after-snapshot accepts an existing entry for them
           - { name: validation-mode, value: attended }
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: billing }
@@ -292,6 +293,10 @@ spec:
                 - {
                     name: since,
                     value: "{{workflow.creationTimestamp.RFC3339}}",
+                  }
+                - {
+                    name: invoice-numbers,
+                    value: "{{inputs.parameters.invoice-numbers}}",
                   }
                 - {
                     name: cluster-name,
