@@ -125,7 +125,10 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: timeout,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: job-name, value: "{{inputs.parameters.job-name}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
@@ -274,7 +277,10 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: timeout,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: job-name, value: "{{inputs.parameters.job-name}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
@@ -431,7 +437,10 @@ spec:
                     name: target-namespace,
                     value: "{{inputs.parameters.target-namespace}}",
                   }
-                - { name: timeout, value: "{{inputs.parameters.timeout}}" }
+                - {
+                    name: timeout,
+                    value: "{{inputs.parameters.job-active-deadline}}",
+                  }
                 - { name: log-level, value: "{{inputs.parameters.log-level}}" }
                 - { name: job-name, value: "{{inputs.parameters.job-name}}" }
                 - { name: teardown, value: "{{inputs.parameters.teardown}}" }
