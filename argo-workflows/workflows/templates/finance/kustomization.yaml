@@ -10,7 +10,7 @@ configMapGenerator:
       annotations:
         config.kubernetes.io/local-config: "true"
     literals:
-      - dd-run=registry.uw.systems/payments/dd-run:chore-payment-wkfl-scripts
+      - dd-run=registry.uw.systems/payments/dd-run:main
       - upload-s3=registry.uw.systems/dev-enablement/upload-s3:main
 generatorOptions:
   disableNameSuffixHash: true
