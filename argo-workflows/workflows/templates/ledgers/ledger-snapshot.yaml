@@ -72,8 +72,10 @@ spec:
           - { name: cluster-name, value: dev-merit }
           - { name: target-namespace, value: ledgers }
           # Named so the conditionals below stay legible.
-          - name: ledger-expr # every account has a ledger — asserted pre-commit
-            value: "len(uniq(map(filter(rows, ._table == 'ledger'), .account_id))) == len(filter(rows, ._table == '_account'))"
+          # every account has a sales ledger — the one bill and payment entries post to;
+          # without it the ledger drops them silently. Asserted pre-commit.
+          - name: ledger-expr
+            value: "len(uniq(map(filter(rows, ._table == 'ledger' && .ledger_type == 'sales'), .account_id))) == len(filter(rows, ._table == '_account'))"
           - name: bill-expr # every account has its `entry-type` entry — waited for post-commit
             value: "len(uniq(map(filter(rows, .bill_entry), .account_id))) == len(filter(rows, ._table == '_account'))"
           - { name: poll-interval, value: "20" }
@@ -111,10 +113,11 @@ spec:
                 - name: assert-message
                   value: >-
                     the ledger does not hold what this run requires: every
-                    account needs a ledger, and a
+                    account needs a sales ledger, and a
                     '{{inputs.parameters.entry-type}}' entry created since
                     `since`. {rowCount} rows dumped — read the _account rows
-                    with no ledger or no such entry beside them.
+                    with no sales ledger or no such entry beside them; a
+                    ledger_creation_failure row says why a sales ledger is missing.
                 - { name: format, value: ndjson }
                 - { name: output, value: /tmp/snap.ndjson }
                 # The dump is the result, emitted once after the poll settles.
