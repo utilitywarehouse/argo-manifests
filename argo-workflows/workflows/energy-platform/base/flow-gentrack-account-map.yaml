@@ -439,7 +439,10 @@ spec:
                     name: dsn-secret,
                     value: "{{inputs.parameters.billing-dsn-secret}}",
                   }
-                - { name: dsn-key, value: "{{inputs.parameters.billing-dsn-key}}" }
+                - {
+                    name: dsn-key,
+                    value: "{{inputs.parameters.billing-dsn-key}}",
+                  }
                 # The readonly DSN carries its password, so IAM goes unused.
                 - { name: vault-sidecar, value: "true" }
                 - {

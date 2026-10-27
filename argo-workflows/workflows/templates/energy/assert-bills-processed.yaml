@@ -83,7 +83,10 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
                 - { name: job-name, value: assert-bills-processed }
-                - { name: dsn-secret, value: "{{inputs.parameters.dsn-secret}}" }
+                - {
+                    name: dsn-secret,
+                    value: "{{inputs.parameters.dsn-secret}}",
+                  }
                 - { name: dsn-key, value: "{{inputs.parameters.dsn-key}}" }
                 - { name: db-type, value: "{{inputs.parameters.db-type}}" }
                 - { name: vault-sidecar, value: "true" }
@@ -171,7 +174,10 @@ spec:
                     value: "{{inputs.parameters.target-namespace}}",
                   }
                 - { name: job-name, value: check-adapter-blobs }
-                - { name: dsn-secret, value: "{{inputs.parameters.dsn-secret}}" }
+                - {
+                    name: dsn-secret,
+                    value: "{{inputs.parameters.dsn-secret}}",
+                  }
                 - { name: dsn-key, value: "{{inputs.parameters.dsn-key}}" }
                 - { name: db-type, value: "{{inputs.parameters.db-type}}" }
                 - { name: vault-sidecar, value: "true" }
