@@ -1,0 +1,46 @@
+# account-holder-mapper's store. The only current source of additional holders:
+# account_api stopped receiving them in 2025-03. No role column.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: data-export-account-holders
+  namespace: qe-argo-workflows
+  annotations:
+    workflows.argoproj.io/description: >-
+      account-holder-mapper holders export from account-platform
+
+  labels:
+    workflows.argoproj.io/creator: qe
+    data.uw.systems/system: account-holders
+    data.uw.systems/capability: data-export
+spec:
+  schedules:
+    - "0 4 * * *" # after legacy-account: same source cluster, don't stack them
+  timezone: Europe/London
+  suspend: true # manual-only until a schedule is intentionally enabled
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: workflow-step-executor
+    workflowMetadata:
+      labels:
+        data.uw.systems/system: account-holders
+        data.uw.systems/capability: data-export
+    workflowTemplateRef:
+      name: step-data-orchestrator-runner
+    arguments:
+      parameters:
+        - { name: mode, value: export }
+        - { name: run-type, value: RUN_TYPE_EXPORT }
+        - { name: system-key, value: account_holders }
+        - { name: label, value: account-holders-export }
+        - { name: adapter-driver, value: cockroachdb }
+        - name: adapter-dsn
+          value: "postgresql://accounts@cockroachdb-proxy:26257/account_holders?sslmode=verify-full"
+        - { name: ca-secret, value: ca-auth-key }
+
+        - { name: image-pull-secret, value: dockerhub-key-fg5t2k8k7t }
+
+        - { name: entities, value: "holders" }
+
+        - { name: timeout, value: 90m }
+        - { name: job-active-deadline, value: 100m }

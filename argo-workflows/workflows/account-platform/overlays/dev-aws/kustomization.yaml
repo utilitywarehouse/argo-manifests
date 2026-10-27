@@ -16,3 +16,7 @@ patches:
       kind: CronWorkflow
       name: data-export-legacy-account
     path: data-export-legacy-account.yaml
+  - target:
+      kind: CronWorkflow
+      name: data-export-account-holders
+    path: data-export-account-holders.yaml

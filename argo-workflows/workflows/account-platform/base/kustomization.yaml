@@ -3,4 +3,5 @@ kind: Kustomization
 
 resources:
   - data-export-account-api.yaml
+  - data-export-account-holders.yaml
   - data-export-legacy-account.yaml
