@@ -62,6 +62,3 @@ spec:
         # Named, not discovered: discovery lists every BASE TABLE, including the
         # schema_migrations / schema_lock bookkeeping.
         - { name: entities, value: "accounts,persons,account_persons" }
-
-        - { name: timeout, value: 240m }
-        - { name: job-active-deadline, value: 250m }
