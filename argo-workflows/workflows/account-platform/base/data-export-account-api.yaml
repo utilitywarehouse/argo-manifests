@@ -1,9 +1,5 @@
-# account-api data export — the account store, 3.5M rows from one table.
-#
-# SCOPE: `accounts` only. persons (4.2M) and its join table account_persons
-# (4.3M) carry name, date of birth, email, phone and address; business_details
-# and sic_codes are lookups. A SQL source has no column allow-list — `fields`
-# narrows only the document-store drivers — so a table comes whole or not at all.
+# account-api data export — accounts (3.5M) and their holders: persons (4.2M) and
+# account_persons (4.3M, role primary_holder / additional_holder).
 #
 # ⚠️ NOT EVERY ACCOUNT. legacy_account holds the accounts this one does not, plus
 # psr_flag and the other legacy-only columns. Separate database, separate DSN,
@@ -65,9 +61,7 @@ spec:
 
         # Named, not discovered: discovery lists every BASE TABLE, including the
         # schema_migrations / schema_lock bookkeeping.
-        - { name: entities, value: "accounts" }
+        - { name: entities, value: "accounts,persons,account_persons" }
 
-        # 3.5M rows, chunked on the `accounts` primary key `id` at the 100k
-        # default. Past the 30m default, comfortably inside this.
-        - { name: timeout, value: 90m }
-        - { name: job-active-deadline, value: 100m }
+        - { name: timeout, value: 240m }
+        - { name: job-active-deadline, value: 250m }
