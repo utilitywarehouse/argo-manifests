@@ -29,7 +29,7 @@ The bundle is **environment-specific**: `environments/dev` binds the dev/qe role
 
 ### 2. Target namespace — data-orchestrator prerequisites
 
-The `data-orchestrator` SA only yields working AWS credentials where the namespace already has the vault → AWS **sidecar-injection** patterns (kyverno `vault-sidecar-aws`). The runner stamps the Job pod with `uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws`; combined with the SA's `vault.uw.systems/aws-role`, that injects AWS creds used for **S3** and **RDS IAM auth** — no AWS keys are stored in the namespace.
+The `data-orchestrator` SA only yields working AWS credentials where the namespace already has the vault → AWS **sidecar-injection** patterns (`vault.uw.systems/aws-credentials: sts-http`). The runner stamps the Job pod with `vault.uw.systems/aws-credentials: sts-http`; combined with the SA's `vault.uw.systems/aws-role`, that injects AWS creds used for **S3** and **RDS IAM auth** — no AWS keys are stored in the namespace.
 
 The team also provides the **adapter's source-DB secret** in their own namespace (e.g. a `POSTGRES_DSN` for the system being exported). That secret is the team's own and is referenced by the per-system CronWorkflow's `adapter-secret` parameter — the platform never distributes it.
 

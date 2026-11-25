@@ -6,8 +6,8 @@ Steps pass data as artifacts in S3. Argo loads a step's input artifacts in an **
 
 Vault provides AWS credentials two ways:
 
-- **Sidecar** (`vault-sidecar-aws`) — serves credentials over a localhost endpoint (`:8098`), started alongside the main containers. Consumers poll it (`until nc 127.0.0.1 8098`) until it is ready.
-- **Init container** (`vault-init-container-aws`) — writes a static credentials file and exits before the pod's other containers start.
+- **Sidecar** (`vault.uw.systems/aws-credentials: sts-http`) — serves credentials over a localhost endpoint (`:8098`), started alongside the main containers. Consumers poll it (`until nc 127.0.0.1 8098`) until it is ready.
+- **Init container** (`vault.uw.systems/aws-credentials: sts-file`) — writes a static credentials file and exits before the pod's other containers start.
 
 Input artifacts load in the **init phase**, before the main containers run. The sidecar is not serving yet then, so it cannot supply credentials to the download.
 
@@ -34,7 +34,7 @@ Three defaults, so workflows need no per-template config (`workflow-controller-c
 # workflowDefaults — request the init-container variant
 podMetadata:
   annotations:
-    uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
+    vault.uw.systems/aws-credentials: sts-file
 
 # artifactRepository — read the file via the AWS SDK chain
 s3:

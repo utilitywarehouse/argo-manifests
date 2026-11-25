@@ -13,15 +13,15 @@
 #                                     source DB; serves the orchestrator on :50051
 #   orchestrator            sidecar   the data-orchestrator; owns the SHARED RDS + the
 #                                     S3 output bucket; serves gRPC on :8090
-#   vault-credentials-agent sidecar   INJECTED by Kyverno (see the annotation below); a native
+#   vault-credentials-agent-aws       INJECTED by an admission policy (see the annotation below); a native
 #                                     sidecar WITH a startupProbe that serves AWS creds on the port
 #                                     in AWS_CONTAINER_CREDENTIALS_FULL_URI (8498 today, it has moved).
-#                                     Kyverno appends it LAST in initContainers — we can't move it.
+#                                     The policy puts it FIRST in initContainers — we can't move it.
 #   trigger                 main      StartRun, then poll GetRunStatus to completion
 #
 # Startup ordering is deliberate: adapter (ready) → orchestrator → trigger. The adapter is
-# sequenced ahead of the orchestrator so its boot-time RDS/IAM call lands after the kyverno
-# vault-sidecar-aws is serving creds (that race crashed the orchestrator on cold start).
+# sequenced ahead of the orchestrator so its boot-time RDS/IAM call lands after the
+# vault-credentials-agent-aws sidecar is serving creds (that race crashed the orchestrator on cold start).
 #
 # Two look-alike settings that mean DIFFERENT things per container — do not conflate:
 #   DB_DSN         orchestrator → shared orchestrator RDS (IAM auth, passwordless)
@@ -292,7 +292,7 @@ spec:
                       template:
                         metadata:
                           annotations:
-                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                            vault.uw.systems/aws-credentials: "sts-http"
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
@@ -331,7 +331,7 @@ spec:
                               command: ["/bin/sh", "-c"]
                               args:
                                 - |
-                                  # Port from the env var Kyverno injects beside the sidecar, not a literal:
+                                  # Port from the env var the admission policy injects beside the sidecar, not a literal:
                                   # it moved 8098 -> 8498 and this loop then waited out its 150 tries on
                                   # every run. It is what the AWS SDK resolves credentials from, so a wrong
                                   # value breaks the container anyway and the two cannot drift apart.
@@ -409,7 +409,7 @@ spec:
                               command: ["/bin/sh", "-c"]
                               args:
                                 - |
-                                  # Port from the env var Kyverno injects beside the sidecar, not a literal:
+                                  # Port from the env var the admission policy injects beside the sidecar, not a literal:
                                   # it moved 8098 -> 8498 and this loop then waited out its 150 tries on
                                   # every run. It is what the AWS SDK resolves credentials from, so a wrong
                                   # value breaks the container anyway and the two cannot drift apart.

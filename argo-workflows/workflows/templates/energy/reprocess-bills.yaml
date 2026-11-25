@@ -239,7 +239,7 @@ spec:
                       template:
                         metadata:
                           annotations:
-                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                            vault.uw.systems/aws-credentials: "sts-http"
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
@@ -459,7 +459,7 @@ spec:
                       template:
                         metadata:
                           annotations:
-                            uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws
+                            vault.uw.systems/aws-credentials: "sts-http"
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:

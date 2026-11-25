@@ -9,7 +9,7 @@ data:
       serviceAccountName: workflow-step-executor
       podMetadata:
         annotations:
-          uw.systems/kyverno-inject-sidecar-request: vault-init-container-aws
+          vault.uw.systems/aws-credentials: "sts-file"
       # DNS. A lost UDP packet to kube-dns is what `wget: bad address
       # 'vault-ca-cert.sys-vault:8100'` is — the vault-credentials init above,
       # failing in a flat 5s against a healthy Service.

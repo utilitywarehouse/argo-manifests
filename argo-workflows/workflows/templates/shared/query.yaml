@@ -86,7 +86,7 @@ spec:
           - { name: ca-config, value: "" }
           - { name: ca-address-key, value: ca.endpoint }
           - { name: ca-profile-key, value: ca.node.profile }
-          - { name: vault-sidecar, value: "false" } # Kyverno-injected vault-sidecar-aws, for RDS IAM
+          - { name: vault-sidecar, value: "false" } # vault-credentials-agent-aws sidecar (aws-credentials: sts-http), for RDS IAM
           - {
               name: query-pg-image,
               value: "registry.uw.systems/dev-enablement/query-pg:main",
@@ -143,7 +143,7 @@ spec:
                       template:
                         metadata:
                           annotations:
-                            {{=inputs.parameters['vault-sidecar'] == 'true' ? 'uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws' : 'workflows.argoproj.io/query: step-query'}}
+                            {{=inputs.parameters['vault-sidecar'] == 'true' ? 'vault.uw.systems/aws-credentials: sts-http' : 'workflows.argoproj.io/query: step-query'}}
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
