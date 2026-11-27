@@ -12,8 +12,8 @@
 # S3 CREDENTIALS. The upload Job borrows `dd-files-s3-uploader`, the service
 # account that writes this bucket in the first place: its
 # `vault.uw.systems/aws-role` names the role, and the pod annotation
-# `uw.systems/kyverno-inject-sidecar-request: vault-sidecar-aws` makes Kyverno
-# inject the vault-credentials-agent that serves it on
+# `vault.uw.systems/aws-credentials: sts-http` makes an admission policy
+# inject the vault-credentials-agent-aws sidecar that serves it on
 # AWS_CONTAINER_CREDENTIALS_FULL_URI. Both are required — the SA alone gets
 # nothing.
 #
@@ -445,7 +445,7 @@ spec:
           - { name: sse, value: AES256 }
           - { name: aws-region, value: eu-west-1 }
           - { name: runner-sa, value: dd-files-s3-uploader }
-          - { name: vault-sidecar, value: vault-sidecar-aws }
+          - { name: vault-sidecar, value: sts-http }
           - { name: image-pull-secret, value: dockerhub-key }
           - { name: log-level, value: info }
           - { name: timeout, value: 10m }
@@ -485,9 +485,9 @@ spec:
                       template:
                         metadata:
                           annotations:
-                            # Kyverno reads this and injects the
-                            # vault-credentials-agent that serves the SA's AWS role.
-                            uw.systems/kyverno-inject-sidecar-request: {{inputs.parameters.vault-sidecar}}
+                            # An admission policy reads this and injects the
+                            # vault-credentials-agent-aws sidecar that serves the SA's AWS role.
+                            vault.uw.systems/aws-credentials: {{inputs.parameters.vault-sidecar}}
                         spec:
                           serviceAccountName: {{inputs.parameters.runner-sa}}
                           imagePullSecrets:
