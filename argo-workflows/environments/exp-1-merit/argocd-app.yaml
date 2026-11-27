@@ -9,7 +9,7 @@ metadata:
 spec:
   project: qe
   source:
-    repoURL: git@github.com:utilitywarehouse/argo-manifests.git
+    repoURL: https://github.com/utilitywarehouse/argo-manifests.git
     targetRevision: main
     path: argo-workflows/environments/exp-1-merit
   destination:
